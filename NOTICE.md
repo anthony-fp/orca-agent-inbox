@@ -1,6 +1,6 @@
 # Notice
 
-Parts of this plugin are copied from the inbox repo, `github.com/anthony-fp/inbox`, at commit `272b367`, under its MIT license (see `LICENSE`).
+Parts of this plugin are copied from the inbox repo, `github.com/anthony-fp/inbox`, at commit `272b367`, under its MIT license (see `LICENSE`). That repo is a fork of [petekp/inbox](https://github.com/petekp/inbox), the original inbox for Claude Code. The copied code was written in that project.
 
 | File here | Copied from | Changes |
 |---|---|---|
