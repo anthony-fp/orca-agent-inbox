@@ -1,4 +1,4 @@
-// The types the copied ledger and model-text code uses, from the inbox repo's types/index.d.ts, unchanged.
+// The types the copied ledger, model-text, tools and plan code uses, from the inbox repo's types/index.d.ts, unchanged.
 
 export type Card = {
   goal: string
@@ -107,3 +107,13 @@ export type Press = { id: string; action: 'answer' | 'explain' | 'run' | 'done' 
 
 /** The inbox text the agent last read beside a prompt, and the closed items it was told about. */
 export type Told = { inbox: string | null; closed: string[] }
+
+export type StepMark = 'waiting' | 'current' | 'done'
+
+export type PlanStep = { text: string; mark: StepMark }
+
+/** A heading and its steps. A task is open while one of its steps is current. */
+export type PlanTask = { title: string; steps: PlanStep[]; isOpen: boolean }
+
+/** A session's plan, as `parsePlan` in `hooks/plan.ts` reads it. */
+export type PlanView = { tasks: PlanTask[]; done: number; total: number; current: PlanStep[] }
