@@ -1,5 +1,5 @@
-// Presses on a row (spec step 6, plan T7). Answer types the answer into the agent's terminal, only when the
-// agent waits at its prompt. Done and Dismiss close the row in the plugin's own state; nothing goes to the agent.
+// Presses on a row (spec step 6, plan T7). Answer types the answer, or a task's reply, into the agent's terminal,
+// only when the agent waits at its prompt. A step that runs a command goes the same way; the panel does the other steps. Done and Dismiss close the row in the plugin's own state; nothing goes to the agent.
 //
 // The send check (audit fix 2): each press carries the terminal, session and `drawn` token the row was drawn with.
 // In the same tick as the send, the worker checks that the terminal still maps to that session, that the newest
@@ -7,7 +7,7 @@
 // check holds the answer ("Waits for the agent"). A send whose result is not certain reads "Not delivered". The
 // plugin never sends a held or undelivered answer again by itself.
 import { closeItem } from './core/ledger'
-import { nowRows, type NowRow } from './core/now'
+import { nowRows, stepsOf, type NowGroups, type NowRow } from './core/now'
 import type { Item } from './core/types'
 import type { PressLabel, SessionState, State } from './state'
 import { promptAfter } from './transcript'
@@ -32,9 +32,15 @@ export type PressInput = {
   drawn: string
   /** The item id of the row. */
   id: string
-  action: 'answer' | 'done' | 'dismiss'
+  /**
+   * `answer` sends the words: a question's option or typed answer, or a task's typed reply. `step` asks the agent to
+   * run a step's command.
+   */
+  action: 'answer' | 'done' | 'dismiss' | 'step'
   /** The option or typed words, for `answer`. */
   answer?: string
+  /** For `step`: its place among the row's steps and its label, which must still match. */
+  step?: { index: number; label: string }
 }
 
 export type PressOutcome =
@@ -58,9 +64,42 @@ export function drawnToken(s: SessionState): string {
   return JSON.stringify([s.lastTurnId, s.queue.map(t => t.turnId)])
 }
 
-/** The inbox mod's answer message (`messages.answer` in the inbox repo's `hooks/presses.ts`), on one line: a newline would submit early. */
+/** A message on one line: a newline would submit early. */
+function oneLine(text: string): string {
+  return text.replace(/\s*[\r\n]+\s*/g, ' ').trim()
+}
+
+/**
+ * The inbox mod's message for typed words, by the row's kind (`messages.answer` and `messages.taskReply` in the inbox
+ * repo's `hooks/presses.ts`), on one line: a newline would submit early. An option press sends `messages.answer` too.
+ */
 export function answerText(item: Item, answer: string): string {
-  return `Re "${item.ask}": ${answer}`.replace(/\s*[\r\n]+\s*/g, ' ').trim()
+  return oneLine(item.kind === 'task' ? `Re the task you left for me, "${item.ask}": ${answer}` : `Re "${item.ask}": ${answer}`)
+}
+
+/** The inbox mod's message for a step's command (`messages.run` in `hooks/presses.ts`), on one line. */
+export function runText(item: Item, command: string): string {
+  return oneLine(`For "${item.ask}", run this:\n\`\`\`\n${command}\n\`\`\``)
+}
+
+/** The message a press sends and what its label records, or null when the press is stale or sends nothing. */
+function sendOf(item: Item, p: PressInput): { kind: PressLabel['kind']; answer: string; text: string } | null {
+  if (p.action === 'step') {
+    const step = p.step ? stepsOf(item.helps)[p.step.index] : undefined
+    if (!step || step.label !== p.step?.label) return null
+    const run = step.helps.find(h => h.kind === 'run')
+    return run ? { kind: 'step', answer: step.label, text: runText(item, run.command) } : null
+  }
+  const words = p.answer?.trim() ?? ''
+  if (!words) return null
+  return { kind: item.kind === 'task' ? 'reply' : 'answer', answer: words, text: answerText(item, words) }
+}
+
+/** The label "✓ <what>" once the prompt shows: "✓ Answered", "✓ Replied", or the step's label, as the inbox's "✓ <press>". */
+const DONE_TEXT: Record<PressLabel['kind'], (label: PressLabel) => string> = {
+  answer: () => '✓ Answered',
+  reply: () => '✓ Replied',
+  step: label => `✓ ${label.answer}`,
 }
 
 export function rowLabel(label: PressLabel): RowLabel {
@@ -68,7 +107,7 @@ export function rowLabel(label: PressLabel): RowLabel {
     case 'sending':
       return { text: 'Sending…', tone: 'muted', copy: null }
     case 'answered':
-      return { text: '✓ Answered', tone: 'success', copy: null }
+      return { text: DONE_TEXT[label.kind](label), tone: 'success', copy: null }
     case 'held':
       return { text: 'Waits for the agent', tone: 'muted', copy: label.text }
     case 'undelivered':
@@ -76,11 +115,14 @@ export function rowLabel(label: PressLabel): RowLabel {
   }
 }
 
-/** The session's open rows, from nowRows, each with its press label. */
-export function labelledRows(s: SessionState): { questions: LabelledRow[]; tasks: LabelledRow[] } {
-  const { questions, tasks } = nowRows(s.ledger)
+/** The session's open rows and closed lists, from nowRows, each open row with its press label. */
+export function labelledRows(
+  s: SessionState,
+  now = 0,
+): { questions: LabelledRow[]; tasks: LabelledRow[]; closed: NowGroups['closed'] } {
+  const { questions, tasks, closed } = nowRows(s.ledger, now)
   const add = (r: NowRow): LabelledRow => ({ ...r, label: s.presses[r.id] ? rowLabel(s.presses[r.id]) : null })
-  return { questions: questions.map(add), tasks: tasks.map(add) }
+  return { questions: questions.map(add), tasks: tasks.map(add), closed }
 }
 
 /** The send check, in one tick. Null when the send may go, else why it holds. */
@@ -135,8 +177,8 @@ export function createPresses(deps: PressDeps) {
         return { ok: true, label: null }
       }
 
-      const words = p.answer?.trim() ?? ''
-      if (!words) return { ok: false, refused: 'invalid' }
+      const first = before.ledger.items.find(i => i.id === p.id)
+      if (!first || !sendOf(first, p)) return { ok: false, refused: 'invalid' }
       // Where the answer's prompt will start. Read before the check, so nothing waits between the check and the send.
       const bytes = await deps.read(p.sessionId)
 
@@ -145,7 +187,9 @@ export function createPresses(deps: PressDeps) {
       const s = state.sessions[p.sessionId]
       const item = s?.ledger.items.find(i => i.id === p.id)
       if (!s || !item) return { ok: false, refused: 'closed' }
-      const label: PressLabel = { state: 'sending', answer: words, text: answerText(item, words), at: clock.now() }
+      const sent = sendOf(item, p)
+      if (!sent) return { ok: false, refused: 'invalid' }
+      const label: PressLabel = { state: 'sending', ...sent, at: clock.now() }
       const status = deps.status(p.terminalId)
       const why = sendCheck(state, status, p)
       if (why) {

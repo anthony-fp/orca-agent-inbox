@@ -161,7 +161,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): void {
       // agents.list gives the combined state: `done` there means the main agent is done too.
       if (!statuses.has(agent.terminalId) && STATES.includes(agent.state)) statuses.set(agent.terminalId, agent.state as TerminalStatus)
       unread += s.unread
-      sections.push({ terminalId: agent.terminalId, sessionId, title: agent.title ?? 'Claude Code', drawn: drawnToken(s), lastActivity: s.touchedAt, ...labelledRows(s) })
+      sections.push({ terminalId: agent.terminalId, sessionId, title: agent.title ?? 'Claude Code', drawn: drawnToken(s), lastActivity: s.touchedAt, ...labelledRows(s, deps.clock.now()) })
     }
     sections.sort((a, b) => b.lastActivity - a.lastActivity)
     return { sections, untracked, unread }

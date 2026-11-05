@@ -70,9 +70,12 @@ function openLabels(ledger: Ledger, presses: Record<string, PressLabel>): Record
   return Object.fromEntries(Object.entries(presses).filter(([id]) => ledger.items.some(i => i.id === id)))
 }
 
-/** The press a turn answers: the answer whose prompt has the turn's id. */
+/**
+ * The press a turn answers: the answer whose prompt has the turn's id. A task's reply or a step is no answer: its row
+ * stays open, and the model reads the turn as the inbox's does.
+ */
 function pressFor(s: SessionState, turnId: string): { press: Press; answer: string } | null {
-  const hit = Object.entries(s.presses).find(([, l]) => l.turnId === turnId)
+  const hit = Object.entries(s.presses).find(([, l]) => l.turnId === turnId && l.kind === 'answer')
   return hit ? { press: { id: hit[0], action: 'answer' }, answer: hit[1].answer } : null
 }
 

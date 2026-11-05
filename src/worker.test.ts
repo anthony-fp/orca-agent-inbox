@@ -12,6 +12,7 @@ const WS = { id: 'ws-1', kind: 'worktree', name: 'one', path: '/work/my_app.v2',
 const S = '0b0b0b0b-1111-4222-8333-444444444444'
 const FILE = transcriptPath(HOME, WS.path, S)
 const DAY = 24 * 60 * 60 * 1000
+const NONE = { shown: [], total: 0 }
 
 const prompt = (uuid: string, text: string) =>
   JSON.stringify({ type: 'user', uuid, isSidechain: false, origin: { kind: 'human' }, turnPosition: { promptIndex: 1, turnIndex: 1 }, message: { role: 'user', content: text } }) + '\n'
@@ -185,10 +186,35 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
         title: 'Fixer',
         drawn: JSON.stringify(['p-1', []]),
         lastActivity: 100 * DAY,
-        questions: [{ id, text: 'Ship the parser today?', options: ['Yes', 'No'], label: null }],
+        questions: [
+          {
+            id,
+            // The ledger's turn is not the batch's, so the question is not numbered, as in the inbox.
+            handle: '',
+            text: 'Ship the parser today?',
+            age: '100d',
+            rec: 'Yes',
+            choices: [
+              { option: 'Yes', label: 'Yes', isRec: true, isFolded: false },
+              { option: 'No', label: 'No', isRec: false, isFolded: false },
+            ],
+            steps: [],
+            label: null,
+          },
+        ],
         tasks: [],
+        closed: { questions: NONE, tasks: NONE },
       },
-      { terminalId: 'term-2', sessionId: 's-2', title: 'Older', drawn: JSON.stringify([null, []]), lastActivity: 100 * DAY - 5, questions: [], tasks: [] },
+      {
+        terminalId: 'term-2',
+        sessionId: 's-2',
+        title: 'Older',
+        drawn: JSON.stringify([null, []]),
+        lastActivity: 100 * DAY - 5,
+        questions: [],
+        tasks: [],
+        closed: { questions: NONE, tasks: NONE },
+      },
     ],
     untracked: 2,
     unread: 1,

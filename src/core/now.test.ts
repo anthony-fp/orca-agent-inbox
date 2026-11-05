@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import { EMPTY, applyUpdate, closeItem, parseReply } from './ledger'
-import { nowRows } from './now'
+import { OPTIONS_FOLD_AT, choices, nowRows, shortAgo, stepsOf } from './now'
 
 const REPLY = [
   'NEW: decide | 1 | Rename greet.mjs to hello.mjs? | Yes / No | yes',
@@ -12,18 +12,60 @@ const REPLY = [
 
 const ledger = applyUpdate({ ...EMPTY, turn: 1 }, parseReply(REPLY)!, 1000, 1)
 
+const HOUR = 60 * 60 * 1000
+const NONE = { shown: [], total: 0 }
+
 test('an empty ledger has no rows', () => {
-  assert.deepEqual(nowRows(EMPTY), { questions: [], tasks: [] })
+  assert.deepEqual(nowRows(EMPTY), { questions: [], tasks: [], closed: { questions: NONE, tasks: NONE } })
 })
 
-test('open questions keep their options, and tasks come apart from questions', () => {
-  assert.deepEqual(nowRows(ledger), {
-    questions: [
-      { id: 'i1', text: 'Rename greet.mjs to hello.mjs?', options: ['Yes', 'No'] },
-      { id: 'i2', text: 'Cut CHANGELOG.md down to this release?', options: [] },
-    ],
-    tasks: [{ id: 'i3', text: 'Test pinch zoom on your Mac', options: [] }],
-  })
+test('open questions keep their options and rec, number and age, and tasks come apart from questions', () => {
+  const { questions, tasks } = nowRows(ledger, 1000 + 2 * HOUR)
+  assert.deepEqual(questions, [
+    {
+      id: 'i1',
+      handle: '1)',
+      text: 'Rename greet.mjs to hello.mjs?',
+      age: '2h',
+      rec: 'Yes',
+      choices: [
+        { option: 'Yes', label: 'Yes', isRec: true, isFolded: false },
+        { option: 'No', label: 'No', isRec: false, isFolded: false },
+      ],
+      steps: [],
+    },
+    { id: 'i2', handle: '2)', text: 'Cut CHANGELOG.md down to this release?', age: '2h', rec: null, choices: [], steps: [] },
+  ])
+  assert.deepEqual(tasks, [
+    { id: 'i3', handle: '', text: 'Test pinch zoom on your Mac', age: '2h', rec: null, choices: [], steps: [] },
+  ])
+})
+
+test('the recommended option comes first, and options past the limit fold after the fourth', () => {
+  const options = ['A', 'B', 'C', 'D', 'E', 'F']
+  const shown = choices({ options, rec: 'C' })
+  assert.deepEqual(shown.map(c => c.option), ['C', 'A', 'B', 'D', 'E', 'F'])
+  assert.deepEqual(shown.map(c => c.isRec), [true, false, false, false, false, false])
+  assert.deepEqual(shown.map(c => c.isFolded), [false, false, false, false, true, true])
+  // At the limit nothing folds; a rec that is not an option changes nothing.
+  assert.ok(choices({ options: options.slice(0, OPTIONS_FOLD_AT), rec: 'Z' }).every(c => !c.isFolded && !c.isRec))
+  assert.equal(choices({ options: ['x'.repeat(40)], rec: null })[0].label, `${'x'.repeat(31)}…`)
+})
+
+test("steps take the inbox's labels and kinds: a run hands off, and a copy joins an open", () => {
+  const run = { kind: 'run' as const, command: 'psql -f checks/friday.sql', name: 'Friday check query' }
+  const link = { kind: 'link' as const, url: 'https://example.com/runbook', name: null }
+  assert.deepEqual(stepsOf([run, link]), [
+    { label: 'Run Friday check query', kind: 'handoff', helps: [run] },
+    { label: 'Open example.com', kind: 'local', helps: [link] },
+  ])
+  const copy = { kind: 'copy' as const, text: 'PORT=4000', name: 'env line' }
+  const open = { kind: 'open' as const, path: 'config/.env' }
+  assert.deepEqual(stepsOf([copy, open]), [{ label: 'Copy env line and open .env', kind: 'local', helps: [copy, open] }])
+})
+
+test('the age reads as the inbox shortAgo does', () => {
+  assert.deepEqual([shortAgo(0), shortAgo(5 * 60_000), shortAgo(2 * HOUR), shortAgo(72 * HOUR)], ['now', '5m', '2h', '3d'])
 })
 
 test('the newest reply comes first', () => {
@@ -34,9 +76,21 @@ test('the newest reply comes first', () => {
   )
 })
 
-test('closed items are left out', () => {
-  const closed = closeItem(closeItem(ledger, 'i1', { how: 'answered', outcome: 'Yes' }, 2000), 'i3', { how: 'done', outcome: 'done' }, 2000)
-  const rows = nowRows(closed)
+test('closed items leave the open rows and show in their group, newest first, three at most', () => {
+  const closed = closeItem(closeItem(ledger, 'i1', { how: 'answered', outcome: 'yes' }, 2000), 'i3', { how: 'done', outcome: 'done' }, 3000)
+  const rows = nowRows(closed, 3000 + HOUR)
   assert.deepEqual(rows.questions.map(r => r.id), ['i2'])
   assert.deepEqual(rows.tasks, [])
+  assert.deepEqual(rows.closed, {
+    questions: { shown: [{ id: 'i1', mark: '✓', text: 'Rename greet.mjs to hello.mjs?', outcome: 'Yes', age: '1h' }], total: 1 },
+    tasks: { shown: [{ id: 'i3', mark: '✓', text: 'Test pinch zoom on your Mac', outcome: 'Done', age: '1h' }], total: 1 },
+  })
+  let many = closed
+  for (let n = 0; n < 4; n++) {
+    many = applyUpdate({ ...many, turn: many.turn + 1 }, parseReply(`NEW: decide | - | Q${n}? | - | -`)!, 4000, many.turn + 1)
+    many = closeItem(many, many.items.find(i => i.ask === `Q${n}?`)!.id, { how: 'dismissed', outcome: 'dismissed' }, 4000 + n)
+  }
+  const group = nowRows(many, 5000).closed.questions
+  assert.equal(group.total, 5)
+  assert.deepEqual(group.shown.map(c => [c.text, c.mark]), [['Q3?', '✕'], ['Q2?', '✕'], ['Q1?', '✕']])
 })

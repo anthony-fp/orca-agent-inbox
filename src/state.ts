@@ -38,7 +38,12 @@ export type SessionState = {
  */
 export type PressLabel = {
   state: 'sending' | 'answered' | 'held' | 'undelivered'
-  /** The answer the person gave, for the row's close when the answering turn runs. */
+  /**
+   * What the press sent: a question's answer, a task's typed reply, or a step that asks the agent to run a command.
+   * Only an answer closes its row when its turn runs. A label saved before presses kept this is an answer.
+   */
+  kind: 'answer' | 'reply' | 'step'
+  /** The answer the person gave, for the row's close when the answering turn runs, or the step's label. */
   answer: string
   /** The message typed into the terminal, or that Copy copies. */
   text: string
@@ -80,6 +85,7 @@ function upgradeLabel(raw: unknown): PressLabel[] {
   if (!isObject(raw) || !LABEL_STATES.includes(raw.state as PressLabel['state']) || typeof raw.text !== 'string') return []
   const label: PressLabel = {
     state: raw.state === 'sending' ? 'undelivered' : (raw.state as PressLabel['state']),
+    kind: raw.kind === 'reply' || raw.kind === 'step' ? raw.kind : 'answer',
     answer: typeof raw.answer === 'string' ? raw.answer : '',
     text: raw.text,
     at: Number(raw.at) || 0,

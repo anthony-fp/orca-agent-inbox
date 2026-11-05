@@ -4,7 +4,8 @@ import { describe, test } from 'node:test'
 
 import { EMPTY, applyUpdate, parseReply } from './core/ledger'
 import type { ModelResult } from './model'
-import { CONFIRM_MS, answerText, createPresses, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
+import { CONFIRM_MS, answerText, createPresses, runText, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
+import type { Help } from './core/types'
 import { upgradeState } from './state'
 import { fakeClock } from './test-clock'
 import { createTracker } from './turns'
@@ -12,6 +13,7 @@ import { createTracker } from './turns'
 const S = 'session-1'
 const T = 'terminal-1'
 const ASK = 'Ship the parser today?'
+const TASK = 'Test the build on your Mac'
 
 const prompt = (uuid: string, text: string) =>
   JSON.stringify({ type: 'user', uuid, isSidechain: false, origin: { kind: 'human' }, turnPosition: { promptIndex: 1, turnIndex: 1 }, message: { role: 'user', content: text } }) + '\n'
@@ -25,7 +27,7 @@ const okModel = (calls: string[]) => async (p: string): Promise<ModelResult> => 
   return { ok: true, update, text: '', ms: 1 }
 }
 
-async function setup(opts: { accepted?: boolean } = {}) {
+async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?: Help[] } = {}) {
   const time = fakeClock(1000)
   const saved = new Map<string, unknown>()
   const storage = { get: async (k: string) => saved.get(k) ?? null, set: async (k: string, v: unknown) => void saved.set(k, structuredClone(v)) }
@@ -39,9 +41,11 @@ async function setup(opts: { accepted?: boolean } = {}) {
   }
   const tracker = createTracker({ storage, clock: time.clock, read, model: okModel(modelCalls) })
   await tracker.track(T, S)
-  const update = parseReply(`NEW: decide | 1 | ${ASK} | Yes / No | yes`)
+  const update = parseReply(opts.kind === 'do' ? `NEW: do | - | ${TASK} | - | -` : `NEW: decide | 1 | ${ASK} | Yes / No | yes`)
   assert.ok(update)
-  await tracker.edit(S, s => ({ ...s, offset: file.text.length, lastTurnId: 'p-1', ledger: applyUpdate(EMPTY, update, 0, 1) }))
+  const ledger = applyUpdate(EMPTY, update, 0, 1)
+  const withHelps = opts.helps ? { ...ledger, items: ledger.items.map(i => ({ ...i, helps: opts.helps! })) } : ledger
+  await tracker.edit(S, s => ({ ...s, offset: file.text.length, lastTurnId: 'p-1', ledger: withHelps }))
 
   const status = new Map<string, TerminalStatus>([[T, 'done']])
   const sent: { terminalId: string; text: string }[] = []
@@ -59,7 +63,7 @@ async function setup(opts: { accepted?: boolean } = {}) {
   const s = () => tracker.state().sessions[S]
   const item = s().ledger.items[0]
   const input = (over: Partial<PressInput> = {}): PressInput => ({ terminalId: T, sessionId: S, drawn: drawnToken(s()), id: item.id, action: 'answer', answer: 'Yes', ...over })
-  const label = () => labelledRows(s()).questions.find(r => r.id === item.id)?.label ?? null
+  const label = () => [...labelledRows(s()).questions, ...labelledRows(s()).tasks].find(r => r.id === item.id)?.label ?? null
   return { time, tracker, presses, status, sent, file, input, label, item, s, saved, modelCalls, beforeSend: (f: () => void) => (onRead = f) }
 }
 
@@ -177,6 +181,50 @@ describe('presses', () => {
   })
 
   test('an answer goes on one line', () => {
-    assert.equal(answerText({ ask: 'Pick\none?' } as never, 'a\nb'), 'Re "Pick one?": a b')
+    assert.equal(answerText({ kind: 'question', ask: 'Pick\none?' } as never, 'a\nb'), 'Re "Pick one?": a b')
+    assert.equal(
+      answerText({ kind: 'task', ask: 'Run\nit' } as never, 'ran\nit'),
+      'Re the task you left for me, "Run it": ran it',
+    )
+  })
+
+  test("a run step sends the inbox's run message on one line, reads \"✓ <step>\", and leaves the row open", async () => {
+    const run: Help = { kind: 'run', command: 'psql -f checks/friday.sql', name: 'Friday check query' }
+    const t = await setup({ kind: 'do', helps: [run] })
+    const sent = `For "${TASK}", run this: \`\`\` psql -f checks/friday.sql \`\`\``
+    assert.equal(runText(t.item, run.command), sent)
+    await t.presses.press(t.input({ action: 'step', answer: undefined, step: { index: 0, label: 'Run Friday check query' } }))
+    assert.deepEqual(t.sent, [{ terminalId: T, text: sent }])
+    t.file.text += prompt('p-2', sent)
+    await t.time.run(t.time.now() + 2000)
+    assert.deepEqual(t.label(), { text: '✓ Run Friday check query', tone: 'success', copy: null })
+    t.file.text += reply('a-2', 'Ran it.')
+    void t.tracker.done(T)
+    await t.time.run()
+    assert.deepEqual(t.s().ledger.closed, [])
+  })
+
+  test('a step press whose step changed since the draw is refused and sends nothing', async () => {
+    const run: Help = { kind: 'run', command: 'make check', name: null }
+    const t = await setup({ kind: 'do', helps: [run] })
+    for (const step of [{ index: 0, label: 'Run something else' }, { index: 3, label: 'Run make check' }])
+      assert.deepEqual(await t.presses.press(t.input({ action: 'step', step })), { ok: false, refused: 'invalid' })
+    assert.deepEqual(t.sent, [])
+  })
+
+  test("a task's reply sends the inbox's task message, reads \"✓ Replied\", and leaves the task open", async () => {
+    const t = await setup({ kind: 'do' })
+    const sent = `Re the task you left for me, "${TASK}": Ran it, all green`
+    await t.presses.press(t.input({ answer: 'Ran it, all green' }))
+    assert.deepEqual(t.sent, [{ terminalId: T, text: sent }])
+    t.file.text += prompt('p-2', sent)
+    await t.time.run(t.time.now() + 2000)
+    assert.deepEqual(t.label(), { text: '✓ Replied', tone: 'success', copy: null })
+    t.file.text += reply('a-2', 'Good.')
+    void t.tracker.done(T)
+    await t.time.run()
+    assert.equal(t.modelCalls.length, 1)
+    assert.deepEqual(t.s().ledger.closed, [], 'the reply closes nothing: the model decides')
+    assert.ok(t.s().ledger.items.some(i => i.id === t.item.id))
   })
 })

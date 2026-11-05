@@ -1,4 +1,5 @@
 // The panel <-> worker contract, declared once: src/panel.tsx and src/worker.ts both read it.
+import type { NowGroups } from './core/now'
 import type { LabelledRow, PressInput, PressOutcome } from './presses'
 
 /** One tracked agent in the focused workspace. */
@@ -12,6 +13,8 @@ export type InboxSection = {
   lastActivity: number
   questions: LabelledRow[]
   tasks: LabelledRow[]
+  /** Each group's closed items, newest first, for its "N closed" fold. */
+  closed: NowGroups['closed']
 }
 
 export type InboxView = {
@@ -26,7 +29,7 @@ declare module 'orca' {
   interface PluginRequests {
     /** The focused workspace's tracked agents, each with its open rows and press labels. */
     'inbox.view': { output: InboxView }
-    /** Answer, Done or Dismiss on one row. The answer's label also arrives in the next view. */
+    /** An option, a typed reply, Done or Dismiss on one row. A sent reply's label also arrives in the next view. */
     'inbox.press': { input: PressInput; output: PressOutcome }
   }
   interface PluginPanelEvents {
