@@ -358,3 +358,45 @@ test('repro: a launch workspaceId that workspace.list does not give still finds 
   await t.worker.deactivate()
   await again.worker.deactivate()
 })
+
+/** The worker over a mock host whose log lines are kept, and whose storage load can be held forever. */
+async function logged(opts: { hang?: boolean } = {}) {
+  const time = fakeClock(100 * DAY)
+  const logs: string[] = []
+  const host = mockHost({ storage: {}, results: { 'agents.list': { agents: [] } } })
+  const deps = { clock: time.clock, home: HOME, tools: null, copy: async () => {}, model: async (): Promise<ModelResult> => ({ ok: false, reason: 'failed', detail: '', ms: 1 }), listDirs: async () => [], readFile: async () => null }
+  const hung = { get: () => new Promise<never>(() => {}), set: async () => {}, delete: async () => {} }
+  const wrap = (orca: Parameters<typeof createWorker>[0]) =>
+    ({ ...orca, log: (m: string) => void logs.push(m), ...(opts.hang ? { storage: hung } : {}) }) as typeof orca
+  const worker = await mountWorker({ default: (orca: Parameters<typeof createWorker>[0]) => createWorker(wrap(orca), deps) }, { host })
+  await time.run()
+  return { worker, time, logs, launches: () => logs.filter(l => l.startsWith('launch: ')) }
+}
+
+test('each launch logs one line with its tag and why it was not tagged, never the command', async () => {
+  const t = await logged()
+  assert.equal(t.logs[0], 'start: hooks registered')
+  await t.worker.hooks.fire('agent.launch.before', launch('claude "secret prompt"', { workspaceKind: 'worktree' }))
+  await t.worker.hooks.fire('agent.launch.before', launch('codex', { agent: 'codex' }))
+  await t.worker.hooks.fire('agent.launch.before', launch('claude', { terminalId: undefined, workspaceKind: 'folder' }))
+  await t.worker.hooks.fire('agent.launch.before', launch('claude --continue'))
+  assert.deepEqual(t.launches(), [
+    'launch: agent=claude terminal=yes workspaceKind=worktree tagged=new tools=no reason=-',
+    'launch: agent=codex terminal=yes workspaceKind=none tagged=no tools=no reason=not-claude',
+    'launch: agent=claude terminal=no workspaceKind=folder tagged=no tools=no reason=no-terminal',
+    'launch: agent=claude terminal=yes workspaceKind=none tagged=no tools=no reason=continue',
+  ])
+  assert.ok(t.logs.every(l => !l.includes('secret')))
+  await t.worker.deactivate()
+})
+
+test('the hook is registered before the state loads: a launch while storage never answers is still tagged and logged', async () => {
+  const t = await logged({ hang: true })
+  assert.equal(t.logs[0], 'start: hooks registered')
+  const fired = t.worker.hooks.fire('agent.launch.before', launch('claude'))
+  await t.time.run()
+  const out = await fired
+  assert.ok(out.kind === 'continue' && /--session-id \S+/.test(String(out.event.command)))
+  assert.deepEqual(t.launches(), ['launch: agent=claude terminal=yes workspaceKind=none tagged=new tools=no reason=-'])
+  await t.worker.deactivate()
+})

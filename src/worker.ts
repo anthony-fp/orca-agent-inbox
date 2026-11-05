@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import type { OrcaWorkerApi } from 'orca/worker'
 
 import { parsePlan, planNote, planPath, type PlanView } from './core/plan'
-import { tagLaunch } from './launch'
+import { tagLaunch, tokenize } from './launch'
 import { runInboxModel } from './model'
 import { createPresses, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
 import type { CopyOutcome, InboxSection, InboxView, OtherAgent } from './protocol'
@@ -75,8 +75,79 @@ const isOther = (agent: Agent) => agent.agent !== undefined && agent.agent !== '
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
+/** How long a launch waits for its tracking before Orca starts it anyway. The tracking goes on. */
+const TRACK_WAIT_MS = 1000
+
+/**
+ * Why `tagLaunch` left a launch untagged, for the launch log. It reads the command as `tagLaunch` does and never
+ * changes it. The log never holds the command, which can hold a prompt.
+ */
+function untaggedReason(agent: string, command: string): string {
+  if (agent !== 'claude') return 'not-claude'
+  const words = tokenize(command)?.map(t => t.text)
+  if (!words) return 'unparseable'
+  const p = words.findIndex(w => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(w))
+  if (p < 0 || words[p].slice(words[p].lastIndexOf('/') + 1) !== 'claude') return 'not-claude'
+  const end = words.indexOf('--', p)
+  const args = words.slice(p + 1, end < 0 ? undefined : end).map(w => w.split('=')[0])
+  if (args.some(a => a === '--continue' || a === '-c')) return 'continue'
+  if (args.includes('--fork-session')) return 'fork'
+  if (args.some(a => a === '--resume' || a === '-r')) return 'resume-name'
+  return 'unparseable'
+}
+
 export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): Promise<void> } {
   const log = (m: string) => orca.log(m)
+
+  // Both are registered first, before any other work, so a launch or a status while the state loads still reaches
+  // them. Each waits for `ready` inside.
+  orca.hooks.on('agent.launch.before', async (event, next) => {
+    const line = (tagged: string, tools: boolean, reason: string) =>
+      log(`launch: agent=${event.agent} terminal=${event.terminalId ? 'yes' : 'no'} workspaceKind=${event.workspaceKind ?? 'none'} tagged=${tagged} tools=${tools ? 'yes' : 'no'} reason=${reason}`)
+    const terminalId = event.terminalId
+    if (!terminalId) return line('no', false, 'no-terminal')
+    let tagged: ReturnType<typeof tagLaunch>
+    try {
+      tagged = tagLaunch(event.agent, event.command, undefined, deps.tools ?? undefined)
+    } catch (e) {
+      return line('no', false, `error:${message(e)}`)
+    }
+    if (!tagged.session) return line('no', false, untaggedReason(event.agent, event.command))
+    const { id, kind } = tagged.session
+    line(kind, tagged.tools, '-')
+    const tracking = (async () => {
+      await ready
+      // A resumed session starts at its transcript's end, so the turns it had before are never read again.
+      // Its turn count starts at the prompts before that end, so a prompt-start raises the turn the transcript gives.
+      let offset = 0
+      let turn = 0
+      const found = kind === 'resume' && !tracker.state().sessions[id] ? await find(id) : null
+      if (found) {
+        offset = wholeLinesEnd(found.bytes)
+        turn = promptsBefore(found.bytes, offset)
+      }
+      await tracker.track(terminalId, id, { offset, turn, tools: tagged.tools })
+      if (found) await learn(id, { transcript: found.path, cwd: cwdOf(found.bytes) })
+    })().catch(e => log(`launch: could not track ${terminalId}: ${message(e)}`))
+    // A slow state load must not hold the launch until Orca gives up on the hook and drops the tag.
+    await Promise.race([tracking, deps.clock.sleep(TRACK_WAIT_MS)])
+    return tagged.command === event.command ? undefined : next({ ...event, command: tagged.command })
+  })
+
+  orca.events.on('agent.status.changed', async event => {
+    // Spec step 2: the main agent's state, not the combined one; an older Orca has only `state`.
+    const terminalId = event.terminalId
+    if (!terminalId) return
+    const state = (event.mainAgent?.state ?? event.state) as TerminalStatus
+    statuses.set(terminalId, state)
+    if (state !== 'done') return
+    await ready
+    const sessionId = tracker.state().terminals[terminalId]?.sessionId
+    if (sessionId) void readPlan(sessionId).catch(e => log(`plan: ${message(e)}`))
+    void tracker.done(terminalId).catch(e => log(`done: ${message(e)}`))
+  })
+
+  log('start: hooks registered')
 
   const projects = join(deps.home, '.claude', 'projects')
 
@@ -196,43 +267,6 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
         return null
       })
     : Promise.resolve(null)
-
-  orca.hooks.on('agent.launch.before', async (event, next) => {
-    if (!event.terminalId) return undefined
-    const tagged = tagLaunch(event.agent, event.command, undefined, deps.tools ?? undefined)
-    if (!tagged.session) return undefined
-    const { id, kind } = tagged.session
-    try {
-      await ready
-      // A resumed session starts at its transcript's end, so the turns it had before are never read again.
-      // Its turn count starts at the prompts before that end, so a prompt-start raises the turn the transcript gives.
-      let offset = 0
-      let turn = 0
-      const found = kind === 'resume' && !tracker.state().sessions[id] ? await find(id) : null
-      if (found) {
-        offset = wholeLinesEnd(found.bytes)
-        turn = promptsBefore(found.bytes, offset)
-      }
-      await tracker.track(event.terminalId, id, { offset, turn, tools: tagged.tools })
-      if (found) await learn(id, { transcript: found.path, cwd: cwdOf(found.bytes) })
-    } catch (e) {
-      log(`launch: could not track ${event.terminalId}: ${message(e)}`)
-    }
-    return tagged.command === event.command ? undefined : next({ ...event, command: tagged.command })
-  })
-
-  orca.events.on('agent.status.changed', async event => {
-    // Spec step 2: the main agent's state, not the combined one; an older Orca has only `state`.
-    const terminalId = event.terminalId
-    if (!terminalId) return
-    const state = (event.mainAgent?.state ?? event.state) as TerminalStatus
-    statuses.set(terminalId, state)
-    if (state !== 'done') return
-    await ready
-    const sessionId = tracker.state().terminals[terminalId]?.sessionId
-    if (sessionId) void readPlan(sessionId).catch(e => log(`plan: ${message(e)}`))
-    void tracker.done(terminalId).catch(e => log(`done: ${message(e)}`))
-  })
 
   orca.panels.handle('inbox.view', async (): Promise<InboxView> => {
     await ready
