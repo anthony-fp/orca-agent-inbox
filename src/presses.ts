@@ -173,7 +173,12 @@ export function labelledRows(
   now = 0,
 ): { questions: LabelledRow[]; tasks: LabelledRow[]; closed: NowGroups['closed']; findings: LabelledFindings } {
   const { questions, tasks, closed } = nowRows(s.ledger, now)
-  const found = findingRows(s.ledger, now)
+  // A Fix moves to the closed list once its prompt shows, as the inbox's `isFixSent` moves it while its delivery has
+  // not failed. Held and undelivered fixes stay open.
+  const fixesSent = Object.fromEntries(
+    Object.entries(s.presses).flatMap(([id, l]) => (l.kind === 'fix' && l.state === 'answered' ? [[id, l.at]] : [])),
+  )
+  const found = findingRows(s.ledger, now, fixesSent)
   const label = (id: string) => (s.presses[id] ? rowLabel(s.presses[id]) : null)
   const add = (r: NowRow): LabelledRow => ({ ...r, label: label(r.id) })
   const addFinding = (r: FindingRow): LabelledFinding => ({ ...r, label: label(r.id) })
@@ -197,6 +202,16 @@ export function sendCheck(state: State, status: TerminalStatus | undefined, p: P
   const s = state.sessions[p.sessionId]
   if (!s || drawnToken(s) !== p.drawn) return 'a turn ended since the row was drawn'
   return null
+}
+
+/**
+ * A Fix closes the question that asks about its finding, as the 'address' press in the inbox's `hooks/presses.ts`
+ * does when it sends: the question is answered by the fix.
+ */
+function closeAsker(s: SessionState, findingId: string, now: number): SessionState {
+  const asker = s.ledger.findings.find(f => f.id === findingId)?.askedAs
+  if (!asker || !s.ledger.items.some(i => i.id === asker)) return s
+  return { ...s, ledger: closeItem(s.ledger, asker, { how: 'update', outcome: `fix sent for ${findingId}` }, now) }
 }
 
 function setLabel(s: SessionState, id: string, label: PressLabel): SessionState {
@@ -264,7 +279,7 @@ export function createPresses(deps: PressDeps) {
         return { ok: true, label: rowLabel(held) }
       }
       label.from = bytes?.length ?? 0
-      const saving = deps.edit(p.sessionId, cur => setLabel(cur, p.id, label))
+      const saving = deps.edit(p.sessionId, cur => setLabel(sent.kind === 'fix' ? closeAsker(cur, p.id, label.at) : cur, p.id, label))
       const sending = deps.send(p.terminalId, label.text).catch(e => {
         deps.log?.(`press: send failed for ${p.id}: ${e instanceof Error ? e.message : String(e)}`)
         return false

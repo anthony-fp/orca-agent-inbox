@@ -22,6 +22,8 @@ export type InboxSection = {
   tools: boolean
   /** The session's plan file as parsePlan reads it, or null when there is none or it has no step. */
   plan: PlanView | null
+  /** The plan file's path when it exists but cannot be read or has text but no step: the section says so in one line. */
+  planError: string | null
 }
 
 /** An agent in the focused workspace that is not Claude Code, such as Codex: version 1 does not track it. */

@@ -28,7 +28,7 @@ const openLedger = () => {
   return applyUpdate(EMPTY, u, 0, 1)
 }
 
-async function setup(opts: { state?: State; files?: Record<string, string>; agents?: unknown[]; copyFails?: boolean } = {}) {
+async function setup(opts: { state?: State; files?: Record<string, string>; unreadable?: string[]; agents?: unknown[]; copyFails?: boolean } = {}) {
   const time = fakeClock(100 * DAY)
   const files = new Map(Object.entries(opts.files ?? {}))
   const reads: string[] = []
@@ -58,6 +58,7 @@ async function setup(opts: { state?: State; files?: Record<string, string>; agen
     },
     readFile: async (path: string) => {
       reads.push(path)
+      if (opts.unreadable?.includes(path)) throw new Error('EACCES: permission denied')
       const text = files.get(path)
       return text === undefined ? null : Buffer.from(text)
     },
@@ -216,6 +217,7 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
         closed: { questions: NONE, tasks: NONE },
         findings: NO_FINDINGS,
         plan: null,
+        planError: null,
         tools: true,
       },
       {
@@ -229,6 +231,7 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
         closed: { questions: NONE, tasks: NONE },
         findings: NO_FINDINGS,
         plan: null,
+        planError: null,
         tools: true,
       },
     ],
@@ -265,6 +268,21 @@ test('inbox.view gives each section its plan, read again at a done; a changed pl
   const again = await t.worker.request('inbox.view', undefined)
   assert.equal(again.sections[0].plan?.done, 2)
   await t.worker.deactivate()
+})
+
+test("inbox.view: a plan file that cannot be read, or has text but no step, gives its path as the error; a missing one gives none", async () => {
+  const state: State = { version: 1, terminals: { 'term-1': { sessionId: S, workspaceId: WS.id } }, sessions: { [S]: emptySession(100 * DAY) } }
+  const agents = [{ terminalId: 'term-1', title: 'Fixer', agent: 'claude', state: 'done', stateStartedAt: 1 }]
+  const planOf = async (opts: { files?: Record<string, string>; unreadable?: string[] }) => {
+    const t = await setup({ state: structuredClone(state), agents, ...opts })
+    const { plan, planError } = (await t.worker.request('inbox.view', undefined)).sections[0]
+    await t.worker.deactivate()
+    return { plan, planError }
+  }
+  assert.deepEqual(await planOf({ unreadable: [PLAN_FILE] }), { plan: null, planError: PLAN_FILE })
+  assert.deepEqual(await planOf({ files: { [PLAN_FILE]: 'Notes, no checkbox step\n' } }), { plan: null, planError: PLAN_FILE })
+  assert.deepEqual(await planOf({ files: { [PLAN_FILE]: '  \n' } }), { plan: null, planError: null })
+  assert.deepEqual(await planOf({}), { plan: null, planError: null })
 })
 
 test('inbox.view: agents that are not Claude get the Claude-only list, by title, and count as nothing else', async () => {

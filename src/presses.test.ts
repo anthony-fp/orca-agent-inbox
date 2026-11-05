@@ -273,12 +273,14 @@ describe('presses', () => {
       assert.deepEqual(t.sent, [{ terminalId: T, text: c.text }])
       t.file.text += prompt('p-2', c.text)
       await t.time.run(t.time.now() + 2000)
-      assert.deepEqual(t.labelOf(c.finding.id), { text: c.done, tone: 'success', copy: null })
+      // A delivered Fix shows in the closed list instead (see the next test).
+      if (c.action !== 'fix') assert.deepEqual(t.labelOf(c.finding.id), { text: c.done, tone: 'success', copy: null })
       t.file.text += reply('a-2', 'On it.')
       void t.tracker.done(T)
       await t.time.run()
       assert.ok(t.s().ledger.findings.some(f => f.id === c.finding.id), 'the finding stays open: the agent closes it')
-      assert.deepEqual(t.labelOf(c.finding.id)?.text, c.done, 'the label outlives the turn while the finding is open')
+      if (c.action !== 'fix') assert.deepEqual(t.labelOf(c.finding.id)?.text, c.done, 'the label outlives the turn while the finding is open')
+      else assert.equal(t.s().presses[c.finding.id]?.state, 'answered', 'the label outlives the turn while the finding is open')
     }
     assert.equal(
       findingText(ISSUE, 'address'),
@@ -288,6 +290,43 @@ describe('presses', () => {
       findingText(IDEA, 'typed', 'Do it\nnow'),
       'About this finding you recorded: Opportunity: Cache the config It is parsed on each call. Do it now',
     )
+  })
+
+  test('a Fix closes the question that asks about its finding as it sends, and moves the finding to the closed list once delivered', async () => {
+    const t = await setup({ findings: [{ ...ISSUE, askedAs: 'i1' }] })
+    assert.equal(t.item.id, 'i1')
+    const at = t.time.now()
+    await t.presses.press(t.input({ id: ISSUE.id, action: 'fix' }))
+    assert.deepEqual(t.s().ledger.items, [])
+    assert.deepEqual(t.s().ledger.closed.map(c => [c.id, c.how, c.outcome]), [['i1', 'update', `fix sent for ${ISSUE.id}`]])
+    assert.deepEqual(t.labelOf(ISSUE.id), { text: 'Sending…', tone: 'muted', copy: null }, 'the row stays in place while it sends')
+    t.file.text += prompt('p-2', findingText(ISSUE, 'address'))
+    await t.time.run(t.time.now() + 2000)
+    const rows = labelledRows(t.s(), at)
+    assert.deepEqual(rows.findings.issues, [])
+    // The inbox's `outcomeLabel` reads `askedAs` first, so a fixed finding a question asked about says so there too.
+    assert.deepEqual(rows.findings.closed.issues, { shown: [{ id: ISSUE.id, mark: '✓', text: ISSUE.title, outcome: 'Now a question', age: 'now' }], total: 1 })
+    const plain = { ...t.s(), ledger: { ...t.s().ledger, findings: [ISSUE] } }
+    assert.equal(labelledRows(plain, at).findings.closed.issues.shown[0]?.outcome, 'Fix')
+    assert.ok(t.s().ledger.findings.some(f => f.id === ISSUE.id), 'the ledger keeps it open for the agent and the inbox model')
+  })
+
+  // As in the inbox, a Fix that went out closes its question even when its delivery then fails; a held one sent nothing.
+  test('a held or undelivered Fix stays in the open list, and only the undelivered one closed its question; File issue closes nothing', async () => {
+    const cases = [
+      { status: 'working', accepted: true, action: 'fix', open: ['i1'] },
+      { status: 'done', accepted: false, action: 'fix', open: [] },
+      { status: 'done', accepted: true, action: 'issue', open: ['i1'] },
+    ] as const
+    for (const c of cases) {
+      const t = await setup({ findings: [{ ...ISSUE, askedAs: 'i1' }], accepted: c.accepted })
+      t.status.set(T, c.status)
+      await t.presses.press(t.input({ id: ISSUE.id, action: c.action }))
+      t.file.text += prompt('p-2', findingText(ISSUE, c.action === 'fix' ? 'address' : 'issue'))
+      await t.time.run(t.time.now() + 2000)
+      assert.deepEqual(t.s().ledger.items.map(i => i.id), c.open)
+      assert.deepEqual(labelledRows(t.s()).findings.issues.map(r => r.id), [ISSUE.id])
+    }
   })
 
   test('a held Fix reads "Waits for the agent" with Copy; Dismiss closes the finding in state only; Done is refused', async () => {

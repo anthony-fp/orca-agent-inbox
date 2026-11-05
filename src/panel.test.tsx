@@ -363,6 +363,14 @@ test('plan: "PLAN N of M steps", a progress bar, and one fold per task; a task w
   await clean(view)
 })
 
+test("plan: a plan file that cannot be read shows the skill's one error line, in the danger tone", async () => {
+  const view = await open({ sections: [section(1, { planError: '/work/.claude/plans/s.md' })], others: [], untracked: 0, unread: 0 })
+  assert.equal(view.find({ text: 'Could not read the plan: /work/.claude/plans/s.md' })?.props.tone, 'danger')
+  assert.equal(view.find({ type: 'Progress' }), null)
+  assert.equal(view.find({ type: 'EmptyState', label: 'Nothing waits on you' }), null)
+  await clean(view)
+})
+
 test('plan: a press toggles a task, and the choice stays across a new view', async () => {
   const host = mockHost({ requests: { 'inbox.view': () => PLAN } })
   const view = await mount(panel, { host })

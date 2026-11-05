@@ -169,12 +169,19 @@ export type FindingGroups = {
 /** `fixLabel` in `hooks/view.ts`. */
 export const fixLabel = (f: Pick<Finding, 'kind'>) => (f.kind === 'opportunity' ? 'Do it' : 'Fix')
 
-/** The open findings, newest first, and each kind's closed findings, newest closed first, as the inbox's Now view shows them. */
-export function findingRows(ledger: Ledger, now = 0): FindingGroups {
+/**
+ * The open findings, newest first, and each kind's closed findings, newest closed first, as the inbox's Now view shows them.
+ * `fixesSent` gives, by id, when a Fix or Do it reached the agent: that finding stays open in the ledger, for the agent
+ * and the inbox model to close, but shows as closed with its button's label, as `fixesSent` in `hooks/view.ts` does.
+ */
+export function findingRows(ledger: Ledger, now = 0, fixesSent: Record<string, number> = {}): FindingGroups {
+  const sent = ledger.findings
+    .filter(f => fixesSent[f.id] !== undefined)
+    .map((f): ClosedFinding => ({ ...f, how: 'answered', outcome: fixLabel(f), closedAt: fixesSent[f.id]! }))
   const open = (kind: Finding['kind']): FindingRow[] =>
     [...ledger.findings]
       .reverse()
-      .filter(f => f.kind === kind)
+      .filter(f => f.kind === kind && fixesSent[f.id] === undefined)
       .map(f => ({
         id: f.id,
         kind: f.kind,
@@ -186,7 +193,7 @@ export function findingRows(ledger: Ledger, now = 0): FindingGroups {
         fix: fixLabel(f),
       }))
   const closed = (kind: Finding['kind']): ClosedGroup => {
-    const all = ledger.closedFindings.filter(f => f.kind === kind).sort((a, b) => b.closedAt - a.closedAt)
+    const all = [...ledger.closedFindings, ...sent].filter(f => f.kind === kind).sort((a, b) => b.closedAt - a.closedAt)
     // `outcomeLabel` in `hooks/view.ts`: a finding a question replaced says where it went.
     const row = (f: ClosedFinding): ClosedRow => ({
       id: f.id,

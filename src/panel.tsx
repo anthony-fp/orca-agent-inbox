@@ -498,10 +498,12 @@ function PlanText({ line }: { line: PlanLine }) {
 
 /**
  * The session plan (spec "The session plan", step 3), from `planLines`: "PLAN N of M steps", a progress bar, then one
- * fold per task with its count and steps. A task with a step in progress starts open; a press toggles it.
+ * fold per task with its count and steps. A task with a step in progress starts open; a press toggles it. A plan file
+ * that cannot be read gives the one error line instead.
  */
 function Plan({ section }: { section: InboxSection }) {
   const plan = section.plan
+  if (section.planError !== null) return <PlanText line={planLines(null, section.planError)[0]!} />
   if (!plan) return null
   const chosen = read(planOpen)
   const view = { ...plan, tasks: plan.tasks.map((t, n) => ({ ...t, isOpen: chosen[planKey(section, n, t.title)] ?? t.isOpen })) }
@@ -544,7 +546,7 @@ const hasFindings = ({ findings: f }: InboxSection) =>
 /** True when the section has nothing to draw beyond its title. */
 function isEmpty(s: InboxSection): boolean {
   const { questions, tasks, closed } = s
-  return questions.length + tasks.length + closed.questions.total + closed.tasks.total === 0 && !hasFindings(s) && s.plan === null && s.tools
+  return questions.length + tasks.length + closed.questions.total + closed.tasks.total === 0 && !hasFindings(s) && s.plan === null && s.planError === null && s.tools
 }
 
 function Section({ section }: { section: InboxSection }) {

@@ -42,6 +42,8 @@ export type WorkerDeps = {
   copy(text: string): Promise<void>
 }
 
+type PlanRead = { plan: PlanView | null; error: string | null }
+
 const realClock: Clock = { now: () => Date.now(), sleep: ms => new Promise(r => setTimeout(r, ms)) }
 
 async function readOrNull(path: string): Promise<Buffer | null> {
@@ -97,24 +99,30 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
   }
 
   /** Each session's plan, as last read (spec "The session plan", step 2). The plugin only reads the file. */
-  const plans = new Map<string, PlanView | null>()
+  const plans = new Map<string, PlanRead>()
 
-  /** Reads the session's plan file, and tells the panel when the plan changed. Null when the workspace is not known. */
-  async function readPlan(sessionId: string): Promise<{ path: string; plan: PlanView | null } | null> {
+  /**
+   * Reads the session's plan file, and tells the panel when the plan changed. Null when the workspace is not known.
+   * A file that cannot be read, or has text but no step, gives its path as the error, as `readPlan` in the inbox's
+   * `hooks/register.tsx` does. A missing or empty file is no plan and no error.
+   */
+  async function readPlan(sessionId: string): Promise<({ path: string } & PlanRead) | null> {
     const dir = await dirOf(sessionId)
     if (!dir) return null
     const path = planPath(dir, sessionId)
-    let plan: PlanView | null = null
+    let read: PlanRead = { plan: null, error: null }
     try {
-      const bytes = await deps.readFile(path)
-      plan = bytes ? parsePlan(bytes.toString('utf8')) : null
+      const text = (await deps.readFile(path))?.toString('utf8') ?? null
+      const plan = text === null ? null : parsePlan(text)
+      read = { plan, error: plan === null && text !== null && text.trim() !== '' ? path : null }
     } catch (e) {
       log(`plan: could not read ${sessionId}: ${message(e)}`)
+      read = { plan: null, error: path }
     }
     const before = plans.get(sessionId)
-    plans.set(sessionId, plan)
-    if (before !== undefined && JSON.stringify(before) !== JSON.stringify(plan)) orca.panels.post('inbox.changed', {})
-    return { path, plan }
+    plans.set(sessionId, read)
+    if (before !== undefined && JSON.stringify(before) !== JSON.stringify(read)) orca.panels.post('inbox.changed', {})
+    return { path, ...read }
   }
 
   async function read(sessionId: string): Promise<Buffer | null> {
@@ -244,7 +252,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
       // agents.list gives the combined state: `done` there means the main agent is done too.
       if (!statuses.has(agent.terminalId) && STATES.includes(agent.state)) statuses.set(agent.terminalId, agent.state as TerminalStatus)
       unread += s.unread
-      const plan = plans.has(sessionId) ? (plans.get(sessionId) ?? null) : ((await readPlan(sessionId))?.plan ?? null)
+      const { plan, error: planError } = plans.get(sessionId) ?? (await readPlan(sessionId)) ?? { plan: null, error: null }
       sections.push({
         terminalId: agent.terminalId,
         sessionId,
@@ -252,6 +260,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
         drawn: drawnToken(s),
         lastActivity: s.touchedAt,
         plan,
+        planError,
         tools: s.tools,
         ...labelledRows(s, deps.clock.now()),
       })
