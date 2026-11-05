@@ -279,6 +279,23 @@ export const CLAUDE_CODE: Host = {
     "The inbox plugin shows the user what waits on them: your open questions and the tasks only they can do, in the /inbox pane, and your findings, in the pane's Findings tab. A band above their prompt shows only two counts: one for your questions and their tasks together, and one for your findings.",
 }
 
+/**
+ * The Orca plugin's host: a sidebar panel, no band, and no record or close tools, since the plugin
+ * gives the agent no MCP server. `systemText` reads only `band`, so `systemText(ORCA)` is
+ * `systemText(CLAUDE_CODE)` without the band sentence (compared in docs/model-compare.md).
+ * The tool names and `intro` are empty: they feed only `guidanceText` and `inboxText`, which the
+ * plugin never sends.
+ */
+export const ORCA: Host = {
+  agent: 'Claude',
+  surface: "the Agent Inbox panel in Orca's sidebar",
+  band: null,
+  findingsIn: "the Agent Inbox panel in Orca's sidebar",
+  recordTool: '',
+  closeTool: '',
+  intro: '',
+}
+
 function surfaceAtStart(host: Host): string {
   return host.surface.charAt(0).toUpperCase() + host.surface.slice(1)
 }
