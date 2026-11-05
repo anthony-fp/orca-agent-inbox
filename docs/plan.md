@@ -32,7 +32,8 @@ Builds `docs/spec.md` (version 1, Claude Code only). One subagent per task. A fa
 - Files: `src/core/ledger.ts`, `src/core/model-text.ts`, `src/core/text.ts`, `src/core/types.ts`, `src/core/now.ts`, `src/core/*.test.ts`, `LICENSE`, `NOTICE.md`.
 - Do: copy `hooks/ledger.ts`, `hooks/model-text.ts`, `hooks/text.ts`, and the types they use from `types/index.d.ts` into `src/core/types.ts`. Keep the inbox repo's license. `NOTICE.md` names the source repo and commit.
 - Do: write `src/core/now.ts` new, not as a copy of `hooks/view.ts` (it calls press helpers at `hooks/view.ts:20-37` and `684-793`). It is a small Now projection: `nowRows(ledger) → { questions, tasks }`, each row with its text, options and id. It takes no press state. T7 adds the press label to a row.
-- Test: `tsc --noEmit` passes. Port the inbox repo's tests for `applyExchangeUpdate` and `buildPrompt`, and they pass unchanged. New tests for `nowRows`: an empty ledger, open questions with options, tasks, closed items left out.
+- Type check: Orca 1.4.248 ships no `orca.d.ts`, so the root `tsconfig.json` cannot load. `src/core/` imports nothing from Orca, so it gets its own `src/core/tsconfig.json` with no `extends`, and `npm run typecheck` runs `tsc --noEmit -p src/core`.
+- Test: `npm run typecheck` passes. Port the inbox repo's tests for `applyExchangeUpdate` and `buildPrompt`, and they pass unchanged. New tests for `nowRows`: an empty ledger, open questions with options, tasks, closed items left out.
 
 ## T2. Launch tagging
 - Files: `src/launch.ts`, `src/launch.test.ts`.

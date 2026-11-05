@@ -4,6 +4,11 @@
   "private": true,
   "description": "An Orca plugin that collects the questions and tasks Claude Code agents leave.",
   "scripts": {
-    "test": "orca plugin test ."
+    "test": "orca plugin test .",
+    "typecheck": "tsc --noEmit -p src/core"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
   }
 }
