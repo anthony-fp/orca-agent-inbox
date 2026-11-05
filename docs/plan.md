@@ -88,3 +88,34 @@ Builds `docs/spec.md` (version 1, Claude Code only). One subagent per task. A fa
 - First (from T2): with the plugin loaded, log the real `command` of 3 Orca launches: a new tab, a launch with a prompt, and a workspace create. `tagLaunch` leaves any command with `$VAR`, `$(...)` or a shell operator untracked (`src/launch.ts:63`). If Orca builds its launch commands that way, every agent would be untracked, so fix `tagLaunch` before the other checks. Also run `orca plugin dev hook agent.launch.before` on one of those commands.
 - Do: load with `orca plugin dev load .`. Start two `claude` agents in one workspace from Orca. Check each "Done means" line in the spec, and three agents for panel length. The README lists each capability and the hook with what it is for, and says that the plugin runs `claude -p` on your account after each turn.
 - Test: `docs/live-check.md` records each check with its result and the measured time from `done` to the row showing. Say which states were not seen.
+
+# Part 2 — findings and the session plan
+
+Builds spec sections "The agent's tools (findings)" and "The session plan". Same rules as above. T8 (live check) moves to the end and covers part 2 too.
+
+**Order:** T9 → (T10, T11 at the same time) → T12 → T13 → T8. T12 starts only after the row change to the panel is committed.
+
+## T9. Copy the tool and plan code
+- Files: `src/core/tools.ts`, `src/core/plan.ts`, `src/core/tones.ts` (only what `plan.ts` needs), `src/core/types.ts`, `src/core/tools.test.ts`, `src/core/plan.test.ts`, `src/core/model-text.ts` (the `ORCA` host only), `NOTICE.md`.
+- Do: copy `agentTools`, `recordItem`, `recordClose` and what they need from the inbox repo's `hooks/tools.ts`, and `hooks/plan.ts` whole. Import paths only. Give `ORCA` its real `recordTool` (`mcp__orca-inbox__record`), `closeTool` (`mcp__orca-inbox__close`) and an `intro` that names the Orca panel, written as the `CLAUDE_CODE` intro is.
+- Test: port the inbox repo's tests for these functions and `tests/plan.test.ts`; they pass. `systemText(ORCA)` is unchanged from before T9 (a test pins it).
+
+## T10. Worker socket, MCP server and prompt hook
+- Files: `src/socket.ts`, `src/socket.test.ts`, `bin/mcp-server.mjs`, `bin/prompt-hook.mjs`, `src/worker.ts`, `src/state.ts`, `src/turns.ts`.
+- Do: spec "The agent's tools" steps 2–4 and "The session plan" steps 1–2. The worker listens on a 0600 socket in the plugin's folder. Messages: `prompt-start` (raise and save the active turn), `inbox-text` (`inboxText(ORCA, …)`, `closedText`, `planNote`), `record`, `close`. The two `bin/` scripts are plain Node with no dependencies, answer within 5 s or give up as the spec says. The MCP server speaks stdio MCP with `agentTools(ORCA)`.
+- Test: socket round trips with a fake ledger; the turn-stamp cases from spec step 4; a worker restart; a script run against a fake socket that never answers.
+
+## T11. Launch hook adds the tools
+- Files: `src/launch.ts`, `src/launch.test.ts`.
+- Do: spec "The agent's tools" step 1. Add `--mcp-config`, `--append-system-prompt <guidanceText(ORCA)>` and `--settings` to a tracked launch. Skip all three, and mark the session "no tools", when the command already has any of `--mcp-config`, `--strict-mcp-config`, `--append-system-prompt` or `--settings`. Quote every added value safely.
+- Test: each skip case; the added flags parse back to the same values; a prompt argument still comes last.
+
+## T12. Panel: findings and plan
+- Files: `src/panel.tsx`, `src/panel.test.tsx`, `src/panel-views.ts`, `src/panel.check.ts`, `src/protocol.ts`, `src/worker.ts`.
+- Do: "Issues · N" and "Opportunities · N" with the inbox's finding rows and buttons, less the actions version 1 leaves out, and "▸ N closed". The PLAN section per spec "The session plan" step 3, with collapsible tasks. "No tools" on an agent's section when T11 skipped its tools.
+- Test: findings rows and order; plan open and closed by default; a toggle; the progress count.
+
+## T13. Agent eval
+- Files: `docs/agent-eval.md`.
+- Do: in a temporary copy of the inbox repo (never in the real clone), add the `ORCA` host and run `./scripts/eval.sh --suite agent --agent claude` once with `ORCA` and once with `CLAUDE_CODE`. Quote both results files.
+- Test: `ORCA` passes every case that `CLAUDE_CODE` passes. A case that fails only with `ORCA` blocks T8.

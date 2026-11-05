@@ -6,7 +6,7 @@ An Orca plugin that adds an inbox icon to Orca's right sidebar. The panel shows 
 
 | Question | Decision |
 |---|---|
-| Where it shows | A new icon in Orca's right sidebar. The panel is the inbox's "Now" tab only. Files and PRs stay out: Orca's sidebar has its own. |
+| Where it shows | A new icon in Orca's right sidebar. The panel is the inbox's "Now" tab: questions, tasks, findings and the session plan with collapsible tasks. Files and PRs stay out: Orca's sidebar has its own. |
 | Who does the work | The plugin, alone. It needs no inbox mod, Codex plugin or MCP server. |
 | Which agents | Claude Code only in version 1. Codex in version 2. |
 | How items arrive | Two ways, as in the inbox skill: the agent calls `record` and `close` and sees the open items beside each prompt, and the inbox model reads each finished turn. The launch hook adds the tools and the guidance to each tracked `claude` launch. |
@@ -64,6 +64,15 @@ An Orca plugin that adds an inbox icon to Orca's right sidebar. The panel shows 
 6. **Text a model reads.** The guidance, the tool descriptions and the tool answers are the inbox's, word for word, with only the host names changed. Before they ship, run the inbox repo's agent eval (`./scripts/eval.sh --suite agent`) with the `ORCA` host and compare with `CLAUDE_CODE`.
 7. **The panel** adds "Issues · N" and "Opportunities · N" after Tasks, with the inbox's finding rows and buttons, less the actions that version 1 leaves out.
 
+## The session plan
+
+As in the inbox skill, with the skill's own code from the inbox repo's `hooks/plan.ts` (`parsePlan`, `planPath`, `planNote`, `planLines`), copied word for word.
+
+1. **The agent learns its plan file.** The `UserPromptSubmit` hook from "The agent's tools" also prints `planNote(planPath(<workspace path>, <sessionId>), plan)`: the skill's "your plan file for this session is …" text, with the steps in progress. It is text a model reads, so the agent eval covers it.
+2. **The worker reads the plan file** at `<workspace path>/.inbox/plans/<sessionId>.md` with `parsePlan` at the end of each turn and when the file changes. `## ` headings are tasks; `- [ ]`, `- [~]` and `- [x]` lines are steps.
+3. **The panel draws it** after Issues and Opportunities, in each agent's section: "PLAN N of M steps" with the progress bar, then one line per task with its count. Each task heading is collapsible: a task with a `[~]` step is open by default, every other task is closed. A press toggles it, and the panel keeps the choice while it runs. Steps show ✓ done, ◐ in progress, ○ waiting, as `planLines` gives them.
+4. **The plan file is the agent's.** The plugin only reads it. It never writes or deletes it.
+
 ## State
 
 - The plugin keeps one ledger per agent session in Orca's plugin storage (`storage:own`), keyed by the session file's id.
@@ -75,7 +84,7 @@ An Orca plugin that adds an inbox icon to Orca's right sidebar. The panel shows 
 
 ## Out of scope for version 1
 
-- Files, PRs and the session plan.
+- Files and PRs.
 - Agents on SSH or WSL hosts.
 - Agents other than Claude Code. Codex comes in version 2: it has no session id flag, and Orca reserves `ORCA_*` env names, so it needs its own matching rule (see `review-ledger.md`, rounds 2 and 3).
 
