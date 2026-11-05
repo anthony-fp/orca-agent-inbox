@@ -113,7 +113,9 @@ Builds spec sections "The agent's tools (findings)" and "The session plan". Same
 ## T12. Panel: findings and plan
 - Files: `src/panel.tsx`, `src/panel.test.tsx`, `src/panel-views.ts`, `src/panel.check.ts`, `src/protocol.ts`, `src/worker.ts`.
 - Do: "Issues · N" and "Opportunities · N" with the inbox's finding rows and buttons, less the actions version 1 leaves out, and "▸ N closed". The PLAN section per spec "The session plan" step 3, with collapsible tasks. "No tools" on an agent's section when T11 skipped its tools.
-- Test: findings rows and order; plan open and closed by default; a toggle; the progress count.
+- Do (mirror fixes from the row change, `f76735d`): a typed reply on a question no longer closes it at once; the inbox model decides, as the inbox does (inbox repo `hooks/presses.ts:803-807`). A sent press reads "✓ <button label>", as the inbox does, not "✓ Replied" or "✓ Answered". Copy uses a worker request that writes the clipboard (`pbcopy` on macOS), so Copy reads "✓ Copied"; where that fails, keep the select-the-text box.
+- Do (user request): an agent in the focused workspace whose `agent` (from `agents.list`) is not `claude` gets its own short section: its title, then "Agent Inbox supports Claude Code only for now. Codex support is coming soon." Such agents no longer count in "N agents not tracked", which keeps only Claude agents the plugin did not see launch. When every agent in the workspace is not Claude, the panel shows only these sections.
+- Test: findings rows and order; plan open and closed by default; a toggle; the progress count; a Codex agent's section and its text; a workspace with only a Codex agent; a typed reply leaves the question open until the model runs; the press labels; Copy.
 
 ## T13. Agent eval
 - Files: `docs/agent-eval.md`.
