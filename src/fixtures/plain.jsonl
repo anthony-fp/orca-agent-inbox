@@ -1,0 +1,7 @@
+{"type":"permission-mode","permissionMode":"default","sessionId":"s-1"}
+{"type":"user","uuid":"p-1","parentUuid":null,"sessionId":"s-1","isSidechain":false,"version":"2.1.318","timestamp":"2026-01-01T00:00:00.000Z","origin":{"kind":"human"},"promptSource":"typed","turnOrigin":"human","turnPosition":{"promptIndex":1,"turnIndex":1},"message":{"role":"user","content":"What does the parser do?"}}
+{"type":"attachment","uuid":"x-1","parentUuid":"p-1","sessionId":"s-1","isSidechain":false,"version":"2.1.318","timestamp":"2026-01-01T00:00:00.000Z","attachment":{"type":"hook_success"}}
+{"type":"assistant","uuid":"a-1","parentUuid":"x-1","sessionId":"s-1","isSidechain":false,"version":"2.1.318","timestamp":"2026-01-01T00:00:00.000Z","message":{"id":"m-1","role":"assistant","content":[{"type":"thinking","thinking":""}],"stop_reason":"end_turn"}}
+{"type":"assistant","uuid":"a-2","parentUuid":"a-1","sessionId":"s-1","isSidechain":false,"version":"2.1.318","timestamp":"2026-01-01T00:00:00.000Z","message":{"id":"m-1","role":"assistant","content":[{"type":"text","text":"It reads one line at a time."}],"stop_reason":"end_turn"}}
+{"type":"system","subtype":"stop_hook_summary","uuid":"y-1","parentUuid":"a-2","sessionId":"s-1","isSidechain":false,"version":"2.1.318","timestamp":"2026-01-01T00:00:00.000Z"}
+{"type":"system","subtype":"turn_duration","uuid":"y-2","parentUuid":"y-1","sessionId":"s-1","isSidechain":false,"version":"2.1.318","timestamp":"2026-01-01T00:00:00.000Z","durationMs":1200}
