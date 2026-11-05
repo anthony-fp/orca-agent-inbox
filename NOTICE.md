@@ -5,7 +5,7 @@ Parts of this plugin are copied from the inbox repo, `github.com/anthony-fp/inbo
 | File here | Copied from | Changes |
 |---|---|---|
 | `src/core/ledger.ts` | `hooks/ledger.ts` | Import paths only |
-| `src/core/model-text.ts` | `hooks/model-text.ts` | Import paths only |
+| `src/core/model-text.ts` | `hooks/model-text.ts` | Import paths, and a new `ORCA` host |
 | `src/core/text.ts` | `hooks/text.ts` | None |
 | `src/core/tools.ts` | `hooks/tools.ts` | Import paths only |
 | `src/core/plan.ts` | `hooks/plan.ts` | Import paths only |
