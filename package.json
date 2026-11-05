@@ -5,7 +5,7 @@
   "description": "An Orca plugin that collects the questions and tasks Claude Code agents leave.",
   "scripts": {
     "test": "orca plugin test .",
-    "typecheck": "tsc --noEmit -p src/core"
+    "typecheck": "tsc --noEmit -p src/core && tsc --noEmit -p tsconfig.node.json"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
