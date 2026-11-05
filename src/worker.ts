@@ -1,6 +1,7 @@
 // The plugin's worker. Orca transpiles this file when it loads: no build step.
 // It tags each Claude Code launch, feeds the turn tracker from status changes, answers the panel's requests
 // (src/protocol.ts), runs presses (src/presses.ts) and answers the agent's tools and prompt hook (src/socket.ts).
+import { spawn } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import type { Server } from 'node:net'
 import { homedir } from 'node:os'
@@ -12,7 +13,7 @@ import { parsePlan, planNote, planPath, type PlanView } from './core/plan'
 import { tagLaunch } from './launch'
 import { runInboxModel } from './model'
 import { createPresses, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
-import type { InboxSection, InboxView } from './protocol'
+import type { CopyOutcome, InboxSection, InboxView, OtherAgent } from './protocol'
 import { binPaths, createAnswerer, listen, socketPath } from './socket'
 import { promptsBefore, wholeLinesEnd } from './transcript'
 import { createTracker, type Clock, type TrackerDeps } from './turns'
@@ -37,6 +38,8 @@ export type WorkerDeps = {
   readFile(path: string): Promise<Buffer | null>
   /** The socket the agent's tools and prompt hook reach, and their scripts. Null: no socket, and launches get no tools. */
   tools: { socketPath: string; mcpServer: string; promptHook: string } | null
+  /** Writes the text to the system clipboard; throws when it cannot. Orca gives a panel no clipboard. */
+  copy(text: string): Promise<void>
 }
 
 const realClock: Clock = { now: () => Date.now(), sleep: ms => new Promise(r => setTimeout(r, ms)) }
@@ -50,8 +53,23 @@ async function readOrNull(path: string): Promise<Buffer | null> {
   }
 }
 
+/** `pbcopy` on macOS. Elsewhere there is no clipboard command, so the panel shows the text to select. */
+function copyToClipboard(text: string): Promise<void> {
+  if (process.platform !== 'darwin') return Promise.reject(new Error('no clipboard command on this system'))
+  return new Promise((resolve, reject) => {
+    const child = spawn('pbcopy', [], { stdio: ['pipe', 'ignore', 'ignore'] })
+    child.on('error', reject)
+    child.on('close', code => (code === 0 ? resolve() : reject(new Error(`pbcopy exited with ${code}`))))
+    child.stdin.end(text)
+  })
+}
+
 type Workspace = { id: string; path: string }
-type Agent = { terminalId: string | null; title: string | null; state: string }
+/** `agent` is Orca's name for the agent, such as `claude` or `codex`; an older Orca may leave it out. */
+type Agent = { terminalId: string | null; title: string | null; state: string; agent?: string }
+
+/** Version 1 tracks Claude Code only (spec step 5). An agent with no name counts as Claude: it may be one. */
+const isOther = (agent: Agent) => agent.agent !== undefined && agent.agent !== 'claude'
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
@@ -183,7 +201,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
         offset = bytes ? wholeLinesEnd(bytes) : 0
         turn = bytes ? promptsBefore(bytes, offset) : 0
       }
-      await tracker.track(event.terminalId, id, { workspaceId: event.workspaceId, offset, turn })
+      await tracker.track(event.terminalId, id, { workspaceId: event.workspaceId, offset, turn, tools: tagged.tools })
     } catch (e) {
       log(`launch: could not track ${event.terminalId}: ${message(e)}`)
     }
@@ -208,9 +226,15 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
     const { agents } = (await orca.host.call('agents.list', {})) as { agents: Agent[] }
     const state = tracker.state()
     const sections: InboxSection[] = []
+    const others: OtherAgent[] = []
     let untracked = 0
     let unread = 0
-    for (const agent of agents) {
+    for (const [n, agent] of agents.entries()) {
+      if (isOther(agent)) {
+        const name = agent.agent ?? ''
+        others.push({ key: agent.terminalId ?? `agent-${n}`, title: agent.title ?? name.charAt(0).toUpperCase() + name.slice(1) })
+        continue
+      }
       const sessionId = agent.terminalId ? state.terminals[agent.terminalId]?.sessionId : undefined
       const s = sessionId ? state.sessions[sessionId] : undefined
       if (!agent.terminalId || !sessionId || !s) {
@@ -221,10 +245,29 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
       if (!statuses.has(agent.terminalId) && STATES.includes(agent.state)) statuses.set(agent.terminalId, agent.state as TerminalStatus)
       unread += s.unread
       const plan = plans.has(sessionId) ? (plans.get(sessionId) ?? null) : ((await readPlan(sessionId))?.plan ?? null)
-      sections.push({ terminalId: agent.terminalId, sessionId, title: agent.title ?? 'Claude Code', drawn: drawnToken(s), lastActivity: s.touchedAt, plan, ...labelledRows(s, deps.clock.now()) })
+      sections.push({
+        terminalId: agent.terminalId,
+        sessionId,
+        title: agent.title ?? 'Claude Code',
+        drawn: drawnToken(s),
+        lastActivity: s.touchedAt,
+        plan,
+        tools: s.tools,
+        ...labelledRows(s, deps.clock.now()),
+      })
     }
     sections.sort((a, b) => b.lastActivity - a.lastActivity)
-    return { sections, untracked, unread }
+    return { sections, others, untracked, unread }
+  })
+
+  orca.panels.handle('inbox.copy', async ({ text }: { text: string }): Promise<CopyOutcome> => {
+    try {
+      await deps.copy(text)
+      return { ok: true }
+    } catch (e) {
+      log(`copy: ${message(e)}`)
+      return { ok: false, error: message(e) }
+    }
   })
 
   orca.panels.handle('inbox.press', async (input: PressInput) => {
@@ -250,6 +293,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     home: homedir(),
     model: (prompt, source) => runInboxModel(prompt, { source }),
     readFile: readOrNull,
+    copy: copyToClipboard,
     tools: { socketPath: socketPath(), ...binPaths() },
   })
 }

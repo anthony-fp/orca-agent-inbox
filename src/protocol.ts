@@ -1,7 +1,7 @@
 // The panel <-> worker contract, declared once: src/panel.tsx and src/worker.ts both read it.
 import type { NowGroups } from './core/now'
 import type { PlanView } from './core/plan'
-import type { LabelledRow, PressInput, PressOutcome } from './presses'
+import type { LabelledFindings, LabelledRow, PressInput, PressOutcome } from './presses'
 
 /** One tracked agent in the focused workspace. */
 export type InboxSection = {
@@ -16,13 +16,25 @@ export type InboxSection = {
   tasks: LabelledRow[]
   /** Each group's closed items, newest first, for its "N closed" fold. */
   closed: NowGroups['closed']
+  /** Open issues and opportunities, newest first, each with its press label, and their closed lists. */
+  findings: LabelledFindings
+  /** False when the launch got no inbox tools (plan T11): the section says "No tools". */
+  tools: boolean
   /** The session's plan file as parsePlan reads it, or null when there is none or it has no step. */
   plan: PlanView | null
 }
 
+/** An agent in the focused workspace that is not Claude Code, such as Codex: version 1 does not track it. */
+export type OtherAgent = { key: string; title: string }
+
+/** What a Copy did: the worker wrote the clipboard, or why it could not, so the panel shows the text to select. */
+export type CopyOutcome = { ok: true } | { ok: false; error: string }
+
 export type InboxView = {
   sections: InboxSection[]
-  /** Agents in the focused workspace the plugin did not see launch. */
+  /** Agents that are not Claude Code, each drawn with the Claude-only note. They count in no other field. */
+  others: OtherAgent[]
+  /** Claude Code agents in the focused workspace the plugin did not see launch. */
   untracked: number
   /** Turns dropped after 3 failed model runs, over the sections shown: "N turns not read". */
   unread: number
@@ -32,8 +44,10 @@ declare module 'orca' {
   interface PluginRequests {
     /** The focused workspace's tracked agents, each with its open rows and press labels. */
     'inbox.view': { output: InboxView }
-    /** An option, a typed reply, Done or Dismiss on one row. A sent reply's label also arrives in the next view. */
+    /** An option, a typed reply, a step, Fix, File issue, Done or Dismiss on one row. A sent press's label also arrives in the next view. */
     'inbox.press': { input: PressInput; output: PressOutcome }
+    /** Writes the text to the clipboard (`pbcopy` on macOS). */
+    'inbox.copy': { input: { text: string }; output: CopyOutcome }
   }
   interface PluginPanelEvents {
     /** Posted after each saved change: ask for `inbox.view` again. */

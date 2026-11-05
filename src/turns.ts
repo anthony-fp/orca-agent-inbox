@@ -69,14 +69,16 @@ function atTurn(ledger: Ledger, turn: number): Ledger {
   return turn > ledger.turn ? { ...ledger, turn } : ledger
 }
 
-/** The labels of rows still open: a closed row's label goes with it. */
+/** The labels of rows and findings still open: a closed row's label goes with it. */
 function openLabels(ledger: Ledger, presses: Record<string, PressLabel>): Record<string, PressLabel> {
-  return Object.fromEntries(Object.entries(presses).filter(([id]) => ledger.items.some(i => i.id === id)))
+  return Object.fromEntries(
+    Object.entries(presses).filter(([id]) => ledger.items.some(i => i.id === id) || ledger.findings.some(f => f.id === id)),
+  )
 }
 
 /**
- * The press a turn answers: the answer whose prompt has the turn's id. A task's reply or a step is no answer: its row
- * stays open, and the model reads the turn as the inbox's does.
+ * The press a turn answers: the option whose prompt has the turn's id. Typed words, a step or a finding's press is
+ * no answer: its row stays open, and the model reads the turn and decides, as the inbox's does.
  */
 function pressFor(s: SessionState, turnId: string): { press: Press; answer: string } | null {
   const hit = Object.entries(s.presses).find(([, l]) => l.turnId === turnId && l.kind === 'answer')
@@ -244,7 +246,11 @@ export function createTracker(deps: TrackerDeps) {
      * gives. A known session keeps its own offset and turn.
      * Another terminal mapped to the same session stops being tracked.
      */
-    async track(terminalId: string, sessionId: string, opts: { workspaceId?: string; offset?: number; turn?: number } = {}): Promise<void> {
+    async track(
+      terminalId: string,
+      sessionId: string,
+      opts: { workspaceId?: string; offset?: number; turn?: number; tools?: boolean } = {},
+    ): Promise<void> {
       const terminals = Object.fromEntries(Object.entries(state.terminals).filter(([, t]) => t.sessionId !== sessionId))
       const known = state.sessions[sessionId]
       state = {
@@ -252,7 +258,9 @@ export function createTracker(deps: TrackerDeps) {
         terminals: { ...terminals, [terminalId]: opts.workspaceId ? { sessionId, workspaceId: opts.workspaceId } : { sessionId } },
         sessions: {
           ...state.sessions,
-          [sessionId]: known ? { ...known, touchedAt: clock.now() } : { ...emptySession(clock.now()), offset: opts.offset ?? 0, ledger: { ...EMPTY, turn: opts.turn ?? 0 } },
+          [sessionId]: known
+            ? { ...known, touchedAt: clock.now(), tools: opts.tools ?? known.tools }
+            : { ...emptySession(clock.now()), offset: opts.offset ?? 0, ledger: { ...EMPTY, turn: opts.turn ?? 0 }, tools: opts.tools ?? true },
         },
       }
       await save()

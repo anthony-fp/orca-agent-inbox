@@ -121,4 +121,5 @@ Builds spec sections "The agent's tools (findings)" and "The session plan". Same
 ## T13. Agent eval
 - Files: `docs/agent-eval.md`.
 - Do: in a temporary copy of the inbox repo (never in the real clone), add the `ORCA` host and run `./scripts/eval.sh --suite agent --agent claude` once with `ORCA` and once with `CLAUDE_CODE`. Quote both results files.
+- Also (from T10): the new tool answer "The inbox is not available, so this was not saved." (`bin/mcp-server.mjs:20`) and the joined prompt notes (`src/socket.ts:107-111`) are text a model reads. Add one case where `record` answers "not available", and check the agent does not claim the item was saved.
 - Test: `ORCA` passes every case that `CLAUDE_CODE` passes. A case that fails only with `ORCA` blocks T8.

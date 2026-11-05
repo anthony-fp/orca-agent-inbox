@@ -1,14 +1,16 @@
-// Presses on a row (spec step 6, plan T7). Answer types the answer, or a task's reply, into the agent's terminal,
-// only when the agent waits at its prompt. A step that runs a command goes the same way; the panel does the other steps. Done and Dismiss close the row in the plugin's own state; nothing goes to the agent.
+// Presses on a row (spec step 6, plans T7 and T12). An option, a typed reply, a step that runs a command, and a
+// finding's Fix or File issue each type the inbox's message into the agent's terminal, only when the agent waits at
+// its prompt; the panel does the other steps. Done and Dismiss close the row in the plugin's own state; nothing goes
+// to the agent.
 //
 // The send check (audit fix 2): each press carries the terminal, session and `drawn` token the row was drawn with.
 // In the same tick as the send, the worker checks that the terminal still maps to that session, that the newest
 // status says the main agent is `done`, and that the session's lastTurnId and queue still match `drawn`. A failed
 // check holds the answer ("Waits for the agent"). A send whose result is not certain reads "Not delivered". The
 // plugin never sends a held or undelivered answer again by itself.
-import { closeItem } from './core/ledger'
-import { nowRows, stepsOf, type NowGroups, type NowRow } from './core/now'
-import type { Item } from './core/types'
+import { closeFinding, closeItem } from './core/ledger'
+import { findingRows, fixLabel, nowRows, stepsOf, type FindingGroups, type FindingRow, type NowGroups, type NowRow } from './core/now'
+import type { Finding, Item, Ledger } from './core/types'
 import type { PressLabel, SessionState, State } from './state'
 import { promptAfter } from './transcript'
 import type { Clock } from './turns'
@@ -24,20 +26,26 @@ export type TerminalStatus = 'working' | 'blocked' | 'waiting' | 'done'
 export type RowLabel = { text: string; tone: 'muted' | 'success' | 'danger'; copy: string | null }
 
 export type LabelledRow = NowRow & { label: RowLabel | null }
+export type LabelledFinding = FindingRow & { label: RowLabel | null }
+export type LabelledFindings = Omit<FindingGroups, 'issues' | 'opportunities'> & {
+  issues: LabelledFinding[]
+  opportunities: LabelledFinding[]
+}
 
 export type PressInput = {
   terminalId: string
   sessionId: string
   /** The session's `drawnToken` when the row was drawn. */
   drawn: string
-  /** The item id of the row. */
+  /** The item or finding id of the row. */
   id: string
   /**
-   * `answer` sends the words: a question's option or typed answer, or a task's typed reply. `step` asks the agent to
-   * run a step's command.
+   * `answer` sends a question's option, which closes the row when its turn runs. `reply` sends typed words on any
+   * row; the row stays open and the inbox model decides, as the inbox does. `step` asks the agent to run a step's
+   * command. `fix` and `issue` hand a finding to the agent.
    */
-  action: 'answer' | 'done' | 'dismiss' | 'step'
-  /** The option or typed words, for `answer`. */
+  action: 'answer' | 'reply' | 'done' | 'dismiss' | 'step' | 'fix' | 'issue'
+  /** The option, for `answer`, or the typed words, for `reply`. */
   answer?: string
   /** For `step`: its place among the row's steps and its label, which must still match. */
   step?: { index: number; label: string }
@@ -82,8 +90,45 @@ export function runText(item: Item, command: string): string {
   return oneLine(`For "${item.ask}", run this:\n\`\`\`\n${command}\n\`\`\``)
 }
 
+/** `ISSUE_LABEL` in the inbox repo's `hooks/presses.ts`. */
+export const ISSUE_LABEL = 'File issue'
+
+/** `findingBody` in `hooks/presses.ts`. */
+function findingBody(finding: Finding): string[] {
+  return [
+    `${finding.kind === 'issue' ? 'Issue' : 'Opportunity'}: ${finding.title}`,
+    finding.detail,
+    ...(finding.path ? [`File: ${finding.path}`] : []),
+  ]
+}
+
+/** The inbox mod's message for a finding (`messages.finding` in `hooks/presses.ts`, less Explain and Discuss), on one line. */
+export function findingText(finding: Finding, how: 'address' | 'issue' | 'typed', words = ''): string {
+  const opening =
+    how === 'address'
+      ? 'Please address this finding you recorded:'
+      : how === 'issue'
+        ? "Please file an issue for this finding you recorded, in the issue tracker you have tools for. First check whether one already exists, and if it does, use it instead of filing a duplicate. Then close the finding with the issue's key or number as the reason, and give me its link. If you have no tools for an issue tracker, say so and leave the finding open."
+        : 'About this finding you recorded:'
+  return oneLine([opening, ...findingBody(finding), ...(how === 'typed' ? ['', words] : [])].join('\n'))
+}
+
+type Send = { kind: PressLabel['kind']; answer: string; text: string }
+
+/** The message a finding's press sends, or null when the press sends nothing. */
+function findingSend(finding: Finding, p: PressInput): Send | null {
+  if (p.action === 'fix') return { kind: 'fix', answer: fixLabel(finding), text: findingText(finding, 'address') }
+  if (p.action === 'issue') return { kind: 'issue', answer: ISSUE_LABEL, text: findingText(finding, 'issue') }
+  const words = p.action === 'reply' ? (p.answer?.trim() ?? '') : ''
+  return words ? { kind: 'reply', answer: words, text: findingText(finding, 'typed', words) } : null
+}
+
 /** The message a press sends and what its label records, or null when the press is stale or sends nothing. */
-function sendOf(item: Item, p: PressInput): { kind: PressLabel['kind']; answer: string; text: string } | null {
+function sendOf(ledger: Ledger, p: PressInput): Send | null {
+  const finding = ledger.findings.find(f => f.id === p.id)
+  if (finding) return findingSend(finding, p)
+  const item = ledger.items.find(i => i.id === p.id)
+  if (!item) return null
   if (p.action === 'step') {
     const step = p.step ? stepsOf(item.helps)[p.step.index] : undefined
     if (!step || step.label !== p.step?.label) return null
@@ -91,15 +136,22 @@ function sendOf(item: Item, p: PressInput): { kind: PressLabel['kind']; answer: 
     return run ? { kind: 'step', answer: step.label, text: runText(item, run.command) } : null
   }
   const words = p.answer?.trim() ?? ''
-  if (!words) return null
-  return { kind: item.kind === 'task' ? 'reply' : 'answer', answer: words, text: answerText(item, words) }
+  // An option must still be one of the question's options, as the inbox's `applyPress` checks.
+  if (p.action === 'answer') return item.kind === 'question' && item.options.includes(words) ? { kind: 'answer', answer: words, text: answerText(item, words) } : null
+  if (p.action !== 'reply' || !words) return null
+  return { kind: 'reply', answer: words, text: answerText(item, words) }
 }
 
-/** The label "✓ <what>" once the prompt shows: "✓ Answered", "✓ Replied", or the step's label, as the inbox's "✓ <press>". */
+/**
+ * The label once the prompt shows, as the inbox's `feedbackText` gives a sent press: "✓ " and the press's done
+ * label from `DONE_LABELS` in `hooks/view.ts`, or the option itself, which is its button label.
+ */
 const DONE_TEXT: Record<PressLabel['kind'], (label: PressLabel) => string> = {
-  answer: () => '✓ Answered',
+  answer: label => `✓ ${label.answer}`,
   reply: () => '✓ Replied',
-  step: label => `✓ ${label.answer}`,
+  step: label => `✓ Handed off: ${label.answer}`,
+  fix: () => '✓ Handed off',
+  issue: () => '✓ Asked to file',
 }
 
 export function rowLabel(label: PressLabel): RowLabel {
@@ -115,14 +167,27 @@ export function rowLabel(label: PressLabel): RowLabel {
   }
 }
 
-/** The session's open rows and closed lists, from nowRows, each open row with its press label. */
+/** The session's open rows, findings and closed lists, from nowRows and findingRows, each open row with its press label. */
 export function labelledRows(
   s: SessionState,
   now = 0,
-): { questions: LabelledRow[]; tasks: LabelledRow[]; closed: NowGroups['closed'] } {
+): { questions: LabelledRow[]; tasks: LabelledRow[]; closed: NowGroups['closed']; findings: LabelledFindings } {
   const { questions, tasks, closed } = nowRows(s.ledger, now)
-  const add = (r: NowRow): LabelledRow => ({ ...r, label: s.presses[r.id] ? rowLabel(s.presses[r.id]) : null })
-  return { questions: questions.map(add), tasks: tasks.map(add), closed }
+  const found = findingRows(s.ledger, now)
+  const label = (id: string) => (s.presses[id] ? rowLabel(s.presses[id]) : null)
+  const add = (r: NowRow): LabelledRow => ({ ...r, label: label(r.id) })
+  const addFinding = (r: FindingRow): LabelledFinding => ({ ...r, label: label(r.id) })
+  return {
+    questions: questions.map(add),
+    tasks: tasks.map(add),
+    closed,
+    findings: { issues: found.issues.map(addFinding), opportunities: found.opportunities.map(addFinding), closed: found.closed },
+  }
+}
+
+/** True while the item or finding is open. */
+export function isOpenRow(ledger: Ledger, id: string): boolean {
+  return ledger.items.some(i => i.id === id) || ledger.findings.some(f => f.id === id)
 }
 
 /** The send check, in one tick. Null when the send may go, else why it holds. */
@@ -145,7 +210,7 @@ export function createPresses(deps: PressDeps) {
   function settle(sessionId: string, id: string, at: number, change: Partial<PressLabel>): Promise<void> {
     return deps.edit(sessionId, s => {
       const cur = s.presses[id]
-      return cur && cur.at === at && s.ledger.items.some(i => i.id === id) ? setLabel(s, id, { ...cur, ...change }) : s
+      return cur && cur.at === at && isOpenRow(s.ledger, id) ? setLabel(s, id, { ...cur, ...change }) : s
     })
   }
 
@@ -169,25 +234,25 @@ export function createPresses(deps: PressDeps) {
     async press(p: PressInput): Promise<PressOutcome> {
       const before = deps.state().sessions[p.sessionId]
       if (!before) return { ok: false, refused: 'invalid' }
-      if (!before.ledger.items.some(i => i.id === p.id)) return { ok: false, refused: 'closed' }
+      if (!isOpenRow(before.ledger, p.id)) return { ok: false, refused: 'closed' }
+      const isFinding = before.ledger.findings.some(f => f.id === p.id)
 
-      if (p.action === 'done' || p.action === 'dismiss') {
+      if (p.action === 'dismiss' || (p.action === 'done' && !isFinding)) {
         const how = p.action === 'done' ? 'done' : 'dismissed'
-        await deps.edit(p.sessionId, s => ({ ...s, ledger: closeItem(s.ledger, p.id, { how, outcome: how }, clock.now()) }))
+        const close = isFinding ? closeFinding : closeItem
+        await deps.edit(p.sessionId, s => ({ ...s, ledger: close(s.ledger, p.id, { how, outcome: how }, clock.now()) }))
         return { ok: true, label: null }
       }
 
-      const first = before.ledger.items.find(i => i.id === p.id)
-      if (!first || !sendOf(first, p)) return { ok: false, refused: 'invalid' }
+      if (!sendOf(before.ledger, p)) return { ok: false, refused: 'invalid' }
       // Where the answer's prompt will start. Read before the check, so nothing waits between the check and the send.
       const bytes = await deps.read(p.sessionId)
 
       // From here to the send: one tick.
       const state = deps.state()
       const s = state.sessions[p.sessionId]
-      const item = s?.ledger.items.find(i => i.id === p.id)
-      if (!s || !item) return { ok: false, refused: 'closed' }
-      const sent = sendOf(item, p)
+      if (!s || !isOpenRow(s.ledger, p.id)) return { ok: false, refused: 'closed' }
+      const sent = sendOf(s.ledger, p)
       if (!sent) return { ok: false, refused: 'invalid' }
       const label: PressLabel = { state: 'sending', ...sent, at: clock.now() }
       const status = deps.status(p.terminalId)

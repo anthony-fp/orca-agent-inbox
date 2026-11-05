@@ -4,8 +4,8 @@ import { describe, test } from 'node:test'
 
 import { EMPTY, applyUpdate, parseReply } from './core/ledger'
 import type { ModelResult } from './model'
-import { CONFIRM_MS, answerText, createPresses, runText, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
-import type { Help } from './core/types'
+import { CONFIRM_MS, answerText, createPresses, findingText, runText, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
+import type { Finding, Help } from './core/types'
 import { upgradeState } from './state'
 import { fakeClock } from './test-clock'
 import { createTracker } from './turns'
@@ -27,7 +27,7 @@ const okModel = (calls: string[]) => async (p: string): Promise<ModelResult> => 
   return { ok: true, update, text: '', ms: 1 }
 }
 
-async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?: Help[] } = {}) {
+async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?: Help[]; findings?: Finding[] } = {}) {
   const time = fakeClock(1000)
   const saved = new Map<string, unknown>()
   const storage = { get: async (k: string) => saved.get(k) ?? null, set: async (k: string, v: unknown) => void saved.set(k, structuredClone(v)) }
@@ -44,7 +44,7 @@ async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?:
   const update = parseReply(opts.kind === 'do' ? `NEW: do | - | ${TASK} | - | -` : `NEW: decide | 1 | ${ASK} | Yes / No | yes`)
   assert.ok(update)
   const ledger = applyUpdate(EMPTY, update, 0, 1)
-  const withHelps = opts.helps ? { ...ledger, items: ledger.items.map(i => ({ ...i, helps: opts.helps! })) } : ledger
+  const withHelps = { ...(opts.helps ? { ...ledger, items: ledger.items.map(i => ({ ...i, helps: opts.helps! })) } : ledger), findings: opts.findings ?? [] }
   await tracker.edit(S, s => ({ ...s, offset: file.text.length, lastTurnId: 'p-1', ledger: withHelps }))
 
   const status = new Map<string, TerminalStatus>([[T, 'done']])
@@ -63,19 +63,23 @@ async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?:
   const s = () => tracker.state().sessions[S]
   const item = s().ledger.items[0]
   const input = (over: Partial<PressInput> = {}): PressInput => ({ terminalId: T, sessionId: S, drawn: drawnToken(s()), id: item.id, action: 'answer', answer: 'Yes', ...over })
-  const label = () => [...labelledRows(s()).questions, ...labelledRows(s()).tasks].find(r => r.id === item.id)?.label ?? null
-  return { time, tracker, presses, status, sent, file, input, label, item, s, saved, modelCalls, beforeSend: (f: () => void) => (onRead = f) }
+  const labelOf = (id: string) => {
+    const rows = labelledRows(s())
+    return [...rows.questions, ...rows.tasks, ...rows.findings.issues, ...rows.findings.opportunities].find(r => r.id === id)?.label ?? null
+  }
+  const label = () => labelOf(item.id)
+  return { time, tracker, presses, status, sent, file, input, label, labelOf, item, s, saved, modelCalls, beforeSend: (f: () => void) => (onRead = f) }
 }
 
 describe('presses', () => {
-  test('done: sends the answer, reads "Sending…", then "✓ Answered" once the prompt shows', async () => {
+  test('done: sends the option, reads "Sending…", then "✓ <option>" once the prompt shows, as the inbox does', async () => {
     const t = await setup()
     const out = await t.presses.press(t.input())
     assert.deepEqual(out, { ok: true, label: { text: 'Sending…', tone: 'muted', copy: null } })
     assert.deepEqual(t.sent, [{ terminalId: T, text: `Re "${ASK}": Yes` }])
     t.file.text += prompt('p-2', `Re "${ASK}": Yes`)
     await t.time.run(t.time.now() + 2000)
-    assert.deepEqual(t.label(), { text: '✓ Answered', tone: 'success', copy: null })
+    assert.deepEqual(t.label(), { text: '✓ Yes', tone: 'success', copy: null })
     assert.equal(t.s().presses[t.item.id].turnId, 'p-2')
   })
 
@@ -188,7 +192,7 @@ describe('presses', () => {
     )
   })
 
-  test("a run step sends the inbox's run message on one line, reads \"✓ <step>\", and leaves the row open", async () => {
+  test("a run step sends the inbox's run message on one line, reads \"✓ Handed off: <step>\", and leaves the row open", async () => {
     const run: Help = { kind: 'run', command: 'psql -f checks/friday.sql', name: 'Friday check query' }
     const t = await setup({ kind: 'do', helps: [run] })
     const sent = `For "${TASK}", run this: \`\`\` psql -f checks/friday.sql \`\`\``
@@ -197,7 +201,7 @@ describe('presses', () => {
     assert.deepEqual(t.sent, [{ terminalId: T, text: sent }])
     t.file.text += prompt('p-2', sent)
     await t.time.run(t.time.now() + 2000)
-    assert.deepEqual(t.label(), { text: '✓ Run Friday check query', tone: 'success', copy: null })
+    assert.deepEqual(t.label(), { text: '✓ Handed off: Run Friday check query', tone: 'success', copy: null })
     t.file.text += reply('a-2', 'Ran it.')
     void t.tracker.done(T)
     await t.time.run()
@@ -215,7 +219,7 @@ describe('presses', () => {
   test("a task's reply sends the inbox's task message, reads \"✓ Replied\", and leaves the task open", async () => {
     const t = await setup({ kind: 'do' })
     const sent = `Re the task you left for me, "${TASK}": Ran it, all green`
-    await t.presses.press(t.input({ answer: 'Ran it, all green' }))
+    await t.presses.press(t.input({ action: 'reply', answer: 'Ran it, all green' }))
     assert.deepEqual(t.sent, [{ terminalId: T, text: sent }])
     t.file.text += prompt('p-2', sent)
     await t.time.run(t.time.now() + 2000)
@@ -226,5 +230,76 @@ describe('presses', () => {
     assert.equal(t.modelCalls.length, 1)
     assert.deepEqual(t.s().ledger.closed, [], 'the reply closes nothing: the model decides')
     assert.ok(t.s().ledger.items.some(i => i.id === t.item.id))
+  })
+
+  test('a typed reply on a question leaves it open until the inbox model runs, and the model decides', async () => {
+    const t = await setup()
+    const sent = `Re "${ASK}": Only after the tests pass`
+    await t.presses.press(t.input({ action: 'reply', answer: 'Only after the tests pass' }))
+    assert.deepEqual(t.sent, [{ terminalId: T, text: sent }])
+    t.file.text += prompt('p-2', sent)
+    await t.time.run(t.time.now() + 2000)
+    assert.deepEqual(t.label(), { text: '✓ Replied', tone: 'success', copy: null })
+    assert.ok(t.s().ledger.items.some(i => i.id === t.item.id), 'the reply closes nothing at once')
+    t.file.text += reply('a-2', 'I will wait for the tests.')
+    void t.tracker.done(T)
+    await t.time.run()
+    assert.equal(t.modelCalls.length, 1)
+    const block = (name: string) => t.modelCalls[0].split(`<${name}>`)[1].split(`</${name}>`)[0]
+    assert.ok(block('open').includes(ASK), 'the model reads the question as still open')
+    assert.ok(t.s().ledger.items.some(i => i.id === t.item.id))
+  })
+
+  test('an option that is not one of the question\'s options is refused', async () => {
+    const t = await setup()
+    assert.deepEqual(await t.presses.press(t.input({ answer: 'Maybe' })), { ok: false, refused: 'invalid' })
+    assert.deepEqual(t.sent, [])
+  })
+
+  const ISSUE: Finding = { id: 'i7', kind: 'issue', title: 'The retry loop never backs off', detail: 'Each retry fires at once.', path: 'src/fetch.ts', at: 0 }
+  const IDEA: Finding = { id: 'i8', kind: 'opportunity', title: 'Cache the config', detail: 'It is parsed on each call.', path: null, at: 0 }
+
+  test("a finding's Fix, File issue and Reply send the inbox's finding messages on one line, each with its label", async () => {
+    const cases = [
+      { action: 'fix', finding: ISSUE, text: findingText(ISSUE, 'address'), done: '✓ Handed off' },
+      { action: 'fix', finding: IDEA, text: findingText(IDEA, 'address'), done: '✓ Handed off' },
+      { action: 'issue', finding: ISSUE, text: findingText(ISSUE, 'issue'), done: '✓ Asked to file' },
+      { action: 'reply', finding: ISSUE, text: findingText(ISSUE, 'typed', 'Use a jitter'), done: '✓ Replied' },
+    ] as const
+    for (const c of cases) {
+      const t = await setup({ findings: [c.finding] })
+      const out = await t.presses.press(t.input({ id: c.finding.id, action: c.action, answer: c.action === 'reply' ? 'Use a jitter' : undefined }))
+      assert.deepEqual(out, { ok: true, label: { text: 'Sending…', tone: 'muted', copy: null } })
+      assert.deepEqual(t.sent, [{ terminalId: T, text: c.text }])
+      t.file.text += prompt('p-2', c.text)
+      await t.time.run(t.time.now() + 2000)
+      assert.deepEqual(t.labelOf(c.finding.id), { text: c.done, tone: 'success', copy: null })
+      t.file.text += reply('a-2', 'On it.')
+      void t.tracker.done(T)
+      await t.time.run()
+      assert.ok(t.s().ledger.findings.some(f => f.id === c.finding.id), 'the finding stays open: the agent closes it')
+      assert.deepEqual(t.labelOf(c.finding.id)?.text, c.done, 'the label outlives the turn while the finding is open')
+    }
+    assert.equal(
+      findingText(ISSUE, 'address'),
+      'Please address this finding you recorded: Issue: The retry loop never backs off Each retry fires at once. File: src/fetch.ts',
+    )
+    assert.equal(
+      findingText(IDEA, 'typed', 'Do it\nnow'),
+      'About this finding you recorded: Opportunity: Cache the config It is parsed on each call. Do it now',
+    )
+  })
+
+  test('a held Fix reads "Waits for the agent" with Copy; Dismiss closes the finding in state only; Done is refused', async () => {
+    const t = await setup({ findings: [ISSUE] })
+    t.status.set(T, 'working')
+    const out = await t.presses.press(t.input({ id: ISSUE.id, action: 'fix' }))
+    assert.deepEqual(out, { ok: true, label: { text: 'Waits for the agent', tone: 'muted', copy: findingText(ISSUE, 'address') } })
+    assert.deepEqual(await t.presses.press(t.input({ id: ISSUE.id, action: 'done' })), { ok: false, refused: 'invalid' })
+    assert.deepEqual(await t.presses.press(t.input({ id: ISSUE.id, action: 'dismiss' })), { ok: true, label: null })
+    assert.deepEqual(t.s().ledger.findings, [])
+    assert.deepEqual([t.s().ledger.closedFindings[0].how, t.s().ledger.closedFindings[0].outcome], ['dismissed', 'dismissed'])
+    assert.deepEqual(t.sent, [])
+    assert.deepEqual(await t.presses.press(t.input({ id: ISSUE.id, action: 'fix' })), { ok: false, refused: 'closed' })
   })
 })

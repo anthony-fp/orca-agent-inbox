@@ -15,6 +15,7 @@ const FILE = transcriptPath(HOME, WS.path, S)
 const PLAN_FILE = planPath(WS.path, S)
 const DAY = 24 * 60 * 60 * 1000
 const NONE = { shown: [], total: 0 }
+const NO_FINDINGS = { issues: [], opportunities: [], closed: { issues: NONE, opportunities: NONE } }
 
 const prompt = (uuid: string, text: string) =>
   JSON.stringify({ type: 'user', uuid, isSidechain: false, origin: { kind: 'human' }, turnPosition: { promptIndex: 1, turnIndex: 1 }, message: { role: 'user', content: text } }) + '\n'
@@ -27,11 +28,12 @@ const openLedger = () => {
   return applyUpdate(EMPTY, u, 0, 1)
 }
 
-async function setup(opts: { state?: State; files?: Record<string, string>; agents?: unknown[] } = {}) {
+async function setup(opts: { state?: State; files?: Record<string, string>; agents?: unknown[]; copyFails?: boolean } = {}) {
   const time = fakeClock(100 * DAY)
   const files = new Map(Object.entries(opts.files ?? {}))
   const reads: string[] = []
   const models: string[] = []
+  const copied: string[] = []
   const host = mockHost({
     storage: opts.state ? { state: opts.state } : {},
     results: {
@@ -44,6 +46,10 @@ async function setup(opts: { state?: State; files?: Record<string, string>; agen
     clock: time.clock,
     home: HOME,
     tools: null,
+    copy: async (text: string) => {
+      if (opts.copyFails) throw new Error('no clipboard command on this system')
+      copied.push(text)
+    },
     model: async (p: string): Promise<ModelResult> => {
       models.push(p)
       const update = parseReply('NEW: decide | 1 | Rename the folder to tools? | Yes / No | yes')
@@ -59,7 +65,7 @@ async function setup(opts: { state?: State; files?: Record<string, string>; agen
   const worker = await mountWorker({ default: (orca: Parameters<typeof createWorker>[0]) => createWorker(orca, deps) }, { host })
   await time.run()
   const saved = () => (host.data() as { storage: Record<string, State> }).storage.state
-  return { worker, host, time, files, reads, models, saved }
+  return { worker, host, time, files, reads, models, saved, copied }
 }
 
 const launch = (command: string, over: Record<string, unknown> = {}) => ({
@@ -208,7 +214,9 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
         ],
         tasks: [],
         closed: { questions: NONE, tasks: NONE },
+        findings: NO_FINDINGS,
         plan: null,
+        tools: true,
       },
       {
         terminalId: 'term-2',
@@ -219,10 +227,14 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
         questions: [],
         tasks: [],
         closed: { questions: NONE, tasks: NONE },
+        findings: NO_FINDINGS,
         plan: null,
+        tools: true,
       },
     ],
-    untracked: 2,
+    // The Codex agent gets the Claude-only note and leaves the "not tracked" count, which keeps only Claude agents.
+    others: [{ key: 'agent-3', title: 'Codex' }],
+    untracked: 1,
     unread: 1,
   })
 
@@ -253,4 +265,44 @@ test('inbox.view gives each section its plan, read again at a done; a changed pl
   const again = await t.worker.request('inbox.view', undefined)
   assert.equal(again.sections[0].plan?.done, 2)
   await t.worker.deactivate()
+})
+
+test('inbox.view: agents that are not Claude get the Claude-only list, by title, and count as nothing else', async () => {
+  const agents = [
+    { terminalId: 'term-5', title: 'Codex: review', agent: 'codex', state: 'working', stateStartedAt: 1 },
+    { terminalId: 'term-6', title: null, agent: 'codex', state: 'done', stateStartedAt: 1 },
+  ]
+  const t = await setup({ agents })
+  const view = await t.worker.request('inbox.view', undefined)
+  assert.deepEqual(view, {
+    sections: [],
+    others: [
+      { key: 'term-5', title: 'Codex: review' },
+      { key: 'term-6', title: 'Codex' },
+    ],
+    untracked: 0,
+    unread: 0,
+  })
+  await t.worker.deactivate()
+})
+
+test('a launch that got no tools marks its session, and its section says so', async () => {
+  const t = await setup({ agents: [{ terminalId: 'term-1', title: 'Fixer', agent: 'claude', state: 'done', stateStartedAt: 1 }] })
+  // No socket in the test (`tools: null`), so every launch here gets no tools, as one that sets its own --settings does.
+  await t.worker.hooks.fire('agent.launch.before', launch(`claude --resume ${S} --settings x.json`))
+  assert.equal(t.saved().sessions[S].tools, false)
+  const view = await t.worker.request('inbox.view', undefined)
+  assert.equal(view.sections[0].tools, false)
+  assert.deepEqual(view.sections[0].findings, NO_FINDINGS)
+  await t.worker.deactivate()
+})
+
+test('inbox.copy writes the clipboard, and says why when it cannot', async () => {
+  const t = await setup()
+  assert.deepEqual(await t.worker.request('inbox.copy', { text: 'PORT=4000' }), { ok: true })
+  assert.deepEqual(t.copied, ['PORT=4000'])
+  await t.worker.deactivate()
+  const failing = await setup({ copyFails: true })
+  assert.deepEqual(await failing.worker.request('inbox.copy', { text: 'x' }), { ok: false, error: 'no clipboard command on this system' })
+  await failing.worker.deactivate()
 })

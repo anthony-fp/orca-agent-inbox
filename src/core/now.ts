@@ -1,7 +1,7 @@
 import { closedState } from './ledger'
 import { questionNumbers } from './model-text'
 import { ago } from './text'
-import type { Closed, Help, Item, Ledger } from './types'
+import type { Closed, ClosedFinding, Finding, Help, Item, Ledger } from './types'
 
 /** Past this many options, a question shows its first four and an "All N options" button (`OPTIONS_FOLD_AT` in the inbox repo's `hooks/view.ts`). */
 export const OPTIONS_FOLD_AT = 5
@@ -138,4 +138,65 @@ export function nowRows(ledger: Ledger, now = 0): NowGroups {
   }
 
   return { questions: rows('question'), tasks: rows('task'), closed: { questions: closed('question'), tasks: closed('task') } }
+}
+
+/** Each finding kind's group and the mark before its row (`FINDING_GROUPS` in `hooks/view.ts`). */
+export const FINDING_GROUPS: Record<Finding['kind'], { title: string; mark: string }> = {
+  issue: { title: 'Issues', mark: '▲' },
+  opportunity: { title: 'Opportunities', mark: '✦' },
+}
+
+/** One open finding as the Now view shows it (the finding rows of `inboxView` in `hooks/view.ts`). */
+export type FindingRow = {
+  id: string
+  kind: Finding['kind']
+  mark: string
+  title: string
+  detail: string
+  /** The file's name, as `baseName` gives it, or null. */
+  fileName: string | null
+  age: string
+  /** The first button: "Fix" on an issue, "Do it" on an opportunity (`fixLabel` in `hooks/view.ts`). */
+  fix: string
+}
+
+export type FindingGroups = {
+  issues: FindingRow[]
+  opportunities: FindingRow[]
+  closed: { issues: ClosedGroup; opportunities: ClosedGroup }
+}
+
+/** `fixLabel` in `hooks/view.ts`. */
+export const fixLabel = (f: Pick<Finding, 'kind'>) => (f.kind === 'opportunity' ? 'Do it' : 'Fix')
+
+/** The open findings, newest first, and each kind's closed findings, newest closed first, as the inbox's Now view shows them. */
+export function findingRows(ledger: Ledger, now = 0): FindingGroups {
+  const open = (kind: Finding['kind']): FindingRow[] =>
+    [...ledger.findings]
+      .reverse()
+      .filter(f => f.kind === kind)
+      .map(f => ({
+        id: f.id,
+        kind: f.kind,
+        mark: FINDING_GROUPS[kind].mark,
+        title: f.title,
+        detail: f.detail,
+        fileName: f.path ? baseName(f.path) : null,
+        age: shortAgo(now - f.at),
+        fix: fixLabel(f),
+      }))
+  const closed = (kind: Finding['kind']): ClosedGroup => {
+    const all = ledger.closedFindings.filter(f => f.kind === kind).sort((a, b) => b.closedAt - a.closedAt)
+    // `outcomeLabel` in `hooks/view.ts`: a finding a question replaced says where it went.
+    const row = (f: ClosedFinding): ClosedRow => ({
+      id: f.id,
+      mark: CLOSED_MARKS[closedState(f)],
+      text: f.title,
+      outcome: f.askedAs ? 'Now a question' : f.outcome.charAt(0).toUpperCase() + f.outcome.slice(1),
+      age: shortAgo(now - f.closedAt),
+    })
+    return { shown: all.slice(0, CLOSED_SHOWN).map(row), total: all.length }
+  }
+
+  return { issues: open('issue'), opportunities: open('opportunity'), closed: { issues: closed('issue'), opportunities: closed('opportunity') } }
 }

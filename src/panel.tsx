@@ -1,5 +1,6 @@
-// The inbox panel (spec steps 5 and 6, plan T6): one section per tracked agent in the focused workspace, newest
-// activity first, each with its open questions and tasks as in the inbox's Now tab.
+// The inbox panel (spec steps 5 and 6, plans T6 and T12): one section per tracked agent in the focused workspace,
+// newest activity first, each with its questions, tasks, findings and plan as in the inbox's Now tab, then a short
+// section for each agent that is not Claude Code.
 // No build step: Orca strips the types and compiles the JSX when the panel loads.
 import {
   atom,
@@ -11,6 +12,7 @@ import {
   Heading,
   Input,
   plugin,
+  Progress,
   read,
   Row,
   Separator,
@@ -20,8 +22,9 @@ import {
   update,
 } from 'orca'
 import type { ClosedGroup, Step } from './core/now'
-import type { InboxSection, InboxView } from './protocol'
-import type { LabelledRow, PressInput, RowLabel } from './presses'
+import { planLines, type PlanLine } from './core/plan'
+import type { CopyOutcome, InboxSection, InboxView, OtherAgent } from './protocol'
+import type { LabelledFinding, LabelledRow, PressInput, RowLabel } from './presses'
 
 type Loaded = { is: 'loading' } | { is: 'error'; message: string } | { is: 'ready'; view: InboxView }
 
@@ -38,13 +41,21 @@ const shown = atom<Record<string, boolean>>({})
 const replying = atom<Record<string, boolean>>({})
 /** Questions whose folded options show. */
 const allShown = atom<Record<string, boolean>>({})
-/** What a row's last local step did: opened a link, or shows text to copy. */
+/** What a row's last local step did: opened a link, copied, or shows text to copy. */
 const stepResults = atom<Record<string, RowLabel>>({})
+/** What a label's Copy press did, by label: under way, done, or failed, so the label shows its text to select. */
+const copies = atom<Record<string, 'copying' | 'copied' | 'failed'>>({})
+/** Plan tasks the person opened or closed, by `planKey`. Kept while the panel runs; a task not here takes its default. */
+const planOpen = atom<Record<string, boolean>>({})
 
 /** What a row reads while its press is out. Done and Dismiss read as the row closing, as the inbox's Mark presses do. */
+const SENDING: RowLabel = { text: 'Sending…', tone: 'muted', copy: null }
 const PENDING: Record<PressInput['action'], RowLabel> = {
-  answer: { text: 'Sending…', tone: 'muted', copy: null },
-  step: { text: 'Sending…', tone: 'muted', copy: null },
+  answer: SENDING,
+  reply: SENDING,
+  step: SENDING,
+  fix: SENDING,
+  issue: SENDING,
   done: { text: '✓ Done', tone: 'muted', copy: null },
   dismiss: { text: 'Dismissed', tone: 'muted', copy: null },
 }
@@ -68,8 +79,10 @@ async function load(): Promise<void> {
 }
 
 type PressWhat = Pick<PressInput, 'action' | 'answer' | 'step'>
+/** What a press needs of a row: an open question, task or finding. */
+type Pressable = { id: string; label: RowLabel | null }
 
-async function press(s: InboxSection, row: LabelledRow, what: PressWhat): Promise<void> {
+async function press(s: InboxSection, row: Pressable, what: PressWhat): Promise<void> {
   const key = rowKey(s, row.id)
   const { action } = what
   update(local, m => ({ ...m, [key]: { label: PENDING[action], pending: true } }))
@@ -78,7 +91,7 @@ async function press(s: InboxSection, row: LabelledRow, what: PressWhat): Promis
   try {
     const out = await plugin.request('inbox.press', input)
     label = out.ok ? (out.label ?? PENDING[action]) : REFUSED[out.refused]
-    if (out.ok && action === 'answer') {
+    if (out.ok && action === 'reply') {
       update(drafts, m => ({ ...m, [key]: '' }))
       update(replying, m => ({ ...m, [key]: false }))
     }
@@ -93,15 +106,30 @@ async function press(s: InboxSection, row: LabelledRow, what: PressWhat): Promis
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
 const baseName = (path: string) => path.replace(/\/+$/, '').split('/').pop() ?? path
 
+/** Asks the worker to write the clipboard. Null when it did, else why not. */
+async function copyText(text: string): Promise<string | null> {
+  try {
+    const out: CopyOutcome = await plugin.request('inbox.copy', { text })
+    return out.ok ? null : out.error
+  } catch (e) {
+    return message(e)
+  }
+}
+
 /**
- * A local step, as the inbox's `stepEffects` does it where Orca allows: a link opens in the browser. Orca gives a panel
- * no clipboard and no way to open a local file, so a snippet, a command or a path shows as text to select and copy.
+ * A local step, as the inbox's `stepEffects` does it where Orca allows: a link opens in the browser, and the worker
+ * copies a snippet, a command or a path (Orca cannot open a local file from a panel). Where the copy fails, the text
+ * shows to select.
  */
 async function localStep(s: InboxSection, row: LabelledRow, step: Step): Promise<void> {
   const key = rowKey(s, row.id)
+  const texts = step.helps.flatMap(h => (h.kind === 'copy' ? [h.text] : h.kind === 'terminal' ? [h.command] : h.kind === 'open' ? [h.path] : []))
+  if (texts.length > 0) update(stepResults, m => ({ ...m, [key]: { text: 'Copying…', tone: 'muted', copy: null } }))
+  const isCopied = texts.length > 0 && (await copyText(texts.join('\n'))) === null
   const parts: string[] = []
   const copies: string[] = []
   let failed = false
+  let isOpen = false
   for (const h of step.helps) {
     if (h.kind === 'link') {
       const name = h.name ?? h.url
@@ -114,20 +142,27 @@ async function localStep(s: InboxSection, row: LabelledRow, step: Step): Promise
       if (why !== null) failed = true
       parts.push(why === null ? `Opened ${name}` : `Could not open ${name}: ${why}`)
     } else if (h.kind === 'copy') {
-      copies.push(h.text)
-      parts.push(`Select ${h.name ?? 'snippet'} below to copy it`)
+      const name = h.name ?? 'snippet'
+      if (!isCopied) copies.push(h.text)
+      parts.push(isCopied ? `Copied ${name}` : `Select ${name} below to copy it`)
     } else if (h.kind === 'terminal') {
-      copies.push(h.command)
-      parts.push(`Select ${h.name ?? clip(h.command, 32)} below to copy it, then run it in Terminal`)
+      const name = h.name ?? clip(h.command, 32)
+      if (!isCopied) copies.push(h.command)
+      parts.push(isCopied ? `Copied ${name}. Run it in Terminal.` : `Select ${name} below to copy it, then run it in Terminal`)
     } else if (h.kind === 'open') {
-      copies.push(h.path)
-      parts.push(`Orca cannot open ${baseName(h.path)} from a panel: select its path below to copy it`)
+      isOpen = true
+      if (!isCopied) copies.push(h.path)
+      parts.push(
+        isCopied
+          ? `Copied the path of ${baseName(h.path)}: Orca cannot open it from a panel`
+          : `Orca cannot open ${baseName(h.path)} from a panel: select its path below to copy it`,
+      )
     }
   }
-  const isOpenedOnly = copies.length === 0 && !failed
+  const isDone = copies.length === 0 && !failed && !isOpen
   const label: RowLabel = {
-    text: `${isOpenedOnly ? '✓ ' : ''}${parts.join(' · ')}`,
-    tone: failed ? 'danger' : isOpenedOnly ? 'success' : 'muted',
+    text: `${isDone ? '✓ ' : ''}${parts.join(' · ')}`,
+    tone: failed ? 'danger' : isDone ? 'success' : 'muted',
     copy: copies.length > 0 ? copies.join('\n') : null,
   }
   update(stepResults, m => ({ ...m, [key]: label }))
@@ -173,26 +208,53 @@ export function setup(ctx: { subscriptions: { dispose(): void }[] }) {
   void load()
 }
 
+/** Copy writes the clipboard through the worker and reads "✓ Copied". Where that fails, the text shows to select. */
+async function copyLabel(rowId: string, text: string): Promise<void> {
+  update(copies, m => ({ ...m, [rowId]: 'copying' }))
+  const error = await copyText(text)
+  update(copies, m => ({ ...m, [rowId]: error === null ? 'copied' : 'failed' }))
+  if (error !== null) update(shown, m => ({ ...m, [rowId]: true }))
+}
+
 function Label({ label, rowId }: { label: RowLabel; rowId: string }) {
   const isShown = read(shown)[rowId] === true
+  const copy = read(copies)[rowId]
+  const text = label.copy
   return (
     <Stack gap="xs">
       <Row gap="sm" align="center" wrap>
         <Text size="sm" muted={label.tone === 'muted'} tone={label.tone === 'muted' ? undefined : label.tone}>
           {label.text}
         </Text>
-        {label.copy !== null && (
-          <Button size="xs" variant="ghost" onPress={() => update(shown, m => ({ ...m, [rowId]: !isShown }))}>
+        {text !== null && (
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={copy === 'copying'}
+            onPress={() => (isShown ? update(shown, m => ({ ...m, [rowId]: false })) : copyLabel(rowId, text))}
+          >
             {isShown ? 'Hide' : 'Copy'}
           </Button>
         )}
+        {text !== null && copy === 'copying' && (
+          <Text size="sm" muted>
+            Copying…
+          </Text>
+        )}
+        {text !== null && copy === 'copied' && (
+          <Text size="sm" tone="success">
+            ✓ Copied
+          </Text>
+        )}
       </Row>
-      {label.copy !== null && isShown && <CodeView code={label.copy} label="Select the text to copy it" wrap />}
+      {text !== null && isShown && (
+        <CodeView code={text} label={copy === 'failed' ? 'Could not copy: select the text to copy it' : 'Select the text to copy it'} wrap />
+      )}
     </Stack>
   )
 }
 
-function rowState(section: InboxSection, row: LabelledRow) {
+function rowState(section: InboxSection, row: Pressable) {
   const key = rowKey(section, row.id)
   const mine = read(local)[key]
   // A press still out shows its own label. After it, the worker's label wins: it moves on from Sending….
@@ -202,11 +264,12 @@ function rowState(section: InboxSection, row: LabelledRow) {
 }
 
 /** The reply field a Reply press opens, with Send and Cancel (`ROW_COPY` in the inbox repo's `hooks/view.ts`). */
-function ReplyField({ section, row, hint, busy }: { section: InboxSection; row: LabelledRow; hint: string; busy: boolean }) {
+function ReplyField({ section, row, hint, busy }: { section: InboxSection; row: Pressable; hint: string; busy: boolean }) {
   const key = rowKey(section, row.id)
   const draft = read(drafts)[key] ?? ''
+  // Typed words never close the row at once: the inbox model reads the turn and decides (`hooks/presses.ts`, `type`).
   const send = () => {
-    if (draft.trim()) void press(section, row, { action: 'answer', answer: draft })
+    if (draft.trim()) void press(section, row, { action: 'reply', answer: draft })
   }
   return (
     <Stack gap="xs">
@@ -344,18 +407,67 @@ function ClosedFold({ group }: { group: ClosedGroup }) {
   )
 }
 
-function Group({
+/** A finding's tone: an issue's ▲ warns, an opportunity's ✦ reads as good news (`FINDING_GROUPS` in `hooks/view.ts`). */
+const FINDING_TONES = { issue: 'warning', opportunity: 'success' } as const
+
+/**
+ * An issue or opportunity: its mark and title with the age on the right, its detail and file, then the inbox's
+ * finding buttons (`actionsOf` in `hooks/view.ts`) less Explain and Discuss: Fix or Do it, File issue, Reply, Dismiss.
+ */
+function Finding({ section, row }: { section: InboxSection; row: LabelledFinding }) {
+  const { key, label, busy } = rowState(section, row)
+  return (
+    <Stack gap="xs">
+      <Row gap="sm" align="start" justify="between">
+        <Row gap="xs" align="start">
+          <Text tone={FINDING_TONES[row.kind]}>{row.mark}</Text>
+          <Text>{row.title}</Text>
+        </Row>
+        <Text size="sm" muted>
+          {row.age}
+        </Text>
+      </Row>
+      <Text size="sm">{row.detail}</Text>
+      {row.fileName !== null && (
+        <Text size="sm" muted>
+          {`Relevant file: ${row.fileName}`}
+        </Text>
+      )}
+      <Row gap="xs" wrap>
+        <Button size="sm" variant="solid" disabled={busy} onPress={() => press(section, row, { action: 'fix' })}>
+          {row.fix}
+        </Button>
+        <Button size="sm" variant="outline" disabled={busy} onPress={() => press(section, row, { action: 'issue' })}>
+          File issue
+        </Button>
+        <Button size="sm" variant="outline" disabled={busy} onPress={() => update(replying, m => ({ ...m, [key]: true }))}>
+          Reply
+        </Button>
+        <Button size="sm" variant="ghost" disabled={busy} onPress={() => press(section, row, { action: 'dismiss' })}>
+          Dismiss
+        </Button>
+      </Row>
+      {read(replying)[key] === true && <ReplyField section={section} row={row} hint="Your reply to Claude" busy={busy} />}
+      <Labels rowKey={key} label={label} />
+    </Stack>
+  )
+}
+
+function Group<R>({
   title,
   rows,
   closed,
   draw,
+  always = false,
 }: {
   title: string
-  rows: LabelledRow[]
+  rows: R[]
   closed: ClosedGroup
-  draw: (row: LabelledRow) => unknown
+  draw: (row: R) => unknown
+  /** Show the group, with its empty line, even with nothing open or closed. */
+  always?: boolean
 }) {
-  if (rows.length + closed.total === 0) return null
+  if (!always && rows.length + closed.total === 0) return null
   return (
     <Stack gap="md">
       <Text size="sm" weight="semibold" muted>{`${title} · ${rows.length}`}</Text>
@@ -369,12 +481,84 @@ function Group({
   )
 }
 
+/** Where a plan task's open choice is kept: its session, its place and its title. */
+const planKey = (s: InboxSection, n: number, title: string) => `${s.sessionId}:${n}:${title}`
+
+const PLAN_TONES = { done: 'success', needsYou: 'accent', error: 'danger' } as const
+
+/** One plan line as `planLines` gives it: its tone, or dim, and bold. */
+function PlanText({ line }: { line: PlanLine }) {
+  const tone = line.tone === null || line.tone === 'dim' ? undefined : PLAN_TONES[line.tone as keyof typeof PLAN_TONES]
+  return (
+    <Text size="sm" muted={line.tone === 'dim'} tone={tone} weight={line.isBold ? 'semibold' : undefined}>
+      {line.text}
+    </Text>
+  )
+}
+
+/**
+ * The session plan (spec "The session plan", step 3), from `planLines`: "PLAN N of M steps", a progress bar, then one
+ * fold per task with its count and steps. A task with a step in progress starts open; a press toggles it.
+ */
+function Plan({ section }: { section: InboxSection }) {
+  const plan = section.plan
+  if (!plan) return null
+  const chosen = read(planOpen)
+  const view = { ...plan, tasks: plan.tasks.map((t, n) => ({ ...t, isOpen: chosen[planKey(section, n, t.title)] ?? t.isOpen })) }
+  const [head, , ...rest] = planLines(view, null)
+  if (!head) return null
+  // planLines gives a task line at indent 0 and its steps under it: rebuild one fold per task.
+  const tasks: { line: PlanLine; steps: PlanLine[] }[] = []
+  for (const line of rest) {
+    if (line.indent === 0) tasks.push({ line, steps: [] })
+    else tasks.at(-1)?.steps.push(line)
+  }
+  return (
+    <Stack gap="sm">
+      <PlanText line={head} />
+      <Progress label={head.text} labelHidden value={plan.total === 0 ? 0 : Math.round((plan.done / plan.total) * 100)} />
+      {tasks.map((t, n) => {
+        const task = view.tasks[n]!
+        return (
+          <Collapsible
+            key={planKey(section, n, task.title)}
+            title={t.line.text.replace(/^[▸▾] /, '')}
+            open={task.isOpen}
+            onChange={(open: boolean) => update(planOpen, m => ({ ...m, [planKey(section, n, task.title)]: open }))}
+          >
+            <Stack gap="xs">
+              {t.steps.map((step, k) => (
+                <PlanText key={`step-${k}`} line={step} />
+              ))}
+            </Stack>
+          </Collapsible>
+        )
+      })}
+    </Stack>
+  )
+}
+
+const hasFindings = ({ findings: f }: InboxSection) =>
+  f.issues.length + f.opportunities.length + f.closed.issues.total + f.closed.opportunities.total > 0
+
+/** True when the section has nothing to draw beyond its title. */
+function isEmpty(s: InboxSection): boolean {
+  const { questions, tasks, closed } = s
+  return questions.length + tasks.length + closed.questions.total + closed.tasks.total === 0 && !hasFindings(s) && s.plan === null && s.tools
+}
+
 function Section({ section }: { section: InboxSection }) {
-  const { questions, tasks, closed } = section
+  const { questions, tasks, closed, findings } = section
   return (
     <Stack gap="sm">
       <Heading level={3}>{section.title}</Heading>
-      {questions.length + tasks.length + closed.questions.total + closed.tasks.total === 0 && (
+      {!section.tools && (
+        <Text muted size="sm">
+          No tools: this launch set its own MCP, system prompt or settings flags, so Claude cannot record items itself.
+          The inbox still reads each finished turn.
+        </Text>
+      )}
+      {isEmpty({ ...section, tools: true }) && (
         <Text muted size="sm">
           Nothing waits on you.
         </Text>
@@ -385,12 +569,38 @@ function Section({ section }: { section: InboxSection }) {
         closed={closed.questions}
         draw={row => <Question key={row.id} section={section} row={row} />}
       />
-      <Group
-        title="Tasks"
-        rows={tasks}
-        closed={closed.tasks}
-        draw={row => <Task key={row.id} section={section} row={row} />}
-      />
+      <Group title="Tasks" rows={tasks} closed={closed.tasks} draw={row => <Task key={row.id} section={section} row={row} />} />
+      {hasFindings(section) && (
+        <>
+          <Group
+            title="Issues"
+            rows={findings.issues}
+            closed={findings.closed.issues}
+            draw={row => <Finding key={row.id} section={section} row={row} />}
+            always
+          />
+          <Group
+            title="Opportunities"
+            rows={findings.opportunities}
+            closed={findings.closed.opportunities}
+            draw={row => <Finding key={row.id} section={section} row={row} />}
+            always
+          />
+        </>
+      )}
+      <Plan section={section} />
+    </Stack>
+  )
+}
+
+/** An agent that is not Claude Code (spec step 5): its title and the Claude-only note. */
+function Other({ agent }: { agent: OtherAgent }) {
+  return (
+    <Stack gap="sm">
+      <Heading level={3}>{agent.title}</Heading>
+      <Text muted size="sm">
+        Agent Inbox supports Claude Code only for now. Codex support is coming soon.
+      </Text>
     </Stack>
   )
 }
@@ -420,6 +630,48 @@ function Footer({ view }: { view: InboxView }) {
   )
 }
 
+/** The Claude sections, or the empty state that stands for them, then a section per other agent. */
+function Body({ view }: { view: InboxView }) {
+  const others = view.others.map(agent => ({ key: `other:${agent.key}`, draw: <Other agent={agent} /> }))
+  const claude =
+    view.sections.length === 0
+      ? []
+      : view.sections.every(isEmpty)
+        ? [
+            {
+              key: 'nothing',
+              draw: (
+                <EmptyState
+                  title="Nothing waits on you"
+                  description={`${count(view.sections.length, 'agent', 'agents')} tracked, with no open questions or tasks.`}
+                  icon="bell"
+                />
+              ),
+            },
+          ]
+        : view.sections.map(section => ({ key: section.sessionId, draw: <Section section={section} /> }))
+  // A workspace with only agents that are not Claude Code shows only their sections.
+  const blocks = [...claude, ...others]
+  if (blocks.length === 0)
+    return (
+      <EmptyState
+        title={view.untracked > 0 ? 'No tracked agents in this workspace' : 'No agents in this workspace'}
+        description="Start Claude Code from Orca, and its questions and tasks show here."
+        icon="bell"
+      />
+    )
+  return (
+    <>
+      {blocks.map((b, n) => (
+        <Stack key={b.key} gap="md">
+          {n > 0 && <Separator />}
+          {b.draw}
+        </Stack>
+      ))}
+    </>
+  )
+}
+
 export default function Panel() {
   const state = read(loaded)
   if (state.is === 'loading') return <Text muted>Loading…</Text>
@@ -434,32 +686,10 @@ export default function Panel() {
         </Stack>
       </Callout>
     )
-  const { view } = state
-  const rows = view.sections.reduce((n, s) => n + s.questions.length + s.tasks.length, 0)
-  const closed = view.sections.reduce((n, s) => n + s.closed.questions.total + s.closed.tasks.total, 0)
   return (
     <Stack gap="md">
-      {view.sections.length === 0 ? (
-        <EmptyState
-          title={view.untracked > 0 ? 'No tracked agents in this workspace' : 'No agents in this workspace'}
-          description="Start Claude Code from Orca, and its questions and tasks show here."
-          icon="bell"
-        />
-      ) : rows + closed === 0 ? (
-        <EmptyState
-          title="Nothing waits on you"
-          description={`${count(view.sections.length, 'agent', 'agents')} tracked, with no open questions or tasks.`}
-          icon="bell"
-        />
-      ) : (
-        view.sections.map((section, n) => (
-          <Stack key={section.sessionId} gap="md">
-            {n > 0 && <Separator />}
-            <Section section={section} />
-          </Stack>
-        ))
-      )}
-      <Footer view={view} />
+      <Body view={state.view} />
+      <Footer view={state.view} />
     </Stack>
   )
 }

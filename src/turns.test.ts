@@ -131,6 +131,16 @@ async function restart(old: ReturnType<typeof setup>, model = fakeModel()) {
 const asks = (s: State) => s.sessions[S].ledger.items.map(i => i.ask)
 
 describe('turn tracker', () => {
+  test("track keeps the launch's tools mark: a relaunch with tools clears it, one that says nothing keeps it", async () => {
+    const t = setup()
+    await t.tracker.track(T, S, { tools: false })
+    assert.equal(t.tracker.state().sessions[S].tools, false)
+    await t.tracker.track(T, S)
+    assert.equal(t.tracker.state().sessions[S].tools, false)
+    await t.tracker.track(T, S, { tools: true })
+    assert.equal(t.tracker.state().sessions[S].tools, true)
+  })
+
   test('a done before the file is written reads the turn once it lands', async () => {
     const t = setup()
     await t.tracker.track(T, S)
@@ -356,6 +366,14 @@ describe('upgradeState', () => {
     assert.deepEqual(s.sessions.s.ledger, EMPTY)
     assert.equal(s.sessions.s.unread, 0)
     assert.equal(s.sessions.s.lastTurnId, null)
+    assert.equal(s.sessions.s.tools, true, 'a session saved before launches kept tools shows no "No tools" note')
+  })
+
+  test("keeps a session's no-tools mark and the finding press kinds; an unknown kind reads as an answer", () => {
+    const label = (kind: string) => ({ state: 'held', kind, answer: 'Fix', text: 'x', at: 1 })
+    const s = upgradeState({ version: 1, terminals: {}, sessions: { s: { tools: false, presses: { a: label('fix'), b: label('issue'), c: label('odd') } } } })
+    assert.equal(s.sessions.s.tools, false)
+    assert.deepEqual(Object.values(s.sessions.s.presses).map(l => l.kind), ['fix', 'issue', 'answer'])
   })
 
   test('a saved state reads back unchanged', () => {

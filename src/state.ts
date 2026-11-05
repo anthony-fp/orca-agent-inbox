@@ -36,6 +36,11 @@ export type SessionState = {
   activeTurn: number
   /** The inbox text the agent last read beside a prompt, and the closed items it was told of, as the inbox skill keeps them. */
   told: Told
+  /**
+   * False when the last launch got no inbox tools, because its command set its own MCP, system prompt or settings
+   * flags (plan T11): the panel says so on the agent's section.
+   */
+  tools: boolean
 }
 
 /**
@@ -46,11 +51,12 @@ export type SessionState = {
 export type PressLabel = {
   state: 'sending' | 'answered' | 'held' | 'undelivered'
   /**
-   * What the press sent: a question's answer, a task's typed reply, or a step that asks the agent to run a command.
-   * Only an answer closes its row when its turn runs. A label saved before presses kept this is an answer.
+   * What the press sent: a question's option, typed words on any row, a step that asks the agent to run a command,
+   * or a finding's Fix or File issue. Only an option closes its row when its turn runs. A label saved before presses
+   * kept this is an answer.
    */
-  kind: 'answer' | 'reply' | 'step'
-  /** The answer the person gave, for the row's close when the answering turn runs, or the step's label. */
+  kind: 'answer' | 'reply' | 'step' | 'fix' | 'issue'
+  /** The option or words the person gave, for the row's close when the answering turn runs, or the button's label. */
   answer: string
   /** The message typed into the terminal, or that Copy copies. */
   text: string
@@ -69,7 +75,7 @@ export type State = {
 }
 
 export function emptySession(now = 0): SessionState {
-  return { offset: 0, queue: [], ledger: EMPTY, lastTurnId: null, unread: 0, presses: {}, touchedAt: now, activeTurn: 0, told: { inbox: null, closed: [] } }
+  return { offset: 0, queue: [], ledger: EMPTY, lastTurnId: null, unread: 0, presses: {}, touchedAt: now, activeTurn: 0, told: { inbox: null, closed: [] }, tools: true }
 }
 
 export function emptyState(): State {
@@ -86,13 +92,14 @@ function upgradeTurn(raw: unknown): Turn[] {
 }
 
 const LABEL_STATES: PressLabel['state'][] = ['sending', 'answered', 'held', 'undelivered']
+const LABEL_KINDS: PressLabel['kind'][] = ['answer', 'reply', 'step', 'fix', 'issue']
 
 /** A label saved while its send was out reads "Not delivered": the watch that would confirm it ended with the worker. */
 function upgradeLabel(raw: unknown): PressLabel[] {
   if (!isObject(raw) || !LABEL_STATES.includes(raw.state as PressLabel['state']) || typeof raw.text !== 'string') return []
   const label: PressLabel = {
     state: raw.state === 'sending' ? 'undelivered' : (raw.state as PressLabel['state']),
-    kind: raw.kind === 'reply' || raw.kind === 'step' ? raw.kind : 'answer',
+    kind: LABEL_KINDS.includes(raw.kind as PressLabel['kind']) ? (raw.kind as PressLabel['kind']) : 'answer',
     answer: typeof raw.answer === 'string' ? raw.answer : '',
     text: raw.text,
     at: Number(raw.at) || 0,
@@ -116,6 +123,8 @@ function upgradeSession(raw: unknown, now: number): SessionState {
     touchedAt: typeof raw.touchedAt === 'number' ? raw.touchedAt : now,
     activeTurn: Number(raw.activeTurn) || 0,
     told: upgradeTold(raw.told),
+    // A session saved before launches kept this shows no note.
+    tools: raw.tools !== false,
   }
 }
 

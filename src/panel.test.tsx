@@ -1,7 +1,7 @@
 // `orca plugin test .` runs this in Node with the same runtime and checks Orca uses.
 import { assert, mockHost, mount, test } from 'orca/testing'
 import * as panel from './panel'
-import { EMPTY_VIEW, MANY_OPTIONS, ONE_AGENT, STEPS, THREE_AGENTS, section } from './panel-views'
+import { CLOSED_FINDINGS, CODEX_ONLY, EMPTY_VIEW, FINDINGS, MANY_OPTIONS, MIXED, ONE_AGENT, PLAN, STEPS, THREE_AGENTS, section } from './panel-views'
 import type { InboxView } from './protocol'
 import type { PressInput, PressOutcome } from './presses'
 
@@ -12,6 +12,9 @@ async function open(view: InboxView, press?: (input: PressInput) => PressOutcome
   const host = mockHost({ requests: { 'inbox.view': () => view, ...(press ? { 'inbox.press': press } : {}) } })
   return mount(panel, { host })
 }
+
+const NO_TOOLS = /^No tools: /
+const CLAUDE_ONLY = 'Agent Inbox supports Claude Code only for now. Codex support is coming soon.'
 
 async function clean(view: Awaited<ReturnType<typeof mount>>) {
   assert.deepEqual(view.errors, [])
@@ -27,7 +30,7 @@ test('zero agents: says no agents are in this workspace', async () => {
 })
 
 test('agents with nothing open: says nothing waits on you', async () => {
-  const view = await open({ sections: [section(1), section(2)], untracked: 0, unread: 0 })
+  const view = await open({ sections: [section(1), section(2)], others: [], untracked: 0, unread: 0 })
   assert.ok(view.find({ type: 'EmptyState', label: 'Nothing waits on you' }))
   await clean(view)
 })
@@ -75,14 +78,19 @@ test("steps come after a question's options and before a task's Done, as the inb
   await clean(view)
 })
 
-test('a run step goes to the worker with its place and label; a link opens; a copy shows its text', async () => {
+test('a run step goes to the worker with its place and label; a link opens; a copy goes to the clipboard', async () => {
   const inputs: PressInput[] = []
+  const copied: string[] = []
   const host = mockHost({
     requests: {
       'inbox.view': () => STEPS,
       'inbox.press': (input: PressInput) => {
         inputs.push(input)
         return { ok: true, label: { text: 'Sending…', tone: 'muted', copy: null } }
+      },
+      'inbox.copy': (input: { text: string }) => {
+        copied.push(input.text)
+        return { ok: true }
       },
     },
   })
@@ -93,9 +101,19 @@ test('a run step goes to the worker with its place and label; a link opens; a co
   assert.deepEqual(host.callsOf('shell.openExternal'), [{ url: 'https://example.com/runbook' }])
   assert.ok(view.find({ text: '✓ Opened runbook' }))
   await view.press({ type: 'Button', text: 'Copy env line' })
+  assert.deepEqual(copied, ['PORT=4000'])
+  assert.ok(view.find({ text: '✓ Copied env line' }))
+  assert.equal(view.find({ type: 'CodeView' }), null, 'nothing to select once the clipboard has it')
+  assert.equal(inputs.length, 1, 'local steps send nothing to the agent')
+  await clean(view)
+})
+
+test('a copy step the worker cannot copy shows its text to select', async () => {
+  const host = mockHost({ requests: { 'inbox.view': () => STEPS, 'inbox.copy': () => ({ ok: false, error: 'no clipboard command on this system' }) } })
+  const view = await mount(panel, { host })
+  await view.press({ type: 'Button', text: 'Copy env line' })
   assert.ok(view.find({ text: 'Select env line below to copy it' }))
   assert.equal(view.find({ type: 'CodeView' })?.props.code, 'PORT=4000')
-  assert.equal(inputs.length, 1, 'local steps send nothing to the agent')
   await clean(view)
 })
 
@@ -133,11 +151,35 @@ test('three agents: one section each, newest first, with the labels the worker g
   await clean(view)
 })
 
-test('Copy shows the answer text to select', async () => {
-  const view = await open(THREE_AGENTS)
+test('Copy writes the clipboard through the worker and reads "✓ Copied"', async () => {
+  const copied: string[] = []
+  const host = mockHost({
+    requests: {
+      'inbox.view': () => THREE_AGENTS,
+      'inbox.copy': (input: { text: string }) => {
+        copied.push(input.text)
+        return { ok: true }
+      },
+    },
+  })
+  const view = await mount(panel, { host })
+  const [first] = view.findAll({ type: 'Button', text: 'Copy' })
+  assert.ok(first)
+  await view.press(first)
+  assert.deepEqual(copied, ['Re "Which port should the dev server use?": 4000'])
+  assert.equal(view.findAll({ text: '✓ Copied' }).length, 1, 'only the pressed label reads it')
+  assert.equal(view.find({ type: 'CodeView' }), null)
+  await clean(view)
+})
+
+test('a Copy the worker cannot do shows the answer text to select, and Hide closes it', async () => {
+  const host = mockHost({ requests: { 'inbox.view': () => THREE_AGENTS, 'inbox.copy': () => ({ ok: false, error: 'no clipboard command on this system' }) } })
+  const view = await mount(panel, { host })
   await view.press({ type: 'Button', text: 'Copy' })
+  assert.equal(view.find({ text: '✓ Copied' }), null)
   const code = view.find({ type: 'CodeView' })
   assert.equal(code?.props.code, 'Re "Which port should the dev server use?": 4000')
+  assert.equal(code?.props.label, 'Could not copy: select the text to copy it')
   await view.press({ type: 'Button', text: 'Hide' })
   assert.equal(view.find({ type: 'CodeView' }), null)
   await clean(view)
@@ -195,8 +237,9 @@ test('Reply opens a field on a question and on a task; Send sends the words, and
   assert.deepEqual(
     inputs.map(i => [i.id, i.action, i.answer]),
     [
-      ['q1', 'answer', 'Call it utils'],
-      ['t1', 'answer', 'Ran it, all green'],
+      // Typed words go as `reply`, which never closes the row at once: the inbox model decides.
+      ['q1', 'reply', 'Call it utils'],
+      ['t1', 'reply', 'Ran it, all green'],
       ['t1', 'done', undefined],
     ],
   )
@@ -236,5 +279,129 @@ test('inbox.changed asks for the view again', async () => {
   current = ONE_AGENT
   await view.post('inbox.changed', {})
   assert.ok(view.find({ text: '1) Rename the folder to tools?' }))
+  await clean(view)
+})
+
+test('findings: Issues and Opportunities after Tasks, each row with its mark, detail, file and the inbox finding buttons', async () => {
+  const view = await open(FINDINGS)
+  const groups = texts(view, 'Text').filter(t => / · \d+$/.test(t))
+  assert.deepEqual(groups, ['Tasks · 1', 'Issues · 1', 'Opportunities · 1'])
+  assert.ok(view.find({ text: '▲' }))
+  assert.ok(view.find({ text: 'The retry loop never backs off' }))
+  assert.ok(view.find({ text: 'Each retry fires at once, so a down server gets a flood.' }))
+  assert.ok(view.find({ text: 'Relevant file: fetch.ts' }))
+  assert.ok(view.find({ text: '✦' }))
+  // The inbox's actionsOf (hooks/view.ts) less Explain and Discuss: Fix or Do it, File issue, Reply, Dismiss.
+  assert.deepEqual(texts(view, 'Button'), ['Done', 'Reply', 'Fix', 'File issue', 'Reply', 'Dismiss', 'Do it', 'File issue', 'Reply', 'Dismiss'])
+  assert.equal(view.find({ type: 'Button', text: 'Fix' })?.props.variant, 'solid')
+  assert.deepEqual(view.findAll({ type: 'Collapsible' }).map(c => c.props.title), ['1 closed'])
+  await clean(view)
+})
+
+test('findings with only closed ones: both groups show their empty lines and "N closed"', async () => {
+  const view = await open(CLOSED_FINDINGS)
+  assert.ok(view.find({ text: 'Issues · 0' }))
+  assert.ok(view.find({ text: 'No open issues' }))
+  assert.ok(view.find({ text: 'Opportunities · 0' }))
+  assert.ok(view.find({ text: 'No open opportunities' }))
+  assert.deepEqual(view.findAll({ type: 'Collapsible' }).map(c => c.props.title), ['1 closed'])
+  assert.equal(view.find({ text: 'Nothing waits on you.' }), null)
+  await clean(view)
+})
+
+test("a finding's Fix, File issue, Reply and Dismiss go to the worker with the finding's id", async () => {
+  const inputs: PressInput[] = []
+  const view = await open(FINDINGS, input => {
+    inputs.push(input)
+    return { ok: true, label: input.action === 'dismiss' ? null : { text: 'Sending…', tone: 'muted', copy: null } }
+  })
+  await view.press({ type: 'Button', text: 'Fix' })
+  await view.press({ type: 'Button', text: 'Do it' })
+  const fileIssue = view.findAll({ type: 'Button', text: 'File issue' })[0]
+  assert.ok(fileIssue)
+  await view.press(fileIssue)
+  const reply = view.findAll({ type: 'Button', text: 'Reply' })[1]
+  assert.ok(reply)
+  await view.press(reply)
+  await view.type({ type: 'Input', label: 'Your reply to Claude' }, 'Use a jitter')
+  await view.press({ type: 'Button', text: 'Send' })
+  const dismiss = view.findAll({ type: 'Button', text: 'Dismiss' })[1]
+  assert.ok(dismiss)
+  await view.press(dismiss)
+  assert.deepEqual(
+    inputs.map(i => [i.id, i.action, i.answer]),
+    [
+      ['i4', 'fix', undefined],
+      ['i5', 'fix', undefined],
+      ['i4', 'issue', undefined],
+      ['i4', 'reply', 'Use a jitter'],
+      ['i5', 'dismiss', undefined],
+    ],
+  )
+  await clean(view)
+})
+
+test('plan: "PLAN N of M steps", a progress bar, and one fold per task; a task with a step in progress starts open', async () => {
+  const view = await open(PLAN)
+  assert.ok(view.find({ text: 'PLAN  3 of 6 steps' }))
+  assert.equal(view.find({ type: 'Progress' })?.props.value, 50)
+  assert.deepEqual(
+    view.findAll({ type: 'Collapsible' }).map(c => [c.props.title, c.props.open]),
+    [
+      ['✓ Read the code  2/2', false],
+      ['Write the fix  1/3', true],
+      ['Ship it  0/1', false],
+    ],
+  )
+  const current = view.find({ text: '◐ Change the parser' })
+  assert.equal(current?.props.weight, 'semibold')
+  assert.equal(current?.props.tone, 'accent')
+  assert.equal(view.find({ text: '✓ Add a failing test' })?.props.tone, 'success')
+  assert.ok(view.find({ text: '○ Run the suite' }))
+  assert.equal(view.find({ text: '○ Open the PR' }), null, 'a closed task lists no steps')
+  assert.equal(view.find({ text: 'Nothing waits on you.' }), null)
+  await clean(view)
+})
+
+test('plan: a press toggles a task, and the choice stays across a new view', async () => {
+  const host = mockHost({ requests: { 'inbox.view': () => PLAN } })
+  const view = await mount(panel, { host })
+  const fold = (title: string) => view.findAll({ type: 'Collapsible' }).find(c => c.props.title === title)
+  const ship = fold('Ship it  0/1')
+  assert.ok(ship)
+  await view.toggle(ship)
+  assert.ok(view.find({ text: '○ Open the PR' }))
+  const fix = fold('Write the fix  1/3')
+  assert.ok(fix)
+  await view.toggle(fix)
+  assert.equal(view.find({ text: '◐ Change the parser' }), null)
+  await view.post('inbox.changed', {})
+  assert.equal(fold('Ship it  0/1')?.props.open, true)
+  assert.equal(fold('Write the fix  1/3')?.props.open, false)
+  await clean(view)
+})
+
+test('a launch with no tools says so on its section; a Codex agent gets its title and the Claude-only note', async () => {
+  const view = await open(MIXED)
+  assert.deepEqual(texts(view, 'Heading'), ['Agent 1', 'Codex'])
+  assert.ok(view.find({ text: NO_TOOLS }))
+  assert.ok(view.find({ text: CLAUDE_ONLY }))
+  assert.equal(view.find({ text: /not tracked/ }), null)
+  await clean(view)
+})
+
+test('a workspace with only a Codex agent shows only its section', async () => {
+  const view = await open(CODEX_ONLY)
+  assert.deepEqual(texts(view, 'Heading'), ['Codex'])
+  assert.ok(view.find({ text: CLAUDE_ONLY }))
+  assert.equal(view.find({ type: 'EmptyState' }), null)
+  assert.equal(view.find({ text: NO_TOOLS }), null)
+  assert.equal(view.find({ text: /not tracked/ }), null)
+  await clean(view)
+})
+
+test('a section whose launch got tools has no "No tools" line', async () => {
+  const view = await open(ONE_AGENT)
+  assert.equal(view.find({ text: NO_TOOLS }), null)
   await clean(view)
 })
