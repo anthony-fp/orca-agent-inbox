@@ -1,0 +1,9 @@
+{
+  "name": "orca-agent-inbox",
+  "version": "0.1.0",
+  "private": true,
+  "description": "An Orca plugin that collects the questions and tasks Claude Code agents leave.",
+  "scripts": {
+    "test": "orca plugin test ."
+  }
+}

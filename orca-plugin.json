@@ -1,0 +1,32 @@
+{
+  "manifestVersion": 2,
+  "id": "agent-inbox",
+  "name": "Agent Inbox",
+  "version": "0.1.0",
+  "description": "Collects the questions and tasks your Claude Code agents leave in one sidebar panel.",
+  "engines": {
+    "orca": ">=1.4.248"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "inbox",
+        "title": "Agent Inbox",
+        "icon": "bell",
+        "entry": "src/panel.tsx",
+        "ui": "components"
+      }
+    ],
+    "hooks": [{ "event": "agent.launch.before" }],
+    "events": [{ "on": "agent.status.changed" }]
+  },
+  "capabilities": [
+    { "kind": "agent:read" },
+    { "kind": "terminal:send" },
+    { "kind": "storage:own" },
+    { "kind": "workspace:read" }
+  ]
+}
