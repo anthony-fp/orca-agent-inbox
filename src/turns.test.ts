@@ -376,8 +376,18 @@ describe('upgradeState', () => {
     assert.deepEqual(Object.values(s.sessions.s.presses).map(l => l.kind), ['fix', 'issue', 'answer'])
   })
 
+  test("a terminal saved with a launch workspaceId keeps only its session; a session saved before transcript and cwd finds them again", () => {
+    const s = upgradeState({ version: 1, terminals: { t: { sessionId: 's', workspaceId: 'repo::/work/app' } }, sessions: { s: {} } })
+    assert.deepEqual(s.terminals, { t: { sessionId: 's' } })
+    assert.deepEqual([s.sessions.s.transcript, s.sessions.s.cwd], [null, null])
+  })
+
   test('a saved state reads back unchanged', () => {
-    const s: State = { version: 1, terminals: { t: { sessionId: 's' } }, sessions: { s: { ...emptySession(), offset: 4, lastTurnId: 'p', unread: 2 } } }
+    const s: State = {
+      version: 1,
+      terminals: { t: { sessionId: 's' } },
+      sessions: { s: { ...emptySession(), offset: 4, lastTurnId: 'p', unread: 2, transcript: '/h/.claude/projects/-w/s.jsonl', cwd: '/w' } },
+    }
     assert.deepEqual(upgradeState(JSON.parse(JSON.stringify(s))), s)
   })
 })

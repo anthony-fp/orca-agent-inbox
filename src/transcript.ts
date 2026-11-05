@@ -22,6 +22,7 @@ export type TurnRead = {
 type Block = { type?: string; text?: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; content?: unknown; is_error?: boolean }
 type Line = {
   type?: string
+  cwd?: unknown
   uuid?: string
   isSidechain?: boolean
   isMeta?: boolean
@@ -180,6 +181,14 @@ export function readTurnFile(path: string, offset: number, prompts?: number): Tu
 export function promptAfter(bytes: Buffer, offset: number): { uuid: string; text: string } | null {
   const found = lines(bytes, offset).find(({ line }) => isTurnStart(line))?.line
   return found ? { uuid: String(found.uuid), text: text(found.message?.content) } : null
+}
+
+/** The session's folder: the first whole line's `cwd`. Null when no line has one yet. */
+export function cwdOf(bytes: Buffer): string | null {
+  for (const { line } of lines(bytes, 0)) {
+    if (typeof line?.cwd === 'string' && line.cwd !== '') return line.cwd
+  }
+  return null
 }
 
 /** Where the whole lines end: the byte after the last newline. A resumed session starts reading here. */

@@ -34,10 +34,12 @@ async function main() {
   const input = await readInput()
   // After /clear the terminal runs a new session the plugin does not track: its prompts are not this session's.
   if (!input || (typeof input.session_id === 'string' && input.session_id !== session)) return
-  const started = await ask(socket, { type: 'prompt-start', sessionId: session }, left())
+  // The session's folder, for its plan file: the worker has no transcript to read it from at the first prompt.
+  const cwd = typeof input.cwd === 'string' ? { cwd: input.cwd } : {}
+  const started = await ask(socket, { type: 'prompt-start', sessionId: session, ...cwd }, left())
   if (typeof started?.text !== 'string') return
   const prompt = typeof input.prompt === 'string' ? input.prompt : ''
-  const answer = await ask(socket, { type: 'inbox-text', sessionId: session, prompt }, left())
+  const answer = await ask(socket, { type: 'inbox-text', sessionId: session, prompt, ...cwd }, left())
   if (typeof answer?.text === 'string' && answer.text !== '') process.stdout.write(`${answer.text}\n`)
 }
 

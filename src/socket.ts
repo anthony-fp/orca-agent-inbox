@@ -34,8 +34,8 @@ export function binPaths(): { mcpServer: string; promptHook: string } {
 }
 
 export type Request =
-  | { type: 'prompt-start'; sessionId: string }
-  | { type: 'inbox-text'; sessionId: string; prompt?: string }
+  | { type: 'prompt-start'; sessionId: string; cwd?: string }
+  | { type: 'inbox-text'; sessionId: string; prompt?: string; cwd?: string }
   | { type: 'record' | 'close'; sessionId: string; args: Record<string, unknown> }
 
 /** `text` is the answer the client prints or returns; `error` means it gives up as on a timeout. */
@@ -45,7 +45,7 @@ export type AnswerDeps = {
   state(): State
   edit(sessionId: string, change: (s: SessionState) => SessionState): Promise<void>
   now(): number
-  /** The plan note for a session (planNote), read from its plan file now; null when its workspace is not known. */
+  /** The plan note for a session (planNote), read from its plan file now; null when its folder is not known. */
   planNote(sessionId: string): Promise<string | null>
 }
 
@@ -77,11 +77,15 @@ export function createAnswerer(deps: AnswerDeps): (request: unknown) => Promise<
     if (!isObject(request) || !TYPES.includes(request.type as string) || typeof request.sessionId !== 'string')
       return { error: 'bad request' }
     const { sessionId } = request
-    if (!deps.state().sessions[sessionId]) return { error: 'unknown session' }
+    const s0 = deps.state().sessions[sessionId]
+    if (!s0) return { error: 'unknown session' }
+    // The prompt hook's `cwd` gives the session's folder before its transcript exists, at the first prompt.
+    const cwd = typeof request.cwd === 'string' && request.cwd !== '' ? request.cwd : null
+    const withCwd = (s: SessionState): SessionState => (s.cwd || !cwd ? s : { ...s, cwd })
 
     if (request.type === 'prompt-start') {
       // Raised and saved before the answer, so the agent's first call in this turn carries the new turn.
-      const started = await apply(sessionId, s => ({ session: { ...s, activeTurn: activeTurn(s) + 1 }, out: true }))
+      const started = await apply(sessionId, s => ({ session: { ...withCwd(s), activeTurn: activeTurn(s) + 1 }, out: true }))
       return started === null ? { error: 'unknown session' } : { text: '' }
     }
 
@@ -99,6 +103,7 @@ export function createAnswerer(deps: AnswerDeps): (request: unknown) => Promise<
     // inbox-text: what the inbox skill adds beside a prompt (inbox repo hooks/register.tsx, prompt.submit): the
     // notes promptNotes gives, as recordPrompt makes them (hooks/session.ts), then the plan note. The skill adds each as
     // its own context entry; one hook's stdout holds them all, so a blank line parts them.
+    if (cwd && !s0.cwd) await deps.edit(sessionId, withCwd)
     const plan = await deps.planNote(sessionId)
     const prompt = typeof request.prompt === 'string' ? request.prompt : ''
     const notes = await apply(sessionId, s => {

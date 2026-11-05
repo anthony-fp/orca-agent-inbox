@@ -6,6 +6,8 @@ The run stopped after check 3. A bug (below) blocks the checks that need the tra
 
 ## Bug: workspace ids do not match
 
+Fixed after this run: the plugin finds the transcript by the session id, reads the folder from the transcript's `cwd` or the prompt hook's `cwd`, and prunes only by age (docs/spec.md, step 2). T8 runs again on the fix.
+
 - `agent.launch.before` gives `workspaceId` as `<repoId>::<path>`. The plugin saves that value in `terminals[...].workspaceId`.
 - Orca's `workspace.list` gives `id: identity:<identity key>` for each workspace that has an identity, and every folder and worktree here has one. The plugin keys its map by that id (`src/worker.ts:85`).
 - Effect 1: `dirOf` (`src/worker.ts:93`) never finds the folder. The transcript is never read, so the inbox model never runs: `offset` stays 0 and `lastTurnId` stays null after three turns. A question the agent asks only in its reply never shows. A press label stays at `sending`.

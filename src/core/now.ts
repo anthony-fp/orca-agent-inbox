@@ -172,12 +172,13 @@ export const fixLabel = (f: Pick<Finding, 'kind'>) => (f.kind === 'opportunity' 
 /**
  * The open findings, newest first, and each kind's closed findings, newest closed first, as the inbox's Now view shows them.
  * `fixesSent` gives, by id, when a Fix or Do it reached the agent: that finding stays open in the ledger, for the agent
- * and the inbox model to close, but shows as closed with its button's label, as `fixesSent` in `hooks/view.ts` does.
+ * and the inbox model to close, but shows as closed with its button's label, as `fixesSent` in `hooks/view.ts` does,
+ * even when a question asked about it: its `askedAs` is left out, as `inboxView` passes only the outcome.
  */
 export function findingRows(ledger: Ledger, now = 0, fixesSent: Record<string, number> = {}): FindingGroups {
   const sent = ledger.findings
     .filter(f => fixesSent[f.id] !== undefined)
-    .map((f): ClosedFinding => ({ ...f, how: 'answered', outcome: fixLabel(f), closedAt: fixesSent[f.id]! }))
+    .map(({ askedAs: _, ...f }): ClosedFinding => ({ ...f, how: 'answered', outcome: fixLabel(f), closedAt: fixesSent[f.id]! }))
   const open = (kind: Finding['kind']): FindingRow[] =>
     [...ledger.findings]
       .reverse()

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import { EMPTY, applyUpdate, closeItem, parseReply } from './ledger'
-import { OPTIONS_FOLD_AT, choices, nowRows, shortAgo, stepsOf } from './now'
+import { OPTIONS_FOLD_AT, choices, findingRows, nowRows, shortAgo, stepsOf } from './now'
 
 const REPLY = [
   'NEW: decide | 1 | Rename greet.mjs to hello.mjs? | Yes / No | yes',
@@ -93,4 +93,13 @@ test('closed items leave the open rows and show in their group, newest first, th
   const group = nowRows(many, 5000).closed.questions
   assert.equal(group.total, 5)
   assert.deepEqual(group.shown.map(c => [c.text, c.mark]), [['Q3?', '✕'], ['Q2?', '✕'], ['Q1?', '✕']])
+})
+
+// The inbox's 'a Fix sent for a finding a question had asked about reads the fix label on its closed row'
+// (tests/hooks.test.ts, commit 2d4bd27).
+test('a Fix sent for a finding a question had asked about reads the fix label on its closed row', () => {
+  const at = 1_000_000
+  const asked = { id: 'f90', kind: 'issue' as const, title: 'Retry', detail: 'No delay.', path: null, at, askedAs: 'i2' }
+  const rows = findingRows({ ...EMPTY, findings: [asked], closedFindings: [] }, at, { f90: at })
+  assert.deepEqual(rows.closed.issues.shown.map(f => [f.id, f.outcome]), [['f90', 'Fix']])
 })

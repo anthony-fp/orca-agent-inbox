@@ -213,6 +213,19 @@ describe('inbox-text', () => {
     assert.deepEqual(t.storage.saved().sessions[S].told.closed, [id])
   })
 
+  test("the hook's cwd is saved as the session's folder when none is known, and a known one stays", async () => {
+    const t = setup()
+    await t.tracker.track(T, S)
+    await t.send({ type: 'prompt-start', sessionId: S, cwd: '/work/app' })
+    assert.equal(t.session().cwd, '/work/app')
+    await t.send({ type: 'inbox-text', sessionId: S, prompt: 'go', cwd: '/elsewhere' })
+    assert.equal(t.session().cwd, '/work/app')
+    const u = setup()
+    await u.tracker.track(T, S)
+    await u.send({ type: 'inbox-text', sessionId: S, prompt: 'go', cwd: '/work/app' })
+    assert.equal(u.session().cwd, '/work/app', 'inbox-text alone saves it too')
+  })
+
   test('with an open item the inbox lists it with its close id', async () => {
     const t = setup()
     await t.tracker.track(T, S)
@@ -386,7 +399,7 @@ describe('bin/mcp-server.mjs', () => {
 })
 
 describe('bin/prompt-hook.mjs', () => {
-  const hookInput = (over: Record<string, unknown> = {}) => JSON.stringify({ session_id: S, hook_event_name: 'UserPromptSubmit', prompt: 'carry on', ...over })
+  const hookInput = (over: Record<string, unknown> = {}) => JSON.stringify({ session_id: S, hook_event_name: 'UserPromptSubmit', prompt: 'carry on', cwd: '/work/app', ...over })
 
   test('sends prompt-start, then inbox-text, and prints the text', async () => {
     const sock = await fakeSocket(req => (req.type === 'prompt-start' ? { text: '' } : { text: 'inbox: what waits on the user' }))
@@ -395,8 +408,8 @@ describe('bin/prompt-hook.mjs', () => {
       assert.equal(code, 0)
       assert.equal(out, 'inbox: what waits on the user\n')
       assert.deepEqual(sock.requests, [
-        { type: 'prompt-start', sessionId: S },
-        { type: 'inbox-text', sessionId: S, prompt: 'carry on' },
+        { type: 'prompt-start', sessionId: S, cwd: '/work/app' },
+        { type: 'inbox-text', sessionId: S, prompt: 'carry on', cwd: '/work/app' },
       ])
     } finally {
       await sock.close()

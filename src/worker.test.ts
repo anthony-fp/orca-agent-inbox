@@ -6,19 +6,21 @@ import { planPath } from './core/plan'
 import { emptySession, type State } from './state'
 import { fakeClock } from './test-clock'
 import { PRUNE_MS } from './turns'
-import { createWorker, projectSlug, transcriptPath } from './worker'
+import { createWorker } from './worker'
 
 const HOME = '/home/someone'
 const WS = { id: 'ws-1', kind: 'worktree', name: 'one', path: '/work/my_app.v2', branch: null, hostId: null }
 const S = '0b0b0b0b-1111-4222-8333-444444444444'
-const FILE = transcriptPath(HOME, WS.path, S)
+const PROJECTS = `${HOME}/.claude/projects`
+// Claude Code's own folder name: the worker never builds it, it finds the file by the session id.
+const FILE = `${PROJECTS}/-work-my-app-v2/${S}.jsonl`
 const PLAN_FILE = planPath(WS.path, S)
 const DAY = 24 * 60 * 60 * 1000
 const NONE = { shown: [], total: 0 }
 const NO_FINDINGS = { issues: [], opportunities: [], closed: { issues: NONE, opportunities: NONE } }
 
 const prompt = (uuid: string, text: string) =>
-  JSON.stringify({ type: 'user', uuid, isSidechain: false, origin: { kind: 'human' }, turnPosition: { promptIndex: 1, turnIndex: 1 }, message: { role: 'user', content: text } }) + '\n'
+  JSON.stringify({ type: 'user', uuid, cwd: WS.path, isSidechain: false, origin: { kind: 'human' }, turnPosition: { promptIndex: 1, turnIndex: 1 }, message: { role: 'user', content: text } }) + '\n'
 const reply = (uuid: string, text: string) =>
   JSON.stringify({ type: 'assistant', uuid, isSidechain: false, message: { role: 'assistant', content: [{ type: 'text', text }], stop_reason: 'end_turn' } }) + '\n'
 
@@ -28,7 +30,7 @@ const openLedger = () => {
   return applyUpdate(EMPTY, u, 0, 1)
 }
 
-async function setup(opts: { state?: State; files?: Record<string, string>; unreadable?: string[]; agents?: unknown[]; copyFails?: boolean } = {}) {
+async function setup(opts: { state?: State; files?: Record<string, string>; unreadable?: string[]; agents?: unknown[]; copyFails?: boolean; list?: unknown[] } = {}) {
   const time = fakeClock(100 * DAY)
   const files = new Map(Object.entries(opts.files ?? {}))
   const reads: string[] = []
@@ -37,7 +39,7 @@ async function setup(opts: { state?: State; files?: Record<string, string>; unre
   const host = mockHost({
     storage: opts.state ? { state: opts.state } : {},
     results: {
-      'workspace.list': { workspaces: [WS], truncated: false },
+      'workspace.list': { workspaces: opts.list ?? [WS], truncated: false },
       'agents.list': { agents: opts.agents ?? [] },
       'terminal.sendText': { accepted: true },
     },
@@ -56,6 +58,8 @@ async function setup(opts: { state?: State; files?: Record<string, string>; unre
       assert.ok(update)
       return { ok: true, update, text: '', ms: 1 }
     },
+    listDirs: async (path: string) =>
+      [...new Set([...files.keys()].filter(f => f.startsWith(`${path}/`)).map(f => f.slice(path.length + 1).split('/')[0]))],
     readFile: async (path: string) => {
       reads.push(path)
       if (opts.unreadable?.includes(path)) throw new Error('EACCES: permission denied')
@@ -88,9 +92,23 @@ const status = (state: string, over: Record<string, unknown> = {}) => ({
   ...over,
 })
 
-test('the slug turns each character that is not a letter or digit into -', () => {
-  assert.equal(projectSlug('/work/my_app.v2'), '-work-my-app-v2')
-  assert.equal(FILE, `${HOME}/.claude/projects/-work-my-app-v2/${S}.jsonl`)
+test("the transcript is found by the session id in any project folder, and its path and cwd are saved on the session", async () => {
+  const state: State = { version: 1, terminals: { 'term-1': { sessionId: S } }, sessions: { [S]: emptySession(100 * DAY) } }
+  const t = await setup({ state, files: { [`${PROJECTS}/-other/${'9'.repeat(8)}.jsonl`]: '' } })
+  await t.worker.emit('agent.status.changed', status('done'))
+  await t.time.run(t.time.now() + 3000)
+  assert.equal(t.saved()?.sessions[S].transcript ?? null, null, 'no file yet: pending, looked for again at the next read')
+  t.files.set(FILE, prompt('p-1', 'Hi') + reply('a-1', 'Ship it?'))
+  await t.worker.emit('agent.status.changed', status('done'))
+  await t.time.run()
+  assert.equal(t.models.length, 1)
+  assert.equal(t.saved().sessions[S].transcript, FILE)
+  assert.equal(t.saved().sessions[S].cwd, WS.path, "the cwd comes from the transcript's lines")
+  const reads = t.reads.length
+  await t.worker.emit('agent.status.changed', status('done'))
+  await t.time.run()
+  assert.ok(t.reads.slice(reads).every(p => p === FILE || p === PLAN_FILE), 'the saved path is read; no folder is searched again')
+  await t.worker.deactivate()
 })
 
 test('the launch hook tags a new claude session and tracks its terminal', async () => {
@@ -100,7 +118,7 @@ test('the launch hook tags a new claude session and tracks its terminal', async 
   const command = out.kind === 'continue' ? String(out.event.command) : ''
   const id = /--session-id (\S+)/.exec(command)?.[1]
   assert.ok(id, command)
-  assert.deepEqual(t.saved().terminals, { 'term-1': { sessionId: id, workspaceId: WS.id } })
+  assert.deepEqual(t.saved().terminals, { 'term-1': { sessionId: id} })
   assert.equal(t.saved().sessions[id].offset, 0)
   await t.worker.deactivate()
 })
@@ -129,7 +147,7 @@ test('a --resume <uuid> session starts at the transcript end, not at 0', async (
 })
 
 test('a status without terminalId is ignored', async () => {
-  const t = await setup({ state: { version: 1, terminals: { 'term-1': { sessionId: S, workspaceId: WS.id } }, sessions: { [S]: emptySession(100 * DAY) } } })
+  const t = await setup({ state: { version: 1, terminals: { 'term-1': { sessionId: S } }, sessions: { [S]: emptySession(100 * DAY) } } })
   const before = t.reads.length
   await t.worker.emit('agent.status.changed', status('done', { terminalId: undefined }))
   await t.time.run()
@@ -137,8 +155,8 @@ test('a status without terminalId is ignored', async () => {
   await t.worker.deactivate()
 })
 
-test('a done reads the transcript at the slug path; the main agent state wins over the combined one', async () => {
-  const state: State = { version: 1, terminals: { 'term-1': { sessionId: S, workspaceId: WS.id } }, sessions: { [S]: emptySession(100 * DAY) } }
+test('a done reads the transcript; the main agent state wins over the combined one', async () => {
+  const state: State = { version: 1, terminals: { 'term-1': { sessionId: S } }, sessions: { [S]: emptySession(100 * DAY) } }
   const t = await setup({ state, files: {} })
   await t.worker.emit('agent.status.changed', status('done', { mainAgent: { state: 'working', stateStartedAt: 1 } }))
   t.files.set(FILE, prompt('p-1', 'Hi') + reply('a-1', 'Ship it?'))
@@ -153,15 +171,11 @@ test('a done reads the transcript at the slug path; the main agent state wins ov
   await t.worker.deactivate()
 })
 
-test('start prunes a terminal whose workspace is gone and a session with no open rows untouched for 7 days', async () => {
+test('start prunes a session with no open rows untouched for 7 days, and its terminal; a live session keeps its terminal across restarts', async () => {
   const now = 100 * DAY
   const state: State = {
     version: 1,
-    terminals: {
-      gone: { sessionId: 'kept-open', workspaceId: 'ws-removed' },
-      stale: { sessionId: 'stale', workspaceId: WS.id },
-      live: { sessionId: 'recent', workspaceId: WS.id },
-    },
+    terminals: { open: { sessionId: 'kept-open' }, stale: { sessionId: 'stale' }, live: { sessionId: 'recent' }, orphan: { sessionId: 'gone' } },
     sessions: {
       'kept-open': { ...emptySession(now - 30 * DAY), ledger: openLedger() },
       stale: emptySession(now - PRUNE_MS - 1),
@@ -169,15 +183,18 @@ test('start prunes a terminal whose workspace is gone and a session with no open
     },
   }
   const t = await setup({ state })
-  assert.deepEqual(Object.keys(t.saved().terminals), ['live'])
+  assert.deepEqual(Object.keys(t.saved().terminals), ['open', 'live'])
   assert.deepEqual(Object.keys(t.saved().sessions).sort(), ['kept-open', 'recent'])
   await t.worker.deactivate()
+  const again = await setup({ state: t.saved() })
+  assert.deepEqual(Object.keys(again.saved().terminals), ['open', 'live'])
+  await again.worker.deactivate()
 })
 
 test('inbox.view: one section per tracked agent, newest first, with the untracked and unread counts; inbox.press sends', async () => {
   const state: State = {
     version: 1,
-    terminals: { 'term-1': { sessionId: S, workspaceId: WS.id }, 'term-2': { sessionId: 's-2', workspaceId: WS.id } },
+    terminals: { 'term-1': { sessionId: S }, 'term-2': { sessionId: 's-2' } },
     sessions: { [S]: { ...emptySession(100 * DAY), ledger: openLedger(), lastTurnId: 'p-1', unread: 1 }, 's-2': emptySession(100 * DAY - 5) },
   }
   const agents = [
@@ -250,7 +267,7 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
 })
 
 test('inbox.view gives each section its plan, read again at a done; a changed plan tells the panel', async () => {
-  const state: State = { version: 1, terminals: { 'term-1': { sessionId: S, workspaceId: WS.id } }, sessions: { [S]: emptySession(100 * DAY) } }
+  const state: State = { version: 1, terminals: { 'term-1': { sessionId: S } }, sessions: { [S]: { ...emptySession(100 * DAY), cwd: WS.path } } }
   const agents = [{ terminalId: 'term-1', title: 'Fixer', agent: 'claude', state: 'done', stateStartedAt: 1 }]
   const t = await setup({ state, agents, files: { [PLAN_FILE]: '## Parser\n- [x] Read the spec\n- [~] Write the tests\n' } })
   const view = await t.worker.request('inbox.view', undefined)
@@ -271,7 +288,7 @@ test('inbox.view gives each section its plan, read again at a done; a changed pl
 })
 
 test("inbox.view: a plan file that cannot be read, or has text but no step, gives its path as the error; a missing one gives none", async () => {
-  const state: State = { version: 1, terminals: { 'term-1': { sessionId: S, workspaceId: WS.id } }, sessions: { [S]: emptySession(100 * DAY) } }
+  const state: State = { version: 1, terminals: { 'term-1': { sessionId: S } }, sessions: { [S]: { ...emptySession(100 * DAY), cwd: WS.path } } }
   const agents = [{ terminalId: 'term-1', title: 'Fixer', agent: 'claude', state: 'done', stateStartedAt: 1 }]
   const planOf = async (opts: { files?: Record<string, string>; unreadable?: string[] }) => {
     const t = await setup({ state: structuredClone(state), agents, ...opts })
@@ -323,4 +340,21 @@ test('inbox.copy writes the clipboard, and says why when it cannot', async () =>
   const failing = await setup({ copyFails: true })
   assert.deepEqual(await failing.worker.request('inbox.copy', { text: 'x' }), { ok: false, error: 'no clipboard command on this system' })
   await failing.worker.deactivate()
+})
+
+// The live check (docs/live-check.md): the launch gives `<repoId>::<path>`, workspace.list gives `identity:<key>`.
+test('repro: a launch workspaceId that workspace.list does not give still finds the transcript, and a restart keeps the terminal', async () => {
+  const LIVE_WS = { ...WS, id: 'identity:wt2:local:x' }
+  const t = await setup({ files: {}, list: [LIVE_WS] })
+  const out = await t.worker.hooks.fire('agent.launch.before', launch(`claude --session-id ${S}`, { workspaceId: `repo-1::${WS.path}` }))
+  assert.equal(out.kind, 'continue')
+  t.files.set(FILE, prompt('p-1', 'Hi') + reply('a-1', 'Ship it?'))
+  await t.worker.emit('agent.status.changed', status('done'))
+  await t.time.run()
+  assert.equal(t.models.length, 1, 'the turn was read and the inbox model ran')
+  assert.ok(t.saved().sessions[S].offset > 0)
+  const again = await setup({ files: { [FILE]: t.files.get(FILE)! }, list: [LIVE_WS], state: t.saved() })
+  assert.deepEqual(Object.keys(again.saved().terminals), ['term-1'])
+  await t.worker.deactivate()
+  await again.worker.deactivate()
 })

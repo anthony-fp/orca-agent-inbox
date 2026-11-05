@@ -41,6 +41,13 @@ export type SessionState = {
    * flags (plan T11): the panel says so on the agent's section.
    */
   tools: boolean
+  /**
+   * The session's transcript, `~/.claude/projects/<folder>/<session id>.jsonl`, once found by its session id. Null
+   * until the file exists: Claude Code writes it at the first prompt.
+   */
+  transcript: string | null
+  /** The session's folder, for its plan file: the first `cwd` in its transcript, or the prompt hook's `cwd`. */
+  cwd: string | null
 }
 
 /**
@@ -69,13 +76,13 @@ export type PressLabel = {
 
 export type State = {
   version: 1
-  /** The workspace gives the transcript's folder (from `workspace.list`), and pruning drops a terminal whose workspace is gone. */
-  terminals: Record<string, { sessionId: string; workspaceId?: string }>
+  /** Each tracked terminal's session. A terminal goes when its session is pruned. */
+  terminals: Record<string, { sessionId: string }>
   sessions: Record<string, SessionState>
 }
 
 export function emptySession(now = 0): SessionState {
-  return { offset: 0, queue: [], ledger: EMPTY, lastTurnId: null, unread: 0, presses: {}, touchedAt: now, activeTurn: 0, told: { inbox: null, closed: [] }, tools: true }
+  return { offset: 0, queue: [], ledger: EMPTY, lastTurnId: null, unread: 0, presses: {}, touchedAt: now, activeTurn: 0, told: { inbox: null, closed: [] }, tools: true, transcript: null, cwd: null }
 }
 
 export function emptyState(): State {
@@ -125,6 +132,9 @@ function upgradeSession(raw: unknown, now: number): SessionState {
     told: upgradeTold(raw.told),
     // A session saved before launches kept this shows no note.
     tools: raw.tools !== false,
+    // A session saved before these were kept finds its transcript again by its id.
+    transcript: typeof raw.transcript === 'string' ? raw.transcript : null,
+    cwd: typeof raw.cwd === 'string' ? raw.cwd : null,
   }
 }
 
@@ -145,8 +155,8 @@ export function upgradeState(raw: unknown, now = 0): State {
   if (!isObject(raw)) return emptyState()
   const terminals: State['terminals'] = {}
   for (const [id, t] of Object.entries(isObject(raw.terminals) ? raw.terminals : {})) {
-    if (!isObject(t) || typeof t.sessionId !== 'string') continue
-    terminals[id] = typeof t.workspaceId === 'string' ? { sessionId: t.sessionId, workspaceId: t.workspaceId } : { sessionId: t.sessionId }
+    // A terminal saved with a workspaceId drops it: the launch's workspace id never matched `workspace.list`.
+    if (isObject(t) && typeof t.sessionId === 'string') terminals[id] = { sessionId: t.sessionId }
   }
   const sessions: State['sessions'] = {}
   for (const [id, s] of Object.entries(isObject(raw.sessions) ? raw.sessions : {})) sessions[id] = upgradeSession(s, now)

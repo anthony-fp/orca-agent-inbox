@@ -2,7 +2,7 @@
 // It tags each Claude Code launch, feeds the turn tracker from status changes, answers the panel's requests
 // (src/protocol.ts), runs presses (src/presses.ts) and answers the agent's tools and prompt hook (src/socket.ts).
 import { spawn } from 'node:child_process'
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import type { Server } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -15,20 +15,10 @@ import { runInboxModel } from './model'
 import { createPresses, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
 import type { CopyOutcome, InboxSection, InboxView, OtherAgent } from './protocol'
 import { binPaths, createAnswerer, listen, socketPath } from './socket'
-import { promptsBefore, wholeLinesEnd } from './transcript'
+import { cwdOf, promptsBefore, wholeLinesEnd } from './transcript'
 import { createTracker, type Clock, type TrackerDeps } from './turns'
 
 const STATES = ['working', 'blocked', 'waiting', 'done']
-
-/** Claude Code's folder name for a project: each character that is not a letter or digit becomes `-`. */
-export function projectSlug(path: string): string {
-  return path.replace(/[^a-zA-Z0-9]/g, '-')
-}
-
-/** Where Claude Code writes a session's transcript for a workspace folder. */
-export function transcriptPath(home: string, workspacePath: string, sessionId: string): string {
-  return join(home, '.claude', 'projects', projectSlug(workspacePath), `${sessionId}.jsonl`)
-}
 
 export type WorkerDeps = {
   clock: Clock
@@ -36,6 +26,8 @@ export type WorkerDeps = {
   model: TrackerDeps['model']
   /** A file's bytes, or null when it does not exist. */
   readFile(path: string): Promise<Buffer | null>
+  /** The names of the folders in a folder; none when it does not exist. */
+  listDirs(path: string): Promise<string[]>
   /** The socket the agent's tools and prompt hook reach, and their scripts. Null: no socket, and launches get no tools. */
   tools: { socketPath: string; mcpServer: string; promptHook: string } | null
   /** Writes the text to the system clipboard; throws when it cannot. Orca gives a panel no clipboard. */
@@ -55,6 +47,15 @@ async function readOrNull(path: string): Promise<Buffer | null> {
   }
 }
 
+async function listDirs(path: string): Promise<string[]> {
+  try {
+    return (await readdir(path, { withFileTypes: true })).filter(d => d.isDirectory()).map(d => d.name)
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw e
+  }
+}
+
 /** `pbcopy` on macOS. Elsewhere there is no clipboard command, so the panel shows the text to select. */
 function copyToClipboard(text: string): Promise<void> {
   if (process.platform !== 'darwin') return Promise.reject(new Error('no clipboard command on this system'))
@@ -66,7 +67,6 @@ function copyToClipboard(text: string): Promise<void> {
   })
 }
 
-type Workspace = { id: string; path: string }
 /** `agent` is Orca's name for the agent, such as `claude` or `codex`; an older Orca may leave it out. */
 type Agent = { terminalId: string | null; title: string | null; state: string; agent?: string }
 
@@ -78,31 +78,51 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): Promise<void> } {
   const log = (m: string) => orca.log(m)
 
-  /** Workspace id to folder, from workspace.list. Read again when an id is missing. */
-  let workspaces = new Map<string, string>()
-  async function listWorkspaces(): Promise<Map<string, string>> {
-    const { workspaces: list } = (await orca.host.call('workspace.list', {})) as { workspaces: Workspace[] }
-    workspaces = new Map(list.map(w => [w.id, w.path]))
-    return workspaces
+  const projects = join(deps.home, '.claude', 'projects')
+
+  /**
+   * Finds a session's transcript by its id alone: `~/.claude/projects/<any folder>/<session id>.jsonl`. The launch's
+   * workspace id does not give the folder (docs/live-check.md), and Claude Code's folder name is its own.
+   */
+  async function find(sessionId: string): Promise<{ path: string; bytes: Buffer } | null> {
+    for (const dir of await deps.listDirs(projects)) {
+      const path = join(projects, dir, `${sessionId}.jsonl`)
+      const bytes = await deps.readFile(path)
+      if (bytes) return { path, bytes }
+    }
+    return null
   }
 
-  /** The session's workspace folder. */
-  async function dirOf(sessionId: string, workspaceId?: string): Promise<string | null> {
-    const ws = workspaceId ?? Object.values(tracker.state().terminals).find(t => t.sessionId === sessionId)?.workspaceId
-    if (!ws) return null
-    return workspaces.get(ws) ?? (await listWorkspaces()).get(ws) ?? null
+  /** Saves the transcript path and the folder once known. The first value found stays. */
+  async function learn(sessionId: string, found: { transcript?: string; cwd?: string | null }): Promise<void> {
+    const s = tracker.state().sessions[sessionId]
+    if (!s || ((s.transcript || !found.transcript) && (s.cwd || !found.cwd))) return
+    await tracker.edit(sessionId, cur => ({ ...cur, transcript: cur.transcript ?? found.transcript ?? null, cwd: cur.cwd ?? found.cwd ?? null }))
   }
 
-  async function pathOf(sessionId: string, workspaceId?: string): Promise<string | null> {
-    const dir = await dirOf(sessionId, workspaceId)
-    return dir ? transcriptPath(deps.home, dir, sessionId) : null
+  /** The session's whole transcript, or null before Claude Code writes it: the next read looks again. */
+  async function read(sessionId: string): Promise<Buffer | null> {
+    const s = tracker.state().sessions[sessionId]
+    if (!s) return null
+    const hit = s.transcript ? { path: s.transcript, bytes: await deps.readFile(s.transcript) } : await find(sessionId)
+    if (!hit?.bytes) return null
+    await learn(sessionId, { transcript: hit.path, cwd: s.cwd ? undefined : cwdOf(hit.bytes) })
+    return hit.bytes
+  }
+
+  /** The session's folder: its saved `cwd`, else the first `cwd` its transcript gives. */
+  async function dirOf(sessionId: string): Promise<string | null> {
+    const known = tracker.state().sessions[sessionId]?.cwd
+    if (known) return known
+    await read(sessionId)
+    return tracker.state().sessions[sessionId]?.cwd ?? null
   }
 
   /** Each session's plan, as last read (spec "The session plan", step 2). The plugin only reads the file. */
   const plans = new Map<string, PlanRead>()
 
   /**
-   * Reads the session's plan file, and tells the panel when the plan changed. Null when the workspace is not known.
+   * Reads the session's plan file, and tells the panel when the plan changed. Null when the folder is not known.
    * A file that cannot be read, or has text but no step, gives its path as the error, as `readPlan` in the inbox's
    * `hooks/register.tsx` does. A missing or empty file is no plan and no error.
    */
@@ -123,11 +143,6 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
     plans.set(sessionId, read)
     if (before !== undefined && JSON.stringify(before) !== JSON.stringify(read)) orca.panels.post('inbox.changed', {})
     return { path, ...read }
-  }
-
-  async function read(sessionId: string): Promise<Buffer | null> {
-    const path = await pathOf(sessionId)
-    return path ? deps.readFile(path) : null
   }
 
   /** The newest main-agent status per terminal, for the send check. Lost on a restart; agents.list fills it again. */
@@ -154,19 +169,9 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
     log,
   })
 
-  async function prune(): Promise<void> {
-    let live: Set<string> | null = null
-    try {
-      live = new Set((await listWorkspaces()).keys())
-    } catch (e) {
-      log(`prune: workspace.list failed: ${message(e)}`)
-    }
-    await tracker.prune(live)
-  }
-
   const ready = tracker
     .start()
-    .then(prune)
+    .then(() => tracker.prune())
     .catch(e => log(`start: ${message(e)}`))
 
   const answer = createAnswerer({
@@ -193,7 +198,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
     : Promise.resolve(null)
 
   orca.hooks.on('agent.launch.before', async (event, next) => {
-    if (!event.terminalId || !event.workspaceId) return undefined
+    if (!event.terminalId) return undefined
     const tagged = tagLaunch(event.agent, event.command, undefined, deps.tools ?? undefined)
     if (!tagged.session) return undefined
     const { id, kind } = tagged.session
@@ -203,13 +208,13 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
       // Its turn count starts at the prompts before that end, so a prompt-start raises the turn the transcript gives.
       let offset = 0
       let turn = 0
-      if (kind === 'resume' && !tracker.state().sessions[id]) {
-        const path = await pathOf(id, event.workspaceId)
-        const bytes = path ? await deps.readFile(path) : null
-        offset = bytes ? wholeLinesEnd(bytes) : 0
-        turn = bytes ? promptsBefore(bytes, offset) : 0
+      const found = kind === 'resume' && !tracker.state().sessions[id] ? await find(id) : null
+      if (found) {
+        offset = wholeLinesEnd(found.bytes)
+        turn = promptsBefore(found.bytes, offset)
       }
-      await tracker.track(event.terminalId, id, { workspaceId: event.workspaceId, offset, turn, tools: tagged.tools })
+      await tracker.track(event.terminalId, id, { offset, turn, tools: tagged.tools })
+      if (found) await learn(id, { transcript: found.path, cwd: cwdOf(found.bytes) })
     } catch (e) {
       log(`launch: could not track ${event.terminalId}: ${message(e)}`)
     }
@@ -302,6 +307,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     home: homedir(),
     model: (prompt, source) => runInboxModel(prompt, { source }),
     readFile: readOrNull,
+    listDirs,
     copy: copyToClipboard,
     tools: { socketPath: socketPath(), ...binPaths() },
   })

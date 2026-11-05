@@ -304,10 +304,8 @@ describe('presses', () => {
     await t.time.run(t.time.now() + 2000)
     const rows = labelledRows(t.s(), at)
     assert.deepEqual(rows.findings.issues, [])
-    // The inbox's `outcomeLabel` reads `askedAs` first, so a fixed finding a question asked about says so there too.
-    assert.deepEqual(rows.findings.closed.issues, { shown: [{ id: ISSUE.id, mark: '✓', text: ISSUE.title, outcome: 'Now a question', age: 'now' }], total: 1 })
-    const plain = { ...t.s(), ledger: { ...t.s().ledger, findings: [ISSUE] } }
-    assert.equal(labelledRows(plain, at).findings.closed.issues.shown[0]?.outcome, 'Fix')
+    // As in the inbox (commit 2d4bd27), the sent Fix reads its button's label, though a question asked about it.
+    assert.deepEqual(rows.findings.closed.issues, { shown: [{ id: ISSUE.id, mark: '✓', text: ISSUE.title, outcome: 'Fix', age: 'now' }], total: 1 })
     assert.ok(t.s().ledger.findings.some(f => f.id === ISSUE.id), 'the ledger keeps it open for the agent and the inbox model')
   })
 

@@ -249,13 +249,13 @@ export function createTracker(deps: TrackerDeps) {
     async track(
       terminalId: string,
       sessionId: string,
-      opts: { workspaceId?: string; offset?: number; turn?: number; tools?: boolean } = {},
+      opts: { offset?: number; turn?: number; tools?: boolean } = {},
     ): Promise<void> {
       const terminals = Object.fromEntries(Object.entries(state.terminals).filter(([, t]) => t.sessionId !== sessionId))
       const known = state.sessions[sessionId]
       state = {
         ...state,
-        terminals: { ...terminals, [terminalId]: opts.workspaceId ? { sessionId, workspaceId: opts.workspaceId } : { sessionId } },
+        terminals: { ...terminals, [terminalId]: { sessionId } },
         sessions: {
           ...state.sessions,
           [sessionId]: known
@@ -273,20 +273,13 @@ export function createTracker(deps: TrackerDeps) {
       return save()
     },
 
-    /**
-     * Drops what can no longer show: a terminal whose workspace is gone (`workspaces`, when known) or whose session
-     * is gone, and a session with no open rows and nothing queued that nobody touched for PRUNE_MS.
-     */
-    async prune(workspaces: ReadonlySet<string> | null): Promise<void> {
+    /** Drops a session with no open rows and nothing queued that nobody touched for PRUNE_MS, and its terminals. */
+    async prune(): Promise<void> {
       const now = clock.now()
       const sessions = Object.fromEntries(
         Object.entries(state.sessions).filter(([, s]) => s.ledger.items.length > 0 || s.queue.length > 0 || now - s.touchedAt < PRUNE_MS),
       )
-      const terminals = Object.fromEntries(
-        Object.entries(state.terminals).filter(
-          ([, t]) => sessions[t.sessionId] && !(workspaces && t.workspaceId && !workspaces.has(t.workspaceId)),
-        ),
-      )
+      const terminals = Object.fromEntries(Object.entries(state.terminals).filter(([, t]) => sessions[t.sessionId]))
       const same = Object.keys(sessions).length === Object.keys(state.sessions).length && Object.keys(terminals).length === Object.keys(state.terminals).length
       if (same) return
       state = { ...state, terminals, sessions }
