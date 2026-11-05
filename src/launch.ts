@@ -1,6 +1,9 @@
-// Launch tagging (spec "How it works", step 1). A pure function: the agent.launch.before hook
-// calls it and passes its command on. It adds `--session-id <uuid>` to a new Claude Code session
-// and never changes any other part of any command.
+// Launch tagging (spec "How it works", step 1, and "The agent's tools", step 1). A pure function:
+// the agent.launch.before hook calls it and passes its command on. It adds `--session-id <uuid>` to
+// a new Claude Code session and, when asked, the flags that give a tracked session the inbox tools.
+// It never changes any other part of any command.
+
+import { guidanceText, ORCA } from './core/model-text'
 
 export interface LaunchSession {
   id: string
@@ -10,7 +13,30 @@ export interface LaunchSession {
 export interface TaggedLaunch {
   command: string
   session: LaunchSession | null
+  /** True when the launch got the inbox tools: the MCP server, the guidance and the prompt hook. */
+  tools: boolean
 }
+
+/** Where the tool scripts and the worker's socket are. */
+export interface LaunchTools {
+  socketPath: string
+  mcpServer: string
+  promptHook: string
+}
+
+/**
+ * Flags the person already set that the added tool flags could clash with. A launch with one of
+ * them is still tagged but gets no tools. The `-file` forms set the same prompts.
+ */
+const TOOL_FLAGS = new Set([
+  '--mcp-config',
+  '--strict-mcp-config',
+  '--append-system-prompt',
+  '--append-system-prompt-file',
+  '--system-prompt',
+  '--system-prompt-file',
+  '--settings',
+])
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
@@ -25,7 +51,7 @@ interface Token {
  * this parser does not fully understand: an open quote, or an operator, redirect, glob, expansion
  * or substitution outside single quotes. A null leaves the launch unchanged and untracked.
  */
-function tokenize(line: string): Token[] | null {
+export function tokenize(line: string): Token[] | null {
   const tokens: Token[] = []
   let i = 0
   while (i < line.length) {
@@ -71,6 +97,26 @@ function tokenize(line: string): Token[] | null {
   return tokens
 }
 
+/** Quotes one word for a POSIX shell: single quotes, with each ' written as '\''. */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`
+}
+
+/**
+ * The flags that give session `id` the inbox tools, each value quoted. `--mcp-config` takes several
+ * values, so a flag must follow it: it never comes last.
+ */
+function toolFlags(id: string, t: LaunchTools): string {
+  const mcp = { mcpServers: { 'orca-inbox': { command: 'node', args: [t.mcpServer, '--socket', t.socketPath, '--session', id] } } }
+  const hook = ['node', t.promptHook, '--socket', t.socketPath, '--session', id].map(shellQuote).join(' ')
+  const settings = { hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: hook }] }] } }
+  return [
+    '--mcp-config', shellQuote(JSON.stringify(mcp)),
+    '--append-system-prompt', shellQuote(guidanceText(ORCA)),
+    '--settings', shellQuote(JSON.stringify(settings)),
+  ].join(' ')
+}
+
 function isClaude(word: string): boolean {
   return word.slice(word.lastIndexOf('/') + 1) === 'claude'
 }
@@ -87,13 +133,16 @@ function splitInline(arg: string): [string, string | undefined] {
  *   prompt argument stays last and still works. A launch that already sets `--session-id` keeps it.
  * - `--resume <uuid>` with no `--fork-session`: keeps that uuid.
  * - Every other resume form, any other agent, and any command this cannot parse: unchanged, null.
+ * - With `tools`, a tracked launch also gets the flags from `toolFlags`, right after the program
+ *   word, unless it already has a flag in `TOOL_FLAGS`.
  */
 export function tagLaunch(
   agent: string,
   command: string,
   newId: () => string = () => crypto.randomUUID(),
+  tools?: LaunchTools,
 ): TaggedLaunch {
-  const untracked: TaggedLaunch = { command, session: null }
+  const untracked: TaggedLaunch = { command, session: null, tools: false }
   if (agent !== 'claude') return untracked
   const tokens = tokenize(command)
   if (!tokens) return untracked
@@ -106,6 +155,7 @@ export function tagLaunch(
   let resume: string | null | undefined // undefined: absent; null: no value or not a uuid
   let continued = false
   let fork = false
+  let clash = false
   const args = tokens.slice(p + 1).map((t) => t.text)
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--') break
@@ -122,19 +172,27 @@ export function tagLaunch(
       continued = true
     } else if (flag === '--fork-session') {
       fork = true
+    } else if (TOOL_FLAGS.has(flag)) {
+      clash = true
     }
   }
 
+  let session: LaunchSession
+  let added = ''
   if (resume !== undefined || continued || fork) {
-    if (typeof resume === 'string' && !continued && !fork && sessionId === undefined) {
-      return { command, session: { id: resume, kind: 'resume' } }
-    }
+    if (typeof resume !== 'string' || continued || fork || sessionId !== undefined) return untracked
+    session = { id: resume, kind: 'resume' }
+  } else if (sessionId === null) {
     return untracked
+  } else if (typeof sessionId === 'string') {
+    session = { id: sessionId, kind: 'new' }
+  } else {
+    session = { id: newId(), kind: 'new' }
+    added = ` --session-id ${session.id}`
   }
-  if (sessionId === null) return untracked
-  if (typeof sessionId === 'string') return { command, session: { id: sessionId, kind: 'new' } }
 
-  const id = newId()
+  const withTools = tools !== undefined && !clash
+  if (withTools) added += ` ${toolFlags(session.id, tools)}`
   const at = tokens[p].end
-  return { command: `${command.slice(0, at)} --session-id ${id}${command.slice(at)}`, session: { id, kind: 'new' } }
+  return { command: `${command.slice(0, at)}${added}${command.slice(at)}`, session, tools: withTools }
 }
