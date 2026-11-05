@@ -80,7 +80,7 @@ Builds `docs/spec.md` (version 1, Claude Code only). One subagent per task. A fa
   2. The newest `agent.status.changed` for the terminal says `mainAgent.state` is `done`, and no `working` came after it.
   3. The session's `lastTurnId` and `queue` are unchanged since the row was drawn.
   If any check fails, the row reads "Waits for the agent" and nothing is sent. A press for a row that has closed since it was drawn is refused.
-- Do: a send whose result is not certain, because the status changed during the send or no new prompt appeared within 10 s, reads "Not delivered" with Copy. The plugin never sends it again by itself.
+- Do: a send whose result is not certain reads "Not delivered" with Copy. The plugin never sends it again by itself. As built: only the sent prompt itself, seen in the transcript within 10 s, confirms delivery. A `working` status during the send does not count against it, because the sent prompt starts the agent working; a different prompt first, a refused send, or no prompt in 10 s reads "Not delivered" (`src/presses.ts:17`, `:118`).
 - Test: a fake terminal and a fake status for each state: `done`, `working`, `blocked`, `waiting`. Also: a status change to `working` between the press and the send; a new session in the terminal between the press and the send; a turn that ends between the draw and the press; a send with no new prompt within 10 s.
 
 ## T8. Live check and README

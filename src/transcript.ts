@@ -175,3 +175,14 @@ export function readTurn(source: Buffer | string, offset: number, prompts?: numb
 export function readTurnFile(path: string, offset: number, prompts?: number): TurnRead | null {
   return readTurn(readFileSync(path), offset, prompts)
 }
+
+/** The first prompt that starts at or after `offset`, with its uuid and text, or null: how a press confirms its answer arrived (plan T7). */
+export function promptAfter(bytes: Buffer, offset: number): { uuid: string; text: string } | null {
+  const found = lines(bytes, offset).find(({ line }) => isTurnStart(line))?.line
+  return found ? { uuid: String(found.uuid), text: text(found.message?.content) } : null
+}
+
+/** Where the whole lines end: the byte after the last newline. A resumed session starts reading here. */
+export function wholeLinesEnd(bytes: Buffer): number {
+  return bytes.lastIndexOf(NL) + 1
+}

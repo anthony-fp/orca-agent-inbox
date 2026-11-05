@@ -10,12 +10,12 @@
 //   6. A failed model run keeps the turn for the next `done` or start. After 3 failures the turn is dropped
 //      and counted in `unread`.
 // The whole state is one storage value, so step 3 is one write and a crash leaves it all or nothing.
-import { applyExchangeUpdate } from './core/ledger'
+import { applyExchangeUpdate, closeItem } from './core/ledger'
 import { ORCA, buildPrompt, screenText } from './core/model-text'
 import { nowRows } from './core/now'
-import type { Exchange, Ledger } from './core/types'
+import type { Exchange, Ledger, Press } from './core/types'
 import type { ModelResult } from './model'
-import { STATE_KEY, emptySession, emptyState, upgradeState, type SessionState, type State, type Turn } from './state'
+import { STATE_KEY, emptySession, emptyState, upgradeState, type PressLabel, type SessionState, type State, type Turn } from './state'
 import { readTurn, type TurnRead } from './transcript'
 
 /** The part of `orca.storage` the tracker uses. */
@@ -37,6 +37,8 @@ export type TrackerDeps = {
   /** Runs the inbox model. `source` is what parseReply checks HELP values against. */
   model(prompt: string, source: string): Promise<ModelResult>
   log?(message: string): void
+  /** Called after each saved change, so the worker can tell the panel. */
+  changed?(): void
 }
 
 /** Read once a second, for up to 15 s after a `done`. A complete turn waits for 2 s with no growth. */
@@ -44,6 +46,8 @@ export const POLL_MS = 1000
 export const LIMIT_MS = 15_000
 export const QUIET_MS = 2000
 export const MAX_FAILURES = 3
+/** A session with no open rows and nothing queued is dropped after 7 days untouched. */
+export const PRUNE_MS = 7 * 24 * 60 * 60 * 1000
 
 /** The `<screen>` text for a turn: the panel lists the open rows, or shows none. */
 export function screenFor(ledger: Ledger): string {
@@ -59,6 +63,17 @@ function sourceOf(ex: Exchange): string {
 /** The ledger as the mod has it when the turn's prompt is built: its prompt count includes this turn. */
 function atTurn(ledger: Ledger, turn: number): Ledger {
   return turn > ledger.turn ? { ...ledger, turn } : ledger
+}
+
+/** The labels of rows still open: a closed row's label goes with it. */
+function openLabels(ledger: Ledger, presses: Record<string, PressLabel>): Record<string, PressLabel> {
+  return Object.fromEntries(Object.entries(presses).filter(([id]) => ledger.items.some(i => i.id === id)))
+}
+
+/** The press a turn answers: the answer whose prompt has the turn's id. */
+function pressFor(s: SessionState, turnId: string): { press: Press; answer: string } | null {
+  const hit = Object.entries(s.presses).find(([, l]) => l.turnId === turnId)
+  return hit ? { press: { id: hit[0], action: 'answer' }, answer: hit[1].answer } : null
 }
 
 /** Where the next turn starts: after the last queued turn, else at the saved offset. */
@@ -87,6 +102,7 @@ export function createTracker(deps: TrackerDeps) {
   function save(): Promise<void> {
     const copy = JSON.parse(JSON.stringify(state)) as State
     writes = writes.catch(() => undefined).then(() => storage.set(STATE_KEY, copy))
+    void writes.then(() => deps.changed?.(), () => undefined)
     return writes
   }
 
@@ -103,6 +119,7 @@ export function createTracker(deps: TrackerDeps) {
     return {
       ...s,
       ledger: atTurn(ledger, turn.exchange.turn),
+      presses: openLabels(ledger, s.presses),
       offset: turn.nextOffset,
       lastTurnId: turn.turnId,
       queue: s.queue.slice(1),
@@ -124,12 +141,20 @@ export function createTracker(deps: TrackerDeps) {
           await save()
           continue
         }
+        // The turn that answers a press: the row closes as answered before the model reads the ledger, as the mod
+        // closes it at the press. The commit write saves the close.
+        const answered = pressFor(s, turn.turnId)
+        const exchange: Exchange = { ...turn.exchange, press: answered?.press ?? turn.exchange.press }
+        if (answered && s.ledger.items.some(i => i.id === answered.press.id)) {
+          update(sessionId, cur => ({ ...cur, ledger: closeItem(cur.ledger, answered.press.id, { how: 'answered', outcome: answered.answer }, clock.now()) }))
+        }
+        const ledgerNow = state.sessions[sessionId].ledger
         const promptAt = clock.now()
-        const result = await deps.model(buildPrompt(atTurn(s.ledger, turn.exchange.turn), turn.exchange), sourceOf(turn.exchange))
+        const result = await deps.model(buildPrompt(atTurn(ledgerNow, exchange.turn), exchange), sourceOf(exchange))
         if (result.ok) {
           // Apply to the ledger as it is now: a press may have closed a row while the model ran.
           update(sessionId, cur =>
-            settle(cur, turn, applyExchangeUpdate(atTurn(cur.ledger, turn.exchange.turn), result.update, turn.exchange, clock.now(), promptAt), 0),
+            settle(cur, turn, applyExchangeUpdate(atTurn(cur.ledger, exchange.turn), result.update, exchange, clock.now(), promptAt), 0),
           )
           await save()
           continue
@@ -200,18 +225,54 @@ export function createTracker(deps: TrackerDeps) {
   return {
     /** Loads the saved state, runs every queued turn and reads each tracked session again. */
     async start(): Promise<void> {
-      state = upgradeState(await storage.get(STATE_KEY))
+      state = upgradeState(await storage.get(STATE_KEY), clock.now())
       for (const [id, s] of Object.entries(state.sessions)) if (s.queue.length > 0) background(drain(id, true))
       for (const { sessionId } of Object.values(state.terminals)) background(poll(sessionId))
     },
 
-    /** Maps a terminal to the session its launch was tagged with. */
-    async track(terminalId: string, sessionId: string): Promise<void> {
+    /**
+     * Maps a terminal to the session its launch was tagged with. A session new to the state starts reading at
+     * `offset`: a resumed session's transcript end, so its old turns are never read again. A known session keeps
+     * its own offset. Another terminal mapped to the same session stops being tracked.
+     */
+    async track(terminalId: string, sessionId: string, opts: { workspaceId?: string; offset?: number } = {}): Promise<void> {
+      const terminals = Object.fromEntries(Object.entries(state.terminals).filter(([, t]) => t.sessionId !== sessionId))
+      const known = state.sessions[sessionId]
       state = {
         ...state,
-        terminals: { ...state.terminals, [terminalId]: { sessionId } },
-        sessions: { ...state.sessions, [sessionId]: state.sessions[sessionId] ?? emptySession() },
+        terminals: { ...terminals, [terminalId]: opts.workspaceId ? { sessionId, workspaceId: opts.workspaceId } : { sessionId } },
+        sessions: {
+          ...state.sessions,
+          [sessionId]: known ? { ...known, touchedAt: clock.now() } : { ...emptySession(clock.now()), offset: opts.offset ?? 0 },
+        },
       }
+      await save()
+    },
+
+    /** Changes a session and saves it. The change lands in this tick, before the write: a press checks and sends in one tick. */
+    edit(sessionId: string, change: (s: SessionState) => SessionState): Promise<void> {
+      if (!state.sessions[sessionId]) return Promise.resolve()
+      update(sessionId, cur => ({ ...change(cur), touchedAt: clock.now() }))
+      return save()
+    },
+
+    /**
+     * Drops what can no longer show: a terminal whose workspace is gone (`workspaces`, when known) or whose session
+     * is gone, and a session with no open rows and nothing queued that nobody touched for PRUNE_MS.
+     */
+    async prune(workspaces: ReadonlySet<string> | null): Promise<void> {
+      const now = clock.now()
+      const sessions = Object.fromEntries(
+        Object.entries(state.sessions).filter(([, s]) => s.ledger.items.length > 0 || s.queue.length > 0 || now - s.touchedAt < PRUNE_MS),
+      )
+      const terminals = Object.fromEntries(
+        Object.entries(state.terminals).filter(
+          ([, t]) => sessions[t.sessionId] && !(workspaces && t.workspaceId && !workspaces.has(t.workspaceId)),
+        ),
+      )
+      const same = Object.keys(sessions).length === Object.keys(state.sessions).length && Object.keys(terminals).length === Object.keys(state.terminals).length
+      if (same) return
+      state = { ...state, terminals, sessions }
       await save()
     },
 
@@ -219,6 +280,7 @@ export function createTracker(deps: TrackerDeps) {
     async done(terminalId: string): Promise<void> {
       const sessionId = state.terminals[terminalId]?.sessionId
       if (!sessionId || !state.sessions[sessionId]) return
+      update(sessionId, s => ({ ...s, touchedAt: clock.now() }))
       background(drain(sessionId, true))
       await poll(sessionId)
     },
