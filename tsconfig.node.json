@@ -10,5 +10,5 @@
     "skipLibCheck": true
   },
   "include": ["src/*.ts", "src/core/*.ts"],
-  "exclude": ["src/worker.ts", "src/worker.test.ts", "src/panel.check.ts", "src/protocol.ts"]
+  "exclude": ["src/worker.ts", "src/worker.test.ts", "src/panel.check.ts", "src/panel-views.ts", "src/protocol.ts"]
 }
