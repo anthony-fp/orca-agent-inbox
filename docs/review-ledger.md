@@ -19,3 +19,14 @@
 - [fixed] A pending turn with no reply could block every later turn → a later prompt closes it as `incomplete` and the offset moves on. spec.md step 2.
 - [fixed] A Codex launch that never makes a rollout could block later launches → a waiting launch expires on terminal close, on replacement, or after 60 s. spec.md step 1.
 - Converged. Codex: "Further review rounds unlikely justify cost." Both findings were small rules; no schema or interface left open.
+
+## Round 4 (findings section) — 2026-11-05
+- Verified real: the CLI flags, the `mcp__orca-inbox__*` tool names, and that `systemText` reads only `band`.
+- [fixed] The inbox's `show` tool adds a file to the Files tab (`hooks/files.ts:11-23`); it does not list items → no `show`. A `UserPromptSubmit` hook added with `--settings` prints `inboxText(ORCA)` beside each prompt, as the skill does. spec "The agent's tools" step 1.
+- [fixed] A 5 s tool timeout conflicted with waiting for a 45 s model run → tool calls never wait; the model's update applies to the ledger at commit time; each call is stamped with the current turn. Step 4.
+- [fixed] `record` returns no id (`hooks/tools.ts:108-141`) → kept as in the skill; the id reaches the agent in the inbox text beside its next prompt. Step 3.
+
+## Round 5 (findings section) — 2026-11-05
+- Verified real: the `--settings` prompt hook and the no-id `record` answer.
+- [fixed] Tool calls could carry the previous turn, because the ledger's turn moves only at a model commit → the prompt hook sends `prompt-start` first; the worker raises the active turn and saves it before it answers. Step 4.
+- Converged: the only finding was an interface detail, now specified with its tests. Codex said the rest can be settled during implementation.

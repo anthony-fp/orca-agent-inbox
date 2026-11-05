@@ -9,7 +9,8 @@ An Orca plugin that adds an inbox icon to Orca's right sidebar. The panel shows 
 | Where it shows | A new icon in Orca's right sidebar. The panel is the inbox's "Now" tab only. Files and PRs stay out: Orca's sidebar has its own. |
 | Who does the work | The plugin, alone. It needs no inbox mod, Codex plugin or MCP server. |
 | Which agents | Claude Code only in version 1. Codex in version 2. |
-| How items arrive | The inbox model only. The agent does not call `record` or `close`. The launch hook only tags each agent with a session id. |
+| How items arrive | Two ways, as in the inbox skill: the agent calls `record` and `close` and sees the open items beside each prompt, and the inbox model reads each finished turn. The launch hook adds the tools and the guidance to each tracked `claude` launch. |
+| Findings | Shown as in the inbox skill: Issues and Opportunities sections in the panel. A finding may show at once or at the end of the turn; it does not need to be instant. |
 | Shared code | Copied once from the inbox repo. This repo owns the copy from then on. |
 
 ## What Orca gives a plugin (tested on Orca 1.4.248)
@@ -49,6 +50,20 @@ An Orca plugin that adds an inbox icon to Orca's right sidebar. The panel shows 
    - Answer or choose an option: the plugin sends the answer with `terminal:send` only when that terminal's `mainAgent.state` is `done`, so the agent waits at its prompt. The states `working`, `blocked` (a permission dialog) and `waiting` hold the answer. The row reads "Sending…" until the transcript shows the answer as a new prompt, then "✓ Answered". A held answer reads "Waits for the agent" with a Copy button. If no new prompt shows within 10 seconds, the row reads, in red, "Not delivered" with Copy.
    - Done or dismiss: the plugin closes the row in its own state. Nothing goes to the agent.
 
+## The agent's tools (findings)
+
+1. **The launch hook adds the tools and the inbox text.** For a tracked `claude` launch, the hook also adds:
+   - `--mcp-config <json>` for one MCP server named `orca-inbox` with `record` and `close`. The name is not `inbox`, so it never meets the inbox skill's server.
+   - `--append-system-prompt <guidanceText(ORCA)>`.
+   - `--settings <json>` with a `UserPromptSubmit` hook. Its command asks the worker for `inboxText(ORCA, ledger, …)` and `closedText` and prints them, so the agent sees the open items and their close ids beside each prompt, as the inbox skill shows them. This is how the agent learns ids; there is no `show` tool (the inbox repo's `show` adds a file to the Files tab, `hooks/files.ts:11-23`, and is out of scope).
+   - If the command already has `--mcp-config`, `--strict-mcp-config`, `--append-system-prompt` or `--settings`, the launch is tagged but gets no tools, and the panel says so for that agent.
+2. **The MCP server and the prompt hook are thin clients.** Each is one Node script in the plugin folder, with no state. The MCP server offers `record` and `close` with the descriptions and schemas from `agentTools` (inbox repo `hooks/tools.ts:80-87`). Each sends its call to the worker over a local socket and returns the worker's answer. The socket path and the session id come in their arguments. If the worker does not answer within 5 seconds, the tool answers that the inbox is not available, and the prompt hook prints nothing.
+3. **The worker is the only writer.** For each call it runs the copied `recordItem` or `recordClose` on that session's ledger, saves the state, and returns the tool's answer unchanged. `record` answers "Recorded" with no id, as in the skill (`hooks/tools.ts:108-141`): the id reaches the agent in the inbox text beside its next prompt. The socket is a file with mode 0600 in the plugin's own folder.
+4. **One ordering path per session.** The worker applies tool calls at once, in the order they arrive. It never waits for a model run. A model run's update is applied to the ledger as it is at commit time (`src/turns.ts:132`), so tool calls that land during a run are kept. Each tool call is stamped with the session's active turn. The `UserPromptSubmit` hook sets it: before it asks for the inbox text, it sends a `prompt-start` message, and the worker raises the session's active turn by 1 and saves it, before it answers. So a call made during turn N carries N, including the first prompt and a prompt sent while an earlier model run is still out. The model run for turn N keeps using N for its own update. Tests: a call during the first turn, a call during a slow model run, a call after turn N commits but before turn N+1 starts, a prompt sent while a run is out, a worker restart between a call and the next turn.
+5. **The `ORCA` host gets real tool names:** `recordTool` `mcp__orca-inbox__record`, `closeTool` `mcp__orca-inbox__close`, and an `intro` that names the Orca panel. `systemText` reads only `band`, so the inbox model's text does not change.
+6. **Text a model reads.** The guidance, the tool descriptions and the tool answers are the inbox's, word for word, with only the host names changed. Before they ship, run the inbox repo's agent eval (`./scripts/eval.sh --suite agent`) with the `ORCA` host and compare with `CLAUDE_CODE`.
+7. **The panel** adds "Issues · N" and "Opportunities · N" after Tasks, with the inbox's finding rows and buttons, less the actions that version 1 leaves out.
+
 ## State
 
 - The plugin keeps one ledger per agent session in Orca's plugin storage (`storage:own`), keyed by the session file's id.
@@ -60,7 +75,6 @@ An Orca plugin that adds an inbox icon to Orca's right sidebar. The panel shows 
 
 ## Out of scope for version 1
 
-- `record` and `close` tools for the agent. The launch hook can add them later.
 - Files, PRs and the session plan.
 - Agents on SSH or WSL hosts.
 - Agents other than Claude Code. Codex comes in version 2: it has no session id flag, and Orca reserves `ORCA_*` env names, so it needs its own matching rule (see `review-ledger.md`, rounds 2 and 3).
