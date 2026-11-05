@@ -10,7 +10,7 @@
 //   6. A failed model run keeps the turn for the next `done` or start. After 3 failures the turn is dropped
 //      and counted in `unread`.
 // The whole state is one storage value, so step 3 is one write and a crash leaves it all or nothing.
-import { applyExchangeUpdate, closeItem } from './core/ledger'
+import { EMPTY, applyExchangeUpdate, closeItem } from './core/ledger'
 import { ORCA, buildPrompt, screenText } from './core/model-text'
 import { nowRows } from './core/now'
 import type { Exchange, Ledger, Press } from './core/types'
@@ -60,7 +60,11 @@ function sourceOf(ex: Exchange): string {
   return [ex.reply, ...ex.activity].join('\n')
 }
 
-/** The ledger as the mod has it when the turn's prompt is built: its prompt count includes this turn. */
+/**
+ * The ledger as the mod has it when the turn's prompt is built: its prompt count includes this turn. `ledger.turn` is
+ * the transcript's count. The active turn that stamps tool calls is apart, in SessionState.activeTurn, so a model
+ * run for turn N applies as N and never moves it.
+ */
 function atTurn(ledger: Ledger, turn: number): Ledger {
   return turn > ledger.turn ? { ...ledger, turn } : ledger
 }
@@ -235,10 +239,12 @@ export function createTracker(deps: TrackerDeps) {
 
     /**
      * Maps a terminal to the session its launch was tagged with. A session new to the state starts reading at
-     * `offset`: a resumed session's transcript end, so its old turns are never read again. A known session keeps
-     * its own offset. Another terminal mapped to the same session stops being tracked.
+     * `offset`: a resumed session's transcript end, so its old turns are never read again. Its ledger's turn starts at
+     * `turn`: the person's prompts before `offset`, so the turn a prompt-start raises matches the turn the transcript
+     * gives. A known session keeps its own offset and turn.
+     * Another terminal mapped to the same session stops being tracked.
      */
-    async track(terminalId: string, sessionId: string, opts: { workspaceId?: string; offset?: number } = {}): Promise<void> {
+    async track(terminalId: string, sessionId: string, opts: { workspaceId?: string; offset?: number; turn?: number } = {}): Promise<void> {
       const terminals = Object.fromEntries(Object.entries(state.terminals).filter(([, t]) => t.sessionId !== sessionId))
       const known = state.sessions[sessionId]
       state = {
@@ -246,7 +252,7 @@ export function createTracker(deps: TrackerDeps) {
         terminals: { ...terminals, [terminalId]: opts.workspaceId ? { sessionId, workspaceId: opts.workspaceId } : { sessionId } },
         sessions: {
           ...state.sessions,
-          [sessionId]: known ? { ...known, touchedAt: clock.now() } : { ...emptySession(clock.now()), offset: opts.offset ?? 0 },
+          [sessionId]: known ? { ...known, touchedAt: clock.now() } : { ...emptySession(clock.now()), offset: opts.offset ?? 0, ledger: { ...EMPTY, turn: opts.turn ?? 0 } },
         },
       }
       await save()

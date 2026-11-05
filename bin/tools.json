@@ -1,0 +1,89 @@
+[
+  {
+    "name": "record",
+    "description": "Record something the user must see in the Agent Inbox panel in Orca's sidebar, and still say it in your reply. Use it in the turn you raise it, once for each thing.\n- question: a decision, approval or piece of information only the user has, which you need before you go on. Give options, and rec when you recommend one. This includes an act you hold until they say so, such as \"say when you want those committed\".\n- task: a step only the user can do, such as signing in or running a command with their password. Put the commands, files and links in steps. A step your own tools can take is not a task: take it, or ask for their OK as a question when it changes something other people see.\n- finding: something outside the current task that deserves their attention. It waits in the Agent Inbox panel in Orca's sidebar until it is closed, and the user can ask you to address it or discuss it. Record what a careful senior engineer would flag to a teammate, once you have checked it. Leave out style nits, anything the user already decided, todos or ideas the user mentioned, problems in your own change, progress, and anything only the user can do or decide: handle those in your reply, or record them as a question or task.\nDo not record rhetorical questions, offers to continue when continuing is the default, FYIs, or invitations to look at finished work.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "question",
+            "task",
+            "finding"
+          ],
+          "description": "question: a decision only the user can make. task: a step only the user can do. finding: something outside the current task that deserves their attention."
+        },
+        "ask": {
+          "type": "string",
+          "description": "For a question or task: what you need from the user, in at most 12 plain words, readable without your reply."
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "For a question: the answers the user can pick, at most 5 words each. Give at least one."
+        },
+        "rec": {
+          "type": "string",
+          "description": "For a question: the option you recommend, copied from options. Leave it out when you recommend none."
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "For a task: up to 3 things the user can do in one press, each written bare as a command, a file path or an https link."
+        },
+        "finding_kind": {
+          "type": "string",
+          "enum": [
+            "issue",
+            "opportunity"
+          ],
+          "description": "For a finding. issue: something wrong or risky. opportunity: something that could be better."
+        },
+        "title": {
+          "type": "string",
+          "description": "For a finding: what it is, in at most 12 plain words."
+        },
+        "detail": {
+          "type": "string",
+          "description": "For a finding: why it matters and what you would do, in one or two sentences."
+        },
+        "path": {
+          "type": "string",
+          "description": "For a finding: the file it is about, if one."
+        }
+      },
+      "required": [
+        "kind"
+      ]
+    }
+  },
+  {
+    "name": "close",
+    "description": "Close an open item or finding by its id, such as i35 or f12, as listed in the latest \"inbox:\" text beside the user's prompt. Pass the user's answer when their message answered it, and a reason otherwise.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The id of the open item or finding, such as i35 or f32."
+        },
+        "answer": {
+          "type": "string",
+          "description": "The user's answer, at most 8 words, when their own message answered it. Use their words, but when they picked by position or pointing, as \"the second one\", give the option they picked."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Otherwise, why it is closed, in at most 8 words, such as \"no longer applies: Inbox kept\"."
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  }
+]

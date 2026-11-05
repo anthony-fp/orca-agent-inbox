@@ -1,17 +1,20 @@
 // The plugin's worker. Orca transpiles this file when it loads: no build step.
 // It tags each Claude Code launch, feeds the turn tracker from status changes, answers the panel's requests
-// (src/protocol.ts) and runs presses (src/presses.ts).
+// (src/protocol.ts), runs presses (src/presses.ts) and answers the agent's tools and prompt hook (src/socket.ts).
 import { readFile } from 'node:fs/promises'
+import type { Server } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import type { OrcaWorkerApi } from 'orca/worker'
 
+import { parsePlan, planNote, planPath, type PlanView } from './core/plan'
 import { tagLaunch } from './launch'
 import { runInboxModel } from './model'
 import { createPresses, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
 import type { InboxSection, InboxView } from './protocol'
-import { wholeLinesEnd } from './transcript'
+import { binPaths, createAnswerer, listen, socketPath } from './socket'
+import { promptsBefore, wholeLinesEnd } from './transcript'
 import { createTracker, type Clock, type TrackerDeps } from './turns'
 
 const STATES = ['working', 'blocked', 'waiting', 'done']
@@ -32,6 +35,8 @@ export type WorkerDeps = {
   model: TrackerDeps['model']
   /** A file's bytes, or null when it does not exist. */
   readFile(path: string): Promise<Buffer | null>
+  /** The socket the agent's tools and prompt hook reach, and their scripts. Null: no socket, and launches get no tools. */
+  tools: { socketPath: string; mcpServer: string; promptHook: string } | null
 }
 
 const realClock: Clock = { now: () => Date.now(), sleep: ms => new Promise(r => setTimeout(r, ms)) }
@@ -50,7 +55,7 @@ type Agent = { terminalId: string | null; title: string | null; state: string }
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
-export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): void {
+export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): Promise<void> } {
   const log = (m: string) => orca.log(m)
 
   /** Workspace id to folder, from workspace.list. Read again when an id is missing. */
@@ -61,11 +66,37 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): void {
     return workspaces
   }
 
-  async function pathOf(sessionId: string, workspaceId?: string): Promise<string | null> {
+  /** The session's workspace folder. */
+  async function dirOf(sessionId: string, workspaceId?: string): Promise<string | null> {
     const ws = workspaceId ?? Object.values(tracker.state().terminals).find(t => t.sessionId === sessionId)?.workspaceId
     if (!ws) return null
-    const dir = workspaces.get(ws) ?? (await listWorkspaces()).get(ws)
+    return workspaces.get(ws) ?? (await listWorkspaces()).get(ws) ?? null
+  }
+
+  async function pathOf(sessionId: string, workspaceId?: string): Promise<string | null> {
+    const dir = await dirOf(sessionId, workspaceId)
     return dir ? transcriptPath(deps.home, dir, sessionId) : null
+  }
+
+  /** Each session's plan, as last read (spec "The session plan", step 2). The plugin only reads the file. */
+  const plans = new Map<string, PlanView | null>()
+
+  /** Reads the session's plan file, and tells the panel when the plan changed. Null when the workspace is not known. */
+  async function readPlan(sessionId: string): Promise<{ path: string; plan: PlanView | null } | null> {
+    const dir = await dirOf(sessionId)
+    if (!dir) return null
+    const path = planPath(dir, sessionId)
+    let plan: PlanView | null = null
+    try {
+      const bytes = await deps.readFile(path)
+      plan = bytes ? parsePlan(bytes.toString('utf8')) : null
+    } catch (e) {
+      log(`plan: could not read ${sessionId}: ${message(e)}`)
+    }
+    const before = plans.get(sessionId)
+    plans.set(sessionId, plan)
+    if (before !== undefined && JSON.stringify(before) !== JSON.stringify(plan)) orca.panels.post('inbox.changed', {})
+    return { path, plan }
   }
 
   async function read(sessionId: string): Promise<Buffer | null> {
@@ -112,21 +143,47 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): void {
     .then(prune)
     .catch(e => log(`start: ${message(e)}`))
 
+  const answer = createAnswerer({
+    state: () => tracker.state(),
+    edit: (id, change) => tracker.edit(id, change),
+    now: () => deps.clock.now(),
+    planNote: async id => {
+      const read = await readPlan(id)
+      return read ? planNote(read.path, read.plan) : null
+    },
+  })
+  const server: Promise<Server | null> = deps.tools
+    ? listen(
+        deps.tools.socketPath,
+        async request => {
+          await ready
+          return answer(request)
+        },
+        log,
+      ).catch(e => {
+        log(`socket: could not listen: ${message(e)}`)
+        return null
+      })
+    : Promise.resolve(null)
+
   orca.hooks.on('agent.launch.before', async (event, next) => {
     if (!event.terminalId || !event.workspaceId) return undefined
-    const tagged = tagLaunch(event.agent, event.command)
+    const tagged = tagLaunch(event.agent, event.command, undefined, deps.tools ?? undefined)
     if (!tagged.session) return undefined
     const { id, kind } = tagged.session
     try {
       await ready
       // A resumed session starts at its transcript's end, so the turns it had before are never read again.
+      // Its turn count starts at the prompts before that end, so a prompt-start raises the turn the transcript gives.
       let offset = 0
+      let turn = 0
       if (kind === 'resume' && !tracker.state().sessions[id]) {
         const path = await pathOf(id, event.workspaceId)
         const bytes = path ? await deps.readFile(path) : null
         offset = bytes ? wholeLinesEnd(bytes) : 0
+        turn = bytes ? promptsBefore(bytes, offset) : 0
       }
-      await tracker.track(event.terminalId, id, { workspaceId: event.workspaceId, offset })
+      await tracker.track(event.terminalId, id, { workspaceId: event.workspaceId, offset, turn })
     } catch (e) {
       log(`launch: could not track ${event.terminalId}: ${message(e)}`)
     }
@@ -141,6 +198,8 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): void {
     statuses.set(terminalId, state)
     if (state !== 'done') return
     await ready
+    const sessionId = tracker.state().terminals[terminalId]?.sessionId
+    if (sessionId) void readPlan(sessionId).catch(e => log(`plan: ${message(e)}`))
     void tracker.done(terminalId).catch(e => log(`done: ${message(e)}`))
   })
 
@@ -161,7 +220,8 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): void {
       // agents.list gives the combined state: `done` there means the main agent is done too.
       if (!statuses.has(agent.terminalId) && STATES.includes(agent.state)) statuses.set(agent.terminalId, agent.state as TerminalStatus)
       unread += s.unread
-      sections.push({ terminalId: agent.terminalId, sessionId, title: agent.title ?? 'Claude Code', drawn: drawnToken(s), lastActivity: s.touchedAt, ...labelledRows(s, deps.clock.now()) })
+      const plan = plans.has(sessionId) ? (plans.get(sessionId) ?? null) : ((await readPlan(sessionId))?.plan ?? null)
+      sections.push({ terminalId: agent.terminalId, sessionId, title: agent.title ?? 'Claude Code', drawn: drawnToken(s), lastActivity: s.touchedAt, plan, ...labelledRows(s, deps.clock.now()) })
     }
     sections.sort((a, b) => b.lastActivity - a.lastActivity)
     return { sections, untracked, unread }
@@ -171,13 +231,29 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): void {
     await ready
     return presses.press(input)
   })
+
+  return {
+    /** Closes the socket and removes its file. */
+    async close(): Promise<void> {
+      const s = await server
+      if (!s) return
+      await new Promise<void>(resolve => s.close(() => resolve()))
+    },
+  }
 }
 
+let worker: { close(): Promise<void> } | null = null
+
 export default function activate(orca: OrcaWorkerApi): void {
-  createWorker(orca, {
+  worker = createWorker(orca, {
     clock: realClock,
     home: homedir(),
     model: (prompt, source) => runInboxModel(prompt, { source }),
     readFile: readOrNull,
+    tools: { socketPath: socketPath(), ...binPaths() },
   })
+}
+
+export async function deactivate(): Promise<void> {
+  await worker?.close()
 }

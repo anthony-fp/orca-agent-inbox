@@ -86,6 +86,7 @@ Builds `docs/spec.md` (version 1, Claude Code only). One subagent per task. A fa
 ## T8. Live check and README
 - Files: `README.md`, `docs/live-check.md`.
 - First (from T2): with the plugin loaded, log the real `command` of 3 Orca launches: a new tab, a launch with a prompt, and a workspace create. `tagLaunch` leaves any command with `$VAR`, `$(...)` or a shell operator untracked (`src/launch.ts:63`). If Orca builds its launch commands that way, every agent would be untracked, so fix `tagLaunch` before the other checks. Also run `orca plugin dev hook agent.launch.before` on one of those commands.
+- First (from T11): in a tracked session, `/mcp` lists `orca-inbox` beside the user's own MCP servers (`--mcp-config` adding, not replacing, is not tested yet). A real Orca launch with the multi-line guidance starts cleanly. The user's own `UserPromptSubmit` hooks still run.
 - Do: load with `orca plugin dev load .`. Start two `claude` agents in one workspace from Orca. Check each "Done means" line in the spec, and three agents for panel length. The README lists each capability and the hook with what it is for, and says that the plugin runs `claude -p` on your account after each turn.
 - Test: `docs/live-check.md` records each check with its result and the measured time from `done` to the row showing. Say which states were not seen.
 

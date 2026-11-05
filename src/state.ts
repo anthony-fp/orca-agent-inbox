@@ -1,7 +1,7 @@
 // The plugin's saved state. Saved state outlives the code: read every saved value through
 // upgradeState, and add each change of shape there.
 import { EMPTY, upgradeLedger } from './core/ledger'
-import type { Exchange, Ledger } from './core/types'
+import type { Exchange, Ledger, Told } from './core/types'
 
 /** The storage key that holds the whole state, so one write saves every part of a turn's commit. */
 export const STATE_KEY = 'state'
@@ -29,6 +29,13 @@ export type SessionState = {
   presses: Record<string, PressLabel>
   /** The last launch, `done` or press for the session. Pruning drops a session with no open rows untouched for 7 days. */
   touchedAt: number
+  /**
+   * The turn a tool call is stamped with: raised by 1 at each prompt-start (src/socket.ts), before the transcript
+   * shows the prompt. The stamp is the higher of this and `ledger.turn`, so the transcript's count can catch it up.
+   */
+  activeTurn: number
+  /** The inbox text the agent last read beside a prompt, and the closed items it was told of, as the inbox skill keeps them. */
+  told: Told
 }
 
 /**
@@ -62,7 +69,7 @@ export type State = {
 }
 
 export function emptySession(now = 0): SessionState {
-  return { offset: 0, queue: [], ledger: EMPTY, lastTurnId: null, unread: 0, presses: {}, touchedAt: now }
+  return { offset: 0, queue: [], ledger: EMPTY, lastTurnId: null, unread: 0, presses: {}, touchedAt: now, activeTurn: 0, told: { inbox: null, closed: [] } }
 }
 
 export function emptyState(): State {
@@ -107,6 +114,17 @@ function upgradeSession(raw: unknown, now: number): SessionState {
     unread: Number(raw.unread) || 0,
     presses,
     touchedAt: typeof raw.touchedAt === 'number' ? raw.touchedAt : now,
+    activeTurn: Number(raw.activeTurn) || 0,
+    told: upgradeTold(raw.told),
+  }
+}
+
+/** A session saved before the agent read inbox text was told nothing. */
+function upgradeTold(raw: unknown): Told {
+  if (!isObject(raw)) return { inbox: null, closed: [] }
+  return {
+    inbox: typeof raw.inbox === 'string' ? raw.inbox : null,
+    closed: Array.isArray(raw.closed) ? raw.closed.filter((id): id is string => typeof id === 'string') : [],
   }
 }
 

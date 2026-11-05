@@ -1,5 +1,6 @@
 // The panel <-> worker contract, declared once: src/panel.tsx and src/worker.ts both read it.
 import type { NowGroups } from './core/now'
+import type { PlanView } from './core/plan'
 import type { LabelledRow, PressInput, PressOutcome } from './presses'
 
 /** One tracked agent in the focused workspace. */
@@ -15,6 +16,8 @@ export type InboxSection = {
   tasks: LabelledRow[]
   /** Each group's closed items, newest first, for its "N closed" fold. */
   closed: NowGroups['closed']
+  /** The session's plan file as parsePlan reads it, or null when there is none or it has no step. */
+  plan: PlanView | null
 }
 
 export type InboxView = {

@@ -16,6 +16,7 @@ export function section(n: number, rows: Partial<Pick<InboxSection, 'questions' 
     questions: [],
     tasks: [],
     closed: { questions: NONE, tasks: NONE },
+    plan: null,
     ...rows,
   }
 }

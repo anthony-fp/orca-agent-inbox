@@ -2,6 +2,7 @@
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import { EMPTY, applyUpdate, parseReply } from './core/ledger'
 import type { ModelResult } from './model'
+import { planPath } from './core/plan'
 import { emptySession, type State } from './state'
 import { fakeClock } from './test-clock'
 import { PRUNE_MS } from './turns'
@@ -11,6 +12,7 @@ const HOME = '/home/someone'
 const WS = { id: 'ws-1', kind: 'worktree', name: 'one', path: '/work/my_app.v2', branch: null, hostId: null }
 const S = '0b0b0b0b-1111-4222-8333-444444444444'
 const FILE = transcriptPath(HOME, WS.path, S)
+const PLAN_FILE = planPath(WS.path, S)
 const DAY = 24 * 60 * 60 * 1000
 const NONE = { shown: [], total: 0 }
 
@@ -41,6 +43,7 @@ async function setup(opts: { state?: State; files?: Record<string, string>; agen
   const deps = {
     clock: time.clock,
     home: HOME,
+    tools: null,
     model: async (p: string): Promise<ModelResult> => {
       models.push(p)
       const update = parseReply('NEW: decide | 1 | Rename the folder to tools? | Yes / No | yes')
@@ -138,7 +141,8 @@ test('a done reads the transcript at the slug path; the main agent state wins ov
   await t.worker.emit('agent.status.changed', status('working', { mainAgent: { state: 'done', stateStartedAt: 1 } }))
   await t.time.run()
   assert.equal(t.models.length, 1)
-  assert.ok(t.reads.length > 0 && t.reads.every(p => p === FILE))
+  // The transcript, and the plan file the done reads again (spec "The session plan", step 2).
+  assert.ok(t.reads.includes(FILE) && t.reads.every(p => p === FILE || p === PLAN_FILE))
   await t.worker.deactivate()
 })
 
@@ -204,6 +208,7 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
         ],
         tasks: [],
         closed: { questions: NONE, tasks: NONE },
+        plan: null,
       },
       {
         terminalId: 'term-2',
@@ -214,6 +219,7 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
         questions: [],
         tasks: [],
         closed: { questions: NONE, tasks: NONE },
+        plan: null,
       },
     ],
     untracked: 2,
@@ -225,5 +231,26 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
   assert.deepEqual(out, { ok: true, label: { text: 'Sending…', tone: 'muted', copy: null } })
   assert.deepEqual(t.host.callsOf('terminal.sendText'), [{ terminalId: 'term-1', text: 'Re "Ship the parser today?": Yes', enter: true }])
   assert.ok(t.worker.posts.some(p => p.event === 'inbox.changed'))
+  await t.worker.deactivate()
+})
+
+test('inbox.view gives each section its plan, read again at a done; a changed plan tells the panel', async () => {
+  const state: State = { version: 1, terminals: { 'term-1': { sessionId: S, workspaceId: WS.id } }, sessions: { [S]: emptySession(100 * DAY) } }
+  const agents = [{ terminalId: 'term-1', title: 'Fixer', agent: 'claude', state: 'done', stateStartedAt: 1 }]
+  const t = await setup({ state, agents, files: { [PLAN_FILE]: '## Parser\n- [x] Read the spec\n- [~] Write the tests\n' } })
+  const view = await t.worker.request('inbox.view', undefined)
+  assert.deepEqual(view.sections[0].plan, {
+    tasks: [{ title: 'Parser', steps: [{ text: 'Read the spec', mark: 'done' }, { text: 'Write the tests', mark: 'current' }], isOpen: true }],
+    done: 1,
+    total: 2,
+    current: [{ text: 'Write the tests', mark: 'current' }],
+  })
+  const posts = t.worker.posts.length
+  t.files.set(PLAN_FILE, '## Parser\n- [x] Read the spec\n- [x] Write the tests\n')
+  await t.worker.emit('agent.status.changed', status('done'))
+  await t.time.run()
+  assert.ok(t.worker.posts.slice(posts).some(p => p.event === 'inbox.changed'))
+  const again = await t.worker.request('inbox.view', undefined)
+  assert.equal(again.sections[0].plan?.done, 2)
   await t.worker.deactivate()
 })
