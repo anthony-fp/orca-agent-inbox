@@ -254,7 +254,12 @@ export function createTracker(deps: TrackerDeps) {
     /** A launch discards the old Codex binding but keeps the pane's launch time. */
     async clearPane(terminalId: string, launchedAt = clock.now(), paneKey?: string): Promise<void> {
       const key = state.terminals[terminalId]?.paneKey ?? paneKey
-      if (!key) return
+      // Every new launch ends the terminal's old binding, so no press reaches the new process through it.
+      if (!key) {
+        if (!state.terminals[terminalId]) return
+        state = { ...state, terminals: Object.fromEntries(Object.entries(state.terminals).filter(([id]) => id !== terminalId)) }
+        return save()
+      }
       state = {
         ...state,
         terminals: Object.fromEntries(Object.entries(state.terminals).filter(([id]) => id !== terminalId)),
@@ -353,7 +358,8 @@ export function createTracker(deps: TrackerDeps) {
       )
       const terminals = Object.fromEntries(Object.entries(state.terminals).filter(([, t]) => sessions[t.sessionId]))
       const panes = Object.fromEntries(Object.entries(state.panes).filter(([, p]) => sessions[p.threadId]))
-      const moved = Object.fromEntries(Object.entries(state.moved ?? {}).filter(([id, target]) => sessions[id] && sessions[target]))
+      // An alias outlives its launch session: tool calls still carry the launch id while the target is in use.
+      const moved = Object.fromEntries(Object.entries(state.moved ?? {}).filter(([, target]) => sessions[target]))
       const same = Object.keys(sessions).length === Object.keys(state.sessions).length && Object.keys(terminals).length === Object.keys(state.terminals).length && Object.keys(panes).length === Object.keys(state.panes).length
       if (same) return
       state = { ...state, terminals, sessions, panes, moved }

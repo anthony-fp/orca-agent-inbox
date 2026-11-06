@@ -531,6 +531,29 @@ test('start prunes a session with no open rows untouched for 7 days, and its ter
   await again.worker.deactivate()
 })
 
+test('prune keeps an alias while its target lives, so launch-id tools still reach the switched session', async () => {
+  const now = 100 * DAY
+  const current = 'cccccccc-1111-4222-8333-444444444444'
+  const state: State = {
+    version: 3, terminals: { 'term-1': { sessionId: current } }, panes: {}, paneLaunches: {},
+    sessions: { [S]: emptySession(now - PRUNE_MS - 1), [current]: emptySession(now - DAY) },
+    moved: { [S]: current },
+  }
+  const t = await setup({ state })
+  assert.equal(t.saved().sessions[S], undefined)
+  assert.equal(t.saved().moved?.[S], current)
+  await t.worker.deactivate()
+})
+
+test('a new launch in a terminal ends its old Claude binding, so a press cannot reach the new process', async () => {
+  const state: State = { version: 3, terminals: { 'term-1': { sessionId: S } }, panes: {}, paneLaunches: {}, sessions: { [S]: emptySession(100 * DAY) } }
+  const t = await setup({ state })
+  await t.worker.hooks.fire('agent.launch.before', launch('claude --continue'))
+  await t.time.run()
+  assert.equal(t.saved().terminals['term-1'], undefined)
+  await t.worker.deactivate()
+})
+
 test('inbox.view: one section per tracked agent, newest first, with the untracked and unread counts; inbox.press sends', async () => {
   const state: State = {
     version: 1,

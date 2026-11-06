@@ -50,3 +50,8 @@
 - [fixed] Pane launch times survive state upgrade; old rollouts cannot rebind after relaunch, and binds run in pane order with a post-await check (`src/state.ts:90`, `src/turns.ts:262`, `src/worker.ts:330`, `src/worker.ts:358`, `src/worker.ts:382`, `src/worker.test.ts:186`, `src/worker.test.ts:221`, `src/worker.test.ts:242`, `src/turns.test.ts:372`).
 - [fixed] An interrupted Codex turn reaches the model with an empty reply before the next complete turn (`src/turns.ts:231`, `src/turns.test.ts:452`).
 - Converged: the reviewer said another broad round is not worth more than these targeted fixes and the live check (T21), and that no external interface changes. These three are fixed with tests and then checked live in T21; no round 4.
+
+## Release round 1 (v0.1.1..8e29174, v0.2.1) — 2026-11-06
+- [fixed] Prune dropped a launch session's alias after 7 days while its switched-to session was live, so tool calls with the launch id failed → alias kept while its target lives, src/turns.ts prune; test "prune keeps an alias…"
+- [fixed] A new launch in a terminal kept the old Claude binding (clearPane returned early with no pane key), so a press could reach the new process → clearPane drops the terminal binding on every launch, src/turns.ts clearPane; test "a new launch … ends its old Claude binding"
+- Reviewer: Codex flags, main-thread binding, queued-turn survival, old state loading and held labels are sound.
