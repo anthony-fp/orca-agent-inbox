@@ -30,3 +30,10 @@
 - Verified real: the `--settings` prompt hook and the no-id `record` answer.
 - [fixed] Tool calls could carry the previous turn, because the ledger's turn moves only at a model commit → the prompt hook sends `prompt-start` first; the worker raises the active turn and saves it before it answers. Step 4.
 - Converged: the only finding was an interface detail, now specified with its tests. Codex said the rest can be settled during implementation.
+
+## Code round 1 (Codex support, 9ee221b..d6d2811) — 2026-11-05
+- Verified sound: launch quoting and stable hook command, 120 s timeout keeps the turn, notify sends ids only.
+- [open] A repeated old notify blocks every later turn: the guard checks only `lastTurnId` and `queue` (`src/turns.ts:362-370`) → stored-state change. Fix: drop the notify/done pairing state (`codexNotified`, `codexDones`, `codexLastDone`). Either signal only starts a read; the rollout's `task_complete` (`src/core/codex-transcript.ts:461`) decides that a turn is complete, and `readCodexTurn` from the saved offset is the only source of turns.
+- [open] A late notify rebinds a `/new` pane to its old thread (`src/worker.ts:296-319`) → stored-state change. Fix: a notify, prompt or tool call for another thread rebinds the pane only when that thread's rollout started after the bound one (its `session_meta` timestamp).
+- [open] A press can reach a new Codex chat after `/new` (`src/presses.ts:199-205`) → small edit. Fix: Codex presses send only once the prompt hook has run in that pane; before that, the row offers Copy. The prompt hook blocks (exit 2, reason on stderr) a prompt that the worker matches to a press sent for another thread.
+- [open] `bin/codex-home.mjs` (lsof of the parent) → small edit. Fix: add `CODEX_HOME` to `mcp_servers.orca-inbox.env_vars` and delete the lookup, if Orca's Codex process has `CODEX_HOME` set; else keep it.
