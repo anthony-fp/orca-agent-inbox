@@ -288,7 +288,7 @@ describe('tagLaunch: Codex', () => {
     assert.deepEqual(JSON.parse(values.get('notify')!), ['node', '/plugins/agent inbox/bin/codex-notify.mjs', TOOLS.socketPath])
     assert.equal(JSON.parse(values.get('mcp_servers.orca-inbox.command')!), 'node')
     assert.deepEqual(JSON.parse(values.get('mcp_servers.orca-inbox.args')!), [TOOLS.mcpServer, '--socket', TOOLS.socketPath])
-    assert.deepEqual(JSON.parse(values.get('mcp_servers.orca-inbox.env_vars')!), ['ORCA_PANE_KEY'])
+    assert.deepEqual(JSON.parse(values.get('mcp_servers.orca-inbox.env_vars')!), ['ORCA_PANE_KEY', 'CODEX_HOME'])
     assert.equal(JSON.parse(values.get('mcp_servers.orca-inbox.default_tools_approval_mode')!), 'approve')
     assert.equal(JSON.parse(values.get('developer_instructions')!), guidanceText(ORCA_CODEX))
     const hook = /^\[\{hooks=\[\{type="command",command=("(?:[^"\\]|\\.)*")\}\]\}\]$/.exec(values.get('hooks.UserPromptSubmit') ?? '')

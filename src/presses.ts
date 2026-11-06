@@ -202,6 +202,9 @@ export function sendCheck(state: State, status: TerminalStatus | undefined, p: P
   if (status !== 'done') return `the agent is ${status ?? 'not known'}`
   const s = state.sessions[p.sessionId]
   if (!s || drawnToken(s) !== p.drawn) return 'a turn ended since the row was drawn'
+  const paneKey = state.terminals[p.terminalId]?.paneKey
+  if (s.agent === 'codex' && (state.version !== 2 || !paneKey || state.panes[paneKey]?.threadId !== p.sessionId || !state.panes[paneKey]?.promptHookSeen))
+    return 'Trust the Agent Inbox hook in Codex to send answers'
   return null
 }
 
@@ -273,6 +276,7 @@ export function createPresses(deps: PressDeps) {
       const sent = sendOf(s.ledger, p)
       if (!sent) return { ok: false, refused: 'invalid' }
       const label: PressLabel = { state: 'sending', ...sent, at: clock.now() }
+      if (s.agent === 'codex') label.paneKey = state.terminals[p.terminalId]?.paneKey
       const status = deps.status(p.terminalId)
       const why = sendCheck(state, status, p)
       if (why) {

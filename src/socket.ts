@@ -51,7 +51,7 @@ export type AnswerDeps = {
   /** The plan note for a session (planNote), read from its plan file now; null when its folder is not known. */
   planNote(sessionId: string): Promise<string | null>
   /** Maps the prompt hook's terminal to a session that has none yet. */
-  bind?(terminalId: string, sessionId: string): Promise<void>
+  bind?(terminalId: string, sessionId: string, paneKey?: string): Promise<void>
   /** Saves a main Codex pane before its prompt or tool call receives an answer. */
   bindCodex?(paneKey: string, threadId: string, codexHome: string, source: 'prompt' | 'tool' | 'notify', turnId?: string): Promise<void>
   /** The notify id is saved after main-thread verification, before the socket replies. */
@@ -115,7 +115,7 @@ export function createAnswerer(deps: AnswerDeps): (request: unknown) => Promise<
 
     if (request.type === 'prompt-start') {
       // A launch Orca gave no terminal id is bound to the terminal its prompt hook runs in.
-      if (typeof request.terminalId === 'string' && HANDLE.test(request.terminalId)) await deps.bind?.(request.terminalId, sessionId)
+      if (typeof request.terminalId === 'string' && HANDLE.test(request.terminalId)) await deps.bind?.(request.terminalId, sessionId, paneKey || undefined)
       // Raised and saved before the answer, so the agent's first call in this turn carries the new turn.
       const started = await apply(sessionId, s => ({ session: { ...withCwd(s), activeTurn: activeTurn(s) + 1 }, out: true }))
       return started === null ? { error: 'unknown session' } : { text: '' }
@@ -138,6 +138,9 @@ export function createAnswerer(deps: AnswerDeps): (request: unknown) => Promise<
     if (cwd && !s0.cwd) await deps.edit(sessionId, withCwd)
     const plan = await deps.planNote(sessionId)
     const prompt = typeof request.prompt === 'string' ? request.prompt : ''
+    if (paneKey && prompt !== '' && Object.entries(deps.state().sessions).some(([id, s]) =>
+      id !== sessionId && s.agent === 'codex' && Object.values(s.presses).some(l => l.paneKey === paneKey && (l.state === 'sending' || l.state === 'undelivered') && l.text === prompt)))
+      return { error: 'press sent for a different Codex thread' }
     const notes = await apply(sessionId, s => {
       // A prompt the panel typed for a press is no answer to number: the skill passes isPress for its own sends.
       const isPress = prompt !== '' && Object.values(s.presses).some(l => l.state === 'sending' && l.text === prompt)

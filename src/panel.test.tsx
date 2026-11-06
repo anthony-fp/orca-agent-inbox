@@ -439,10 +439,12 @@ test('a tracked Codex agent uses the same rows and buttons as Claude', async () 
 })
 
 test('an untrusted tracked Codex launch shows the hook instruction in its section', async () => {
-  const section = { ...ONE_AGENT.sections[0], title: 'Codex', agent: 'codex' as const, trustHook: true, questions: [], tasks: [] }
+  const section = { ...ONE_AGENT.sections[0], title: 'Codex', agent: 'codex' as const, trustHook: true }
   const view = await open({ sections: [section], others: [], untracked: 0, unread: 0 })
-  assert.ok(view.find({ text: 'Trust the Agent Inbox hook in Codex' }))
+  assert.ok(view.find({ text: 'Trust the Agent Inbox hook in Codex to send answers' }))
   assert.deepEqual(texts(view, 'Heading'), ['Codex'])
+  assert.ok(view.find({ type: 'Button', text: 'Copy Yes' }))
+  assert.ok(view.find({ type: 'Button', text: 'Copy No' }))
   await clean(view)
 })
 

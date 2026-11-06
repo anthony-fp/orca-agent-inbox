@@ -124,7 +124,7 @@ function codexFlags(t: LaunchTools): string {
     `notify=${JSON.stringify(['node', notify, t.socketPath])}`,
     `mcp_servers.orca-inbox.command=${JSON.stringify('node')}`,
     `mcp_servers.orca-inbox.args=${JSON.stringify([t.mcpServer, '--socket', t.socketPath])}`,
-    `mcp_servers.orca-inbox.env_vars=${JSON.stringify(['ORCA_PANE_KEY'])}`,
+    `mcp_servers.orca-inbox.env_vars=${JSON.stringify(['ORCA_PANE_KEY', 'CODEX_HOME'])}`,
     `mcp_servers.orca-inbox.default_tools_approval_mode=${JSON.stringify('approve')}`,
     `developer_instructions=${JSON.stringify(guidanceText(ORCA_CODEX))}`,
     `hooks.UserPromptSubmit=[{hooks=[{type="command",command=${JSON.stringify(hook)}}]}]`,

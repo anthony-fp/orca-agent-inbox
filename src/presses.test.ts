@@ -31,7 +31,7 @@ const okModel = (calls: string[]) => async (p: string): Promise<ModelResult> => 
   return { ok: true, update, text: '', ms: 1 }
 }
 
-async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?: Help[]; findings?: Finding[]; codex?: boolean } = {}) {
+async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?: Help[]; findings?: Finding[]; codex?: boolean; hookSeen?: boolean } = {}) {
   const time = fakeClock(1000)
   const saved = new Map<string, unknown>()
   const storage = { get: async (k: string) => saved.get(k) ?? null, set: async (k: string, v: unknown) => void saved.set(k, structuredClone(v)) }
@@ -46,7 +46,7 @@ async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?:
     return Buffer.from(file.text)
   }
   const tracker = createTracker({ storage, clock: time.clock, read, model: okModel(modelCalls) })
-  await tracker.track(T, S, opts.codex ? { pane: { key: 'pane-1', codexHome: '/codex', promptHookSeen: true } } : {})
+  await tracker.track(T, S, opts.codex ? { pane: { key: 'pane-1', codexHome: '/codex', promptHookSeen: opts.hookSeen !== false } } : {})
   const update = parseReply(opts.kind === 'do' ? `NEW: do | - | ${TASK} | - | -` : `NEW: decide | 1 | ${ASK} | Yes / No | yes`)
   assert.ok(update)
   const ledger = applyUpdate(EMPTY, update, 0, 1)
@@ -78,6 +78,20 @@ async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?:
 }
 
 describe('presses', () => {
+  test('Codex answers stay copyable until a prompt hook has run in that pane', async () => {
+    const t = await setup({ codex: true })
+    await t.tracker.track('terminal-2', S, { pane: { key: 'pane-2', codexHome: '/codex', promptHookSeen: false } })
+    t.status.set('terminal-2', 'done')
+    assert.equal(upgradeState(t.saved.get('state')).terminals['terminal-2'].paneKey, 'pane-2')
+    const held = await t.presses.press(t.input({ terminalId: 'terminal-2' }))
+    assert.deepEqual(held, { ok: true, label: { text: 'Waits for the agent', tone: 'muted', copy: `Re "${ASK}": Yes` } })
+    assert.equal(t.s().presses[t.item.id].paneKey, 'pane-2')
+    assert.deepEqual(t.sent, [])
+    await t.tracker.track('terminal-2', S, { pane: { key: 'pane-2', codexHome: '/codex', promptHookSeen: true } })
+    const sent = await t.presses.press(t.input({ terminalId: 'terminal-2' }))
+    assert.equal(sent.ok && sent.label?.text, 'Sending…')
+    assert.equal(t.sent.length, 1)
+  })
   test('a Codex option confirms from the rollout next prompt and keeps its turn id', async () => {
     const t = await setup({ codex: true })
     const out = await t.presses.press(t.input())

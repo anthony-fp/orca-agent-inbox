@@ -6,7 +6,6 @@
 //
 // Args: --socket <path> --session <id> [--timeout <ms>]
 import { ask, readArgs } from './ask.mjs'
-import { homeFromRollout } from './codex-home.mjs'
 
 const { socket, session, timeout } = readArgs(process.argv.slice(2))
 const deadline = Date.now() + timeout
@@ -42,7 +41,7 @@ async function main() {
   const id = codex ? input.session_id : session
   const identity = codex ? {
     paneKey: process.env.ORCA_PANE_KEY,
-    codexHome: process.env.CODEX_HOME || homeFromRollout(input.transcript_path, id),
+    codexHome: process.env.CODEX_HOME || '',
     codexTurnId: typeof input.turn_id === 'string' ? input.turn_id : '',
   } : {}
   // The session's folder, for its plan file: the worker has no transcript to read it from at the first prompt.
@@ -55,6 +54,11 @@ async function main() {
   if (typeof started?.text !== 'string') return
   const prompt = typeof input.prompt === 'string' ? input.prompt : ''
   const answer = await ask(socket, { type: 'inbox-text', sessionId: id, prompt, ...cwd, ...identity }, left())
+  if (codex && answer?.error === 'press sent for a different Codex thread') {
+    process.stderr.write('Agent Inbox: press belongs to another Codex thread\n')
+    process.exitCode = 2
+    return
+  }
   if (typeof answer?.text === 'string' && answer.text !== '') process.stdout.write(`${answer.text}\n`)
 }
 
@@ -62,6 +66,5 @@ async function main() {
 main()
   .catch(() => undefined)
   .finally(() => {
-    process.exitCode = 0
     process.stdin.destroy()
   })

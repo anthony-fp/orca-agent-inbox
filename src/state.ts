@@ -51,10 +51,6 @@ export type SessionState = {
   /** Codex identity stays with the session if /new reuses its pane for another thread. */
   agent: 'claude' | 'codex'
   codexHome: string | null
-  /** Paired completion signals stay durable until their rollout turn enters the queue. */
-  codexNotified: string[]
-  codexDones: number
-  codexLastDone: boolean
 }
 
 /**
@@ -79,11 +75,13 @@ export type PressLabel = {
   from?: number
   /** The uuid of the prompt that delivered the answer: the turn that answers the press. */
   turnId?: string
+  /** Codex pane that received this press, for rejecting it in a later /new thread. */
+  paneKey?: string
 }
 
 type StateBody = {
   /** Each tracked terminal's session. A terminal goes when its session is pruned. */
-  terminals: Record<string, { sessionId: string }>
+  terminals: Record<string, { sessionId: string; paneKey?: string }>
   sessions: Record<string, SessionState>
 }
 
@@ -93,11 +91,11 @@ export type CurrentState = StateBody & {
   version: 2
   panes: Record<string, CodexPane>
   /** Notify-only threads awaiting a rollout check before they may bind a pane. */
-  pendingCodex?: Record<string, { threadId: string; codexHome: string; turnId: string; done: boolean }[]>
+  pendingCodex?: Record<string, { threadId: string; codexHome: string; turnId: string }[]>
 }
 
 export function emptySession(now = 0): SessionState {
-  return { offset: 0, queue: [], ledger: EMPTY, lastTurnId: null, unread: 0, presses: {}, touchedAt: now, activeTurn: 0, told: { inbox: null, closed: [] }, tools: true, transcript: null, cwd: null, agent: 'claude', codexHome: null, codexNotified: [], codexDones: 0, codexLastDone: false }
+  return { offset: 0, queue: [], ledger: EMPTY, lastTurnId: null, unread: 0, presses: {}, touchedAt: now, activeTurn: 0, told: { inbox: null, closed: [] }, tools: true, transcript: null, cwd: null, agent: 'claude', codexHome: null }
 }
 
 export function emptyState(): CurrentState {
@@ -128,6 +126,7 @@ function upgradeLabel(raw: unknown): PressLabel[] {
   }
   if (typeof raw.from === 'number') label.from = raw.from
   if (typeof raw.turnId === 'string') label.turnId = raw.turnId
+  if (typeof raw.paneKey === 'string') label.paneKey = raw.paneKey
   return [label]
 }
 
@@ -152,9 +151,6 @@ function upgradeSession(raw: unknown, now: number): SessionState {
     cwd: typeof raw.cwd === 'string' ? raw.cwd : null,
     agent: raw.agent === 'codex' ? 'codex' : 'claude',
     codexHome: typeof raw.codexHome === 'string' ? raw.codexHome : null,
-    codexNotified: Array.isArray(raw.codexNotified) ? raw.codexNotified.filter((id): id is string => typeof id === 'string') : [],
-    codexDones: Math.max(0, Number(raw.codexDones) || 0),
-    codexLastDone: raw.codexLastDone === true,
   }
 }
 
@@ -176,7 +172,7 @@ export function upgradeState(raw: unknown, now = 0): CurrentState {
   const terminals: State['terminals'] = {}
   for (const [id, t] of Object.entries(isObject(raw.terminals) ? raw.terminals : {})) {
     // A terminal saved with a workspaceId drops it: the launch's workspace id never matched `workspace.list`.
-    if (isObject(t) && typeof t.sessionId === 'string') terminals[id] = { sessionId: t.sessionId }
+    if (isObject(t) && typeof t.sessionId === 'string') terminals[id] = { sessionId: t.sessionId, ...(typeof t.paneKey === 'string' ? { paneKey: t.paneKey } : {}) }
   }
   const sessions: State['sessions'] = {}
   for (const [id, s] of Object.entries(isObject(raw.sessions) ? raw.sessions : {})) sessions[id] = upgradeSession(s, now)
@@ -192,9 +188,9 @@ export function upgradeState(raw: unknown, now = 0): CurrentState {
   const pendingCodex: NonNullable<CurrentState['pendingCodex']> = {}
   for (const [key, entries] of Object.entries(isObject(raw.pendingCodex) ? raw.pendingCodex : {})) {
     if (!Array.isArray(entries)) continue
-    const kept = entries.filter((entry): entry is { threadId: string; codexHome: string; turnId: string; done: boolean } =>
+    const kept = entries.filter((entry): entry is { threadId: string; codexHome: string; turnId: string } =>
       isObject(entry) && typeof entry.threadId === 'string' && typeof entry.codexHome === 'string' && typeof entry.turnId === 'string')
-      .map(entry => ({ ...entry, done: entry.done === true }))
+      .map(entry => ({ threadId: entry.threadId, codexHome: entry.codexHome, turnId: entry.turnId }))
     if (kept.length > 0) pendingCodex[key] = kept
   }
   return Object.keys(pendingCodex).length > 0 ? { version: 2, terminals, sessions, panes, pendingCodex } : { version: 2, terminals, sessions, panes }

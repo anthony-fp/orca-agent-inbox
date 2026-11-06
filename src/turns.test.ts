@@ -368,6 +368,15 @@ describe('upgradeState', () => {
     assert.deepEqual(current.panes, { good: { agent: 'codex', threadId: 'thread-1', codexHome: '/codex', promptHookSeen: true } })
   })
 
+  test('drops saved Codex notify/done pairing fields', () => {
+    const state = upgradeState({ version: 2, terminals: {}, panes: {}, sessions: { s: {
+      agent: 'codex', codexNotified: ['turn-1'], codexDones: 2, codexLastDone: true,
+    } } })
+    assert.equal('codexNotified' in state.sessions.s, false)
+    assert.equal('codexDones' in state.sessions.s, false)
+    assert.equal('codexLastDone' in state.sessions.s, false)
+  })
+
   test('a missing or unreadable value is the empty state', () => {
     assert.deepEqual(upgradeState(null), { version: 2, terminals: {}, sessions: {}, panes: {} })
     assert.deepEqual(upgradeState('x'), { version: 2, terminals: {}, sessions: {}, panes: {} })
@@ -430,15 +439,11 @@ async function codexTrack(t: ReturnType<typeof codexSetup>, home = '/codex') {
 
 describe('Codex turns use the durable queue', () => {
   for (const order of ['notify first', 'done first'] as const) {
-    test(`a rollout turn waits for both signals: ${order}`, async () => {
+    test(`one ${order === 'notify first' ? 'notify' : 'done'} signal reads a complete rollout turn`, async () => {
       const t = codexSetup()
       await codexTrack(t)
       if (order === 'notify first') await t.tracker.codexNotify(S, 'turn-1')
       else await t.tracker.codexStatus(S, true)
-      await t.time.run()
-      assert.equal(t.model.calls.length, 0)
-      if (order === 'notify first') await t.tracker.codexStatus(S, true)
-      else await t.tracker.codexNotify(S, 'turn-1')
       await t.time.run()
       assert.equal(t.model.calls.length, 1)
       assert.equal(t.storage.saved().sessions[S].lastTurnId, 'turn-1')
@@ -446,81 +451,57 @@ describe('Codex turns use the durable queue', () => {
     })
   }
 
-  test('a restart between notify and done keeps the signal', async () => {
+  test('a delayed duplicate notify after two turns cannot block turn three across a restart', async () => {
     const storage = fakeStorage()
-    const first = codexSetup(codexOne(), [], storage)
+    const lines = codexThree().toString('utf8').split('\n').filter(Boolean)
+    const first = codexSetup(Buffer.from(lines.slice(0, 10).join('\n') + '\n'), [], storage)
     await codexTrack(first)
     await first.tracker.codexNotify(S, 'turn-1')
-    assert.deepEqual(storage.saved().sessions[S].codexNotified, ['turn-1'])
-    const resumed = codexSetup(codexOne(), [], storage)
+    await first.time.run()
+    assert.equal(storage.saved().sessions[S].lastTurnId, 'turn-2')
+    const resumed = codexSetup(Buffer.from(lines.join('\n') + '\n'), [], storage)
     await resumed.tracker.start()
-    await resumed.tracker.codexStatus(S, true)
+    await resumed.tracker.codexNotify(S, 'turn-1')
     await resumed.time.run()
     assert.equal(resumed.model.calls.length, 1)
-    assert.equal(storage.saved().sessions[S].lastTurnId, 'turn-1')
+    assert.equal(storage.saved().sessions[S].lastTurnId, 'turn-3')
+    assert.equal(storage.saved().sessions[S].ledger.turn, 3)
   })
 
-  test('duplicate done statuses count once, and an unverified notify survives restart', async () => {
+  test('an unverified notify survives restart without done pairing state', async () => {
     const storage = fakeStorage()
     const first = codexSetup(null, [], storage)
     await codexTrack(first)
-    await first.tracker.codexStatus(S, true)
-    await first.tracker.codexStatus(S, true)
-    assert.equal(storage.saved().sessions[S].codexDones, 1)
-    await first.tracker.stageCodex('pane-other', 'thread-other', '/codex', 'turn-other', true)
+    await first.tracker.stageCodex('pane-other', 'thread-other', '/codex', 'turn-other')
     const restarted = codexSetup(null, [], storage)
     await restarted.tracker.start()
     assert.equal(restarted.tracker.state().pendingCodex?.['pane-other']?.[0].turnId, 'turn-other')
-    assert.equal(restarted.tracker.state().pendingCodex?.['pane-other']?.[0].done, true)
     await restarted.tracker.clearStagedCodex('pane-other', 'thread-other', 'turn-other')
     assert.equal(upgradeState(storage.saved()).pendingCodex, undefined)
   })
 
-  test('a paired signal remains saved while its rollout is missing, then retries', async () => {
+  test('a notify retries when its rollout appears later', async () => {
     const t = codexSetup(null)
     await codexTrack(t)
     await t.tracker.codexNotify(S, 'turn-1')
-    await t.tracker.codexStatus(S, true)
     await t.time.run()
-    assert.deepEqual(t.storage.saved().sessions[S].codexNotified, ['turn-1'])
     t.file.bytes = codexOne()
     t.tracker.retryCodex(S)
     await t.time.run()
     assert.equal(t.storage.saved().sessions[S].lastTurnId, 'turn-1')
   })
 
-  test('a late resume rollout skips older turns when the notified turn appears', async () => {
-    const t = codexSetup(null)
+  test('a turn without task_complete never enters the queue', async () => {
+    const lines = codexOne().toString('utf8').split('\n').filter(Boolean)
+    const t = codexSetup(Buffer.from(lines.slice(0, -1).join('\n') + '\n'))
     await codexTrack(t)
-    await t.tracker.codexNotify(S, 'turn-3')
-    await t.tracker.codexStatus(S, true)
+    await t.tracker.codexNotify(S, 'turn-1')
     await t.time.run()
-    t.file.bytes = codexThree()
+    assert.equal(t.model.calls.length, 0)
+    t.file.bytes = codexOne()
     t.tracker.retryCodex(S)
     await t.time.run()
     assert.equal(t.model.calls.length, 1)
-    assert.match(t.model.calls[0].prompt, /You are welcome/)
-    assert.equal(t.storage.saved().sessions[S].lastTurnId, 'turn-3')
-    assert.equal(t.storage.saved().sessions[S].ledger.turn, 3)
-  })
-
-  test('one paired turn cannot enqueue the next complete rollout turn', async () => {
-    const t = codexSetup(codexThree(), ['hold'])
-    await codexTrack(t)
-    await t.tracker.codexNotify(S, 'turn-1')
-    await t.tracker.codexStatus(S, true)
-    await t.time.run()
-    assert.deepEqual(t.storage.saved().sessions[S].queue.map(q => q.turnId), ['turn-1'])
-    assert.equal(t.model.calls.length, 1)
-    await t.tracker.codexStatus(S, false)
-    await t.tracker.codexNotify(S, 'turn-2')
-    await t.tracker.codexStatus(S, true)
-    await t.time.run()
-    assert.deepEqual(t.storage.saved().sessions[S].queue.map(q => q.turnId), ['turn-1', 'turn-2'])
-    t.model.release()
-    await t.time.run()
-    assert.equal(t.model.calls.length, 2)
-    assert.equal(t.storage.saved().sessions[S].lastTurnId, 'turn-2')
   })
 
   test('four Codex model timeouts keep the same queued turn and do not count as failures', async () => {

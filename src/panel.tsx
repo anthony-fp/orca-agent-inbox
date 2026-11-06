@@ -93,6 +93,10 @@ async function press(s: InboxSection, row: Pressable, what: PressWhat): Promise<
   try {
     const out = await plugin.request('inbox.press', input)
     label = out.ok ? (out.label ?? PENDING[action]) : REFUSED[out.refused]
+    if (s.trustHook && out.ok && out.label?.copy) {
+      const error = await copyText(out.label.copy)
+      label = error ? { text: `Could not copy: ${error}`, tone: 'danger', copy: out.label.copy } : { text: '✓ Copied', tone: 'success', copy: null }
+    }
     if (out.ok && action === 'reply') {
       update(drafts, m => ({ ...m, [key]: '' }))
       update(replying, m => ({ ...m, [key]: false }))
@@ -187,7 +191,7 @@ function StepButtons({ section, row, busy }: { section: InboxSection; row: Label
               : localStep(section, row, step)
           }
         >
-          {step.label}
+          {section.trustHook && step.kind === 'handoff' ? `Copy ${step.label}` : step.label}
         </Button>
       ))}
     </>
@@ -288,7 +292,7 @@ function ReplyField({ section, row, hint, busy }: { section: InboxSection; row: 
       />
       <Row gap="xs" wrap>
         <Button size="sm" variant="outline" disabled={busy || !draft.trim()} onPress={send}>
-          Send
+          {section.trustHook ? 'Copy' : 'Send'}
         </Button>
         <Button size="sm" variant="ghost" disabled={busy} onPress={() => update(replying, m => ({ ...m, [key]: false }))}>
           Cancel
@@ -339,7 +343,7 @@ function Question({ section, row }: { section: InboxSection; row: LabelledRow })
             disabled={busy}
             onPress={() => press(section, row, { action: 'answer', answer: c.option })}
           >
-            {c.isRec ? `${c.label} (recommended)` : c.label}
+            {section.trustHook ? `Copy ${c.label}` : c.isRec ? `${c.label} (recommended)` : c.label}
           </Button>
         ))}
         {folded > 0 && (
@@ -448,10 +452,10 @@ function Finding({ section, row }: { section: InboxSection; row: LabelledFinding
       )}
       <Row gap="xs" wrap>
         <Button size="sm" variant="solid" disabled={busy} onPress={() => press(section, row, { action: 'fix' })}>
-          {row.fix}
+          {section.trustHook ? `Copy ${row.fix}` : row.fix}
         </Button>
         <Button size="sm" variant="outline" disabled={busy} onPress={() => press(section, row, { action: 'issue' })}>
-          File issue
+          {section.trustHook ? 'Copy issue request' : 'File issue'}
         </Button>
         <Button size="sm" variant="outline" disabled={busy} onPress={() => update(replying, m => ({ ...m, [key]: true }))}>
           Reply
@@ -567,7 +571,7 @@ function Section({ section }: { section: InboxSection }) {
   return (
     <Stack gap="sm">
       <Heading level={3}>{section.title}</Heading>
-      {section.trustHook && <Text muted size="sm">Trust the Agent Inbox hook in Codex</Text>}
+      {section.trustHook && <Text muted size="sm">Trust the Agent Inbox hook in Codex to send answers</Text>}
       {!section.tools && (
         <Text muted size="sm">
           No tools: this launch set its own MCP, system prompt or settings flags, so Claude cannot record items itself.

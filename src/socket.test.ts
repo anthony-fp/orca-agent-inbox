@@ -12,8 +12,6 @@ import { fileURLToPath } from 'node:url'
 // @ts-expect-error: a plain Node script with no types
 import { ask } from '../bin/ask.mjs'
 // @ts-expect-error: a plain Node script with no types
-import { homeFromParent, homeFromRollout } from '../bin/codex-home.mjs'
-// @ts-expect-error: a plain Node script with no types
 import { main as runCodexNotify, notifyCommand, notifyRequest } from '../bin/codex-notify.mjs'
 import { parseReply } from './core/ledger'
 import { ORCA, inboxText } from './core/model-text'
@@ -132,33 +130,34 @@ test('a first-turn Codex record binds and saves the main thread before answering
   const answer = createAnswerer({
     state: () => tracker.state(), edit: (id, change) => tracker.edit(id, change), now: time.now,
     planNote: async () => null,
-    bindCodex: async (paneKey, threadId, codexHome) => {
-      await tracker.track(null, threadId, { pane: { key: paneKey, codexHome, promptHookSeen: false } })
+    bindCodex: async (paneKey, threadId, codexHome, source) => {
+      await tracker.track(null, threadId, { pane: { key: paneKey, codexHome, promptHookSeen: source === 'prompt' } })
       await tracker.edit(threadId, s => ({ ...s, activeTurn: 1 }))
     },
+    bind: async (terminalId, threadId, paneKey) => { await tracker.bind(terminalId, threadId, paneKey) },
   })
   const result = await answer({ type: 'record', sessionId: 'thread-1', paneKey: 'pane-1', codexHome: '/codex', args: FINDING })
   assert.match(text(result), /^Recorded\./)
   assert.equal(tracker.state().panes['pane-1'].threadId, 'thread-1')
   assert.equal(storage.saved().sessions['thread-1'].ledger.findings[0].title, FINDING.title)
   assert.equal(storage.saved().sessions['thread-1'].activeTurn, 1)
+  const terminalId = 'term_11111111-1111-4111-8111-111111111111'
+  assert.deepEqual(await answer({ type: 'prompt-start', paneKey: 'pane-1', codexHome: '/codex', sessionId: 'thread-1', terminalId }), { text: '' })
+  assert.deepEqual(tracker.state().terminals[terminalId], { sessionId: 'thread-1', paneKey: 'pane-1' })
 })
 
-test('Codex prompt and notify use one pane binding, and a later thread replaces it', async () => {
+test('a prompt matching a press sent to another thread in the same pane is blocked', async () => {
   const storage = memoryStorage()
-  const time = fakeClock(1000)
-  const tracker = createTracker({ storage, clock: time.clock, read: async () => null, model: async () => ({ ok: false, reason: 'failed', detail: '', ms: 0 }) })
+  const tracker = createTracker({ storage, clock: fakeClock().clock, read: async () => null, model: async () => ({ ok: false, reason: 'failed', detail: '', ms: 0 }) })
   await tracker.start()
-  const answer = createAnswerer({
-    state: () => tracker.state(), edit: (id, change) => tracker.edit(id, change), now: time.now,
-    planNote: async () => null,
-    bindCodex: async (paneKey, threadId, codexHome, source) => tracker.track(null, threadId, { pane: { key: paneKey, codexHome, promptHookSeen: source === 'prompt' } }),
-  })
-  await answer({ type: 'prompt-start', sessionId: 'thread-1', paneKey: 'pane-1', codexHome: '/codex' })
-  assert.equal(tracker.state().panes['pane-1'].promptHookSeen, true)
-  await answer({ type: 'codex-turn', payload: { paneKey: 'pane-1', codexHome: '/codex', threadId: 'thread-2', turnId: 'turn-2', type: 'agent-turn-complete' } })
-  assert.equal(tracker.state().panes['pane-1'].threadId, 'thread-2')
-  assert.equal(tracker.state().panes['pane-1'].promptHookSeen, true)
+  await tracker.track(null, 'thread-old', { pane: { key: 'pane-1', codexHome: '/codex', promptHookSeen: true } })
+  await tracker.edit('thread-old', s => ({ ...s, presses: { i1: { state: 'sending', kind: 'answer', answer: 'Yes', text: 'Re "Ship?": Yes', at: 1, paneKey: 'pane-1' } } }))
+  await tracker.track(null, 'thread-new', { pane: { key: 'pane-1', codexHome: '/codex', promptHookSeen: true } })
+  const answer = createAnswerer({ state: () => tracker.state(), edit: (id, change) => tracker.edit(id, change), now: () => 1, planNote: async () => null })
+  assert.deepEqual(await answer({ type: 'inbox-text', sessionId: 'thread-new', paneKey: 'pane-1', prompt: 'Re "Ship?": Yes' }), { error: 'press sent for a different Codex thread' })
+  await tracker.edit('thread-old', s => ({ ...s, presses: { i1: { ...s.presses.i1, state: 'undelivered' } } }))
+  assert.deepEqual(await answer({ type: 'inbox-text', sessionId: 'thread-new', paneKey: 'pane-1', prompt: 'Re "Ship?": Yes' }), { error: 'press sent for a different Codex thread' })
+  assert.ok('text' in await answer({ type: 'inbox-text', sessionId: 'thread-new', paneKey: 'pane-1', prompt: 'A new request' }))
 })
 
 test('notify reduction excludes a reply over one MiB and reads the top-level user command', () => {
@@ -169,16 +168,6 @@ test('notify reduction excludes a reply over one MiB and reads the top-level use
   assert.deepEqual(notifyCommand("notify = ['echo', 'hello']\n"), ['echo', 'hello'])
   assert.equal(notifyCommand('[features]\nnotify = ["wrong"]\n'), null)
   assert.equal(notifyRequest({ 'thread-id': 'thread-1' }, { ORCA_PANE_KEY: 'pane-1' }), null, 'no account home is guessed')
-})
-
-test('a missing CODEX_HOME uses only a matching open rollout, never another account', () => {
-  const path = '/accounts/one/sessions/2026/11/05/rollout-2026-11-05-thread-1.jsonl'
-  assert.equal(homeFromRollout(path, 'thread-1'), '/accounts/one')
-  assert.equal(homeFromRollout(path, 'thread-2'), '')
-  assert.equal(homeFromRollout('/accounts/two/sessions/latest/thread-1.jsonl', 'thread-1'), '')
-  const run = () => ({ status: 0, stdout: `p123\nn${path}\nn/accounts/two/sessions/2026/11/05/rollout-2026-11-05-thread-2.jsonl\n` })
-  assert.equal(homeFromParent('thread-1', run), '/accounts/one')
-  assert.equal(homeFromParent('thread-3', run), '')
 })
 
 test('a personal notify still runs when worker reporting has no pane key', async () => {
@@ -433,11 +422,13 @@ function run(script: string, args: string[], input: string, opts: { keepOpen?: b
   const { ORCA_TERMINAL_HANDLE: _, ...env } = process.env
   const child = spawn(process.execPath, [join(BIN, script), ...args], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...env, ...(opts.handle ? { ORCA_TERMINAL_HANDLE: opts.handle } : {}), ...opts.env } })
   let out = ''
+  let err = ''
   child.stdout.setEncoding('utf8').on('data', (d: string) => (out += d))
+  child.stderr.setEncoding('utf8').on('data', (d: string) => (err += d))
   child.stdin.write(input)
   if (!opts.keepOpen) child.stdin.end()
   const exited = new Promise<{ code: number | null; out: string }>(r => child.on('exit', code => r({ code, out })))
-  return { child, exited, out: () => out }
+  return { child, exited, out: () => out, err: () => err }
 }
 
 /** Sends JSON-RPC lines to the MCP server and reads answers until `count` came back. */
@@ -527,10 +518,23 @@ describe('bin/mcp-server.mjs', () => {
 describe('bin/prompt-hook.mjs', () => {
   const hookInput = (over: Record<string, unknown> = {}) => JSON.stringify({ session_id: S, hook_event_name: 'UserPromptSubmit', prompt: 'carry on', cwd: '/work/app', ...over })
 
+  test('Codex exits 2 when the worker identifies a press for another thread', async () => {
+    const sock = await fakeSocket(req => req.type === 'prompt-start' ? { text: '' } : { error: 'press sent for a different Codex thread' })
+    try {
+      const runHook = run('prompt-hook.mjs', ['--socket', sock.path], hookInput(), { env: { ORCA_PANE_KEY: 'pane-1', CODEX_HOME: '/codex' } })
+      const result = await runHook.exited
+      assert.equal(result.code, 2)
+      assert.equal(result.out, '')
+      assert.match(runHook.err(), /press belongs to another Codex thread/)
+    } finally {
+      await sock.close()
+    }
+  })
+
   test('Codex stdin binds the pane before printing text, while agent_id is ignored', async () => {
     const sock = await fakeSocket(req => (req.type === 'prompt-start' ? { text: '' } : { text: 'Open inbox items' }))
     try {
-      const env = { ORCA_PANE_KEY: 'pane-1', CODEX_HOME: '' }
+      const env = { ORCA_PANE_KEY: 'pane-1', CODEX_HOME: '/codex' }
       const transcript_path = `/codex/sessions/2026/11/05/rollout-2026-11-05-${S}.jsonl`
       const input = hookInput({ transcript_path })
       const { code, out } = await run('prompt-hook.mjs', ['--socket', sock.path], input, { env }).exited

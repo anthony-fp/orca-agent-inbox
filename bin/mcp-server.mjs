@@ -10,7 +10,6 @@ import { readFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 
 import { ask, readArgs } from './ask.mjs'
-import { homeFromParent } from './codex-home.mjs'
 
 const { socket, session, timeout } = readArgs(process.argv.slice(2))
 const tools = JSON.parse(readFileSync(new URL('./tools.json', import.meta.url), 'utf8'))
@@ -45,7 +44,7 @@ async function result(method, params) {
       const paneKey = !session ? process.env.ORCA_PANE_KEY : undefined
       const threadId = !session && turn?.thread_source === 'user' && typeof meta?.threadId === 'string' ? meta.threadId : undefined
       const identity = paneKey ? {
-        paneKey, codexHome: process.env.CODEX_HOME || homeFromParent(threadId),
+        paneKey, codexHome: process.env.CODEX_HOME || '',
         codexTurnId: typeof turn?.turn_id === 'string' ? turn.turn_id : '',
         ...(threadId ? { sessionId: threadId } : {}),
       } : { sessionId: session }

@@ -11,7 +11,7 @@
 //      and counted in `unread`.
 // The whole state is one storage value, so step 3 is one write and a crash leaves it all or nothing.
 import { EMPTY, applyExchangeUpdate, closeItem } from './core/ledger'
-import { codexResumeStart, type CodexTurnRead } from './core/codex-transcript'
+import { type CodexTurnRead } from './core/codex-transcript'
 import { ORCA, buildPrompt, screenText } from './core/model-text'
 import { nowRows } from './core/now'
 import type { Exchange, Ledger, Press } from './core/types'
@@ -200,12 +200,7 @@ export function createTracker(deps: TrackerDeps) {
       nextOffset: read.nextOffset,
       failures: 0,
     }
-    update(sessionId, cur => ({
-      ...cur,
-      queue: [...cur.queue, turn],
-      ...(cur.agent === 'codex' && cur.codexDones > 0 && cur.codexNotified[0] === read.turnId
-        ? { codexDones: cur.codexDones - 1, codexNotified: cur.codexNotified.slice(1) } : {}),
-    }))
+    update(sessionId, cur => ({ ...cur, queue: [...cur.queue, turn] }))
     await save()
     background(drain(sessionId, false))
     return true
@@ -230,20 +225,16 @@ export function createTracker(deps: TrackerDeps) {
           size = bytes.length
           grewAt = clock.now()
         }
-        if (bytes && s.agent === 'codex' && s.offset === 0 && s.lastTurnId === null && s.queue.length === 0 && s.codexNotified.length > 0) {
-          const start = codexResumeStart(bytes, s.codexNotified[0])
-          if (start.offset > 0 || start.turn > 0) {
-            update(sessionId, cur => ({ ...cur, offset: start.offset, ledger: { ...cur.ledger, turn: Math.max(cur.ledger.turn, start.turn) }, activeTurn: Math.max(cur.activeTurn, start.turn + 1) }))
-            await save()
-            continue
-          }
-        }
         const read = bytes
           ? s.agent === 'codex' ? await deps.codexTurn?.(sessionId, readFrom(s)) ?? null : readTurn(bytes, readFrom(s), promptsBefore(s))
           : null
-        if (s.agent === 'codex' && read && (s.codexDones === 0 || s.codexNotified[0] !== read.turnId)) return
+        if (s.agent === 'codex' && read?.status === 'incomplete') {
+          update(sessionId, cur => ({ ...cur, offset: read.nextOffset }))
+          await save()
+          continue
+        }
         // An incomplete turn is final: a later prompt follows it. A complete one may still grow.
-        const isDone = read?.status === 'incomplete' || (read?.status === 'complete' && clock.now() - grewAt >= QUIET_MS)
+        const isDone = s.agent === 'codex' ? read?.status === 'complete' : read?.status === 'incomplete' || (read?.status === 'complete' && clock.now() - grewAt >= QUIET_MS)
         if (read && isDone && (await enqueue(sessionId, read))) continue
         if (clock.now() >= (deadlines.get(sessionId) as number)) return
         await clock.sleep(POLL_MS)
@@ -253,17 +244,15 @@ export function createTracker(deps: TrackerDeps) {
     }
   }
 
-  async function codexStatus(sessionId: string, done: boolean): Promise<void> {
+  function codexStatus(sessionId: string, done: boolean): void {
+    if (done) retryCodex(sessionId)
+  }
+
+  function retryCodex(sessionId: string): void {
     const s = state.sessions[sessionId]
-    if (!s || s.agent !== 'codex') return
-    if (s.codexLastDone === done) {
-      if (done && s.codexDones > 0 && s.codexNotified.length > 0) background(poll(sessionId))
-      return
-    }
-    update(sessionId, cur => ({ ...cur, codexLastDone: done, codexDones: cur.codexDones + (done ? 1 : 0) }))
-    await save()
-    if (done && s.queue[0]?.failures) background(drain(sessionId, true))
-    if (done && s.codexNotified.length > 0) background(poll(sessionId))
+    if (s?.agent !== 'codex') return
+    if (s.queue.length > 0) background(drain(sessionId, true))
+    background(poll(sessionId))
   }
 
   return {
@@ -273,7 +262,7 @@ export function createTracker(deps: TrackerDeps) {
       for (const [id, s] of Object.entries(state.sessions)) if (s.queue.length > 0) background(drain(id, true))
       for (const { sessionId } of Object.values(state.terminals)) if (!isCodex(sessionId)) background(poll(sessionId))
       for (const [sessionId, s] of Object.entries(state.sessions))
-        if (s.agent === 'codex' && s.codexDones > 0 && s.codexNotified.length > 0) background(poll(sessionId))
+        if (s.agent === 'codex' && s.transcript) background(poll(sessionId))
     },
 
     /**
@@ -293,12 +282,12 @@ export function createTracker(deps: TrackerDeps) {
       const known = state.sessions[sessionId]
       state = {
         ...state,
-        terminals: terminalId === null ? terminals : { ...terminals, [terminalId]: { sessionId } },
+        terminals: terminalId === null ? terminals : { ...terminals, [terminalId]: { sessionId, ...(opts.pane ? { paneKey: opts.pane.key } : {}) } },
         panes: opts.pane ? {
           ...state.panes,
           [opts.pane.key]: {
             agent: 'codex', threadId: sessionId, codexHome: opts.pane.codexHome,
-            promptHookSeen: opts.pane.promptHookSeen || state.panes[opts.pane.key]?.promptHookSeen === true,
+            promptHookSeen: opts.pane.promptHookSeen || (state.panes[opts.pane.key]?.threadId === sessionId && state.panes[opts.pane.key]?.promptHookSeen === true),
           },
         } : state.panes,
         sessions: {
@@ -317,9 +306,10 @@ export function createTracker(deps: TrackerDeps) {
      * Maps a terminal to a known session that has no terminal yet: the prompt hook's terminal, for a launch Orca gave
      * no terminal id. False when nothing changed.
      */
-    async bind(terminalId: string, sessionId: string): Promise<boolean> {
-      if (!state.sessions[sessionId] || Object.values(state.terminals).some(t => t.sessionId === sessionId)) return false
-      state = { ...state, terminals: { ...state.terminals, [terminalId]: { sessionId } } }
+    async bind(terminalId: string, sessionId: string, paneKey?: string): Promise<boolean> {
+      if (!state.sessions[sessionId] || (paneKey && state.panes[paneKey]?.threadId !== sessionId) || (!paneKey && Object.values(state.terminals).some(t => t.sessionId === sessionId))) return false
+      const terminals = paneKey ? Object.fromEntries(Object.entries(state.terminals).filter(([, t]) => t.sessionId !== sessionId)) : state.terminals
+      state = { ...state, terminals: { ...terminals, [terminalId]: { sessionId, ...(paneKey ? { paneKey } : {}) } } }
       await save()
       return true
     },
@@ -335,7 +325,7 @@ export function createTracker(deps: TrackerDeps) {
     async prune(): Promise<void> {
       const now = clock.now()
       const sessions = Object.fromEntries(
-        Object.entries(state.sessions).filter(([, s]) => s.ledger.items.length > 0 || s.queue.length > 0 || s.codexNotified.length > 0 || now - s.touchedAt < PRUNE_MS),
+        Object.entries(state.sessions).filter(([, s]) => s.ledger.items.length > 0 || s.queue.length > 0 || now - s.touchedAt < PRUNE_MS),
       )
       const terminals = Object.fromEntries(Object.entries(state.terminals).filter(([, t]) => sessions[t.sessionId]))
       const panes = Object.fromEntries(Object.entries(state.panes).filter(([, p]) => sessions[p.threadId]))
@@ -355,37 +345,22 @@ export function createTracker(deps: TrackerDeps) {
       await poll(sessionId)
     },
 
-    /** Main-agent status transitions supply the other half of each Codex turn boundary. */
+    /** A Codex done status starts reading the rollout. */
     codexStatus,
 
-    /** A notify id is saved before the socket answers, even if its rollout is not readable yet. */
-    async codexNotify(sessionId: string, turnId: string, alreadyDone = false): Promise<void> {
-      const s = state.sessions[sessionId]
-      if (!s || s.agent !== 'codex' || !turnId) return
-      if (s?.lastTurnId === turnId || s?.queue.some(t => t.turnId === turnId)) return
-      const notified = s.codexNotified.includes(turnId) ? s.codexNotified : [...s.codexNotified, turnId]
-      const dones = s.codexDones + (alreadyDone && !s.codexLastDone ? 1 : 0)
-      update(sessionId, cur => ({ ...cur, codexNotified: notified, codexDones: dones, codexLastDone: cur.codexLastDone || alreadyDone }))
-      await save()
-      if (dones > 0) background(poll(sessionId))
-    },
+    /** A Codex notify starts reading the rollout from its saved offset. */
+    async codexNotify(sessionId: string, _turnId: string): Promise<void> { retryCodex(sessionId) },
 
-    /** A later binding or status can retry paired signals after the rollout appears. */
-    retryCodex(sessionId: string): void {
-      const s = state.sessions[sessionId]
-      if (s?.agent === 'codex' && s.queue[0]?.failures === 0) background(drain(sessionId, true))
-      if (s?.agent === 'codex' && s.codexDones > 0 && s.codexNotified.length > 0) background(poll(sessionId))
-    },
+    /** A later binding or status retries a rollout read. */
+    retryCodex,
 
     /** Retains a notify-only thread until its rollout proves it is the pane's main chat. */
-    async stageCodex(paneKey: string, threadId: string, codexHome: string, turnId: string, done = false): Promise<void> {
+    async stageCodex(paneKey: string, threadId: string, codexHome: string, turnId: string): Promise<void> {
       if (!turnId) return
       const old = state.pendingCodex?.[paneKey] ?? []
       const found = old.find(entry => entry.threadId === threadId && entry.turnId === turnId)
-      if (found && (found.done || !done)) return
-      const entries = found
-        ? old.map(entry => entry === found ? { ...entry, done: true } : entry)
-        : [...old, { threadId, codexHome, turnId, done }]
+      if (found) return
+      const entries = [...old, { threadId, codexHome, turnId }]
       state = { ...state, pendingCodex: { ...state.pendingCodex, [paneKey]: entries } }
       await save()
     },

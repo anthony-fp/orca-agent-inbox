@@ -180,7 +180,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
         await bindCodex(event.paneKey, pending.threadId, pending.codexHome, 'notify', pending.turnId)
     }
     const pane = event.paneKey ? tracker.state().panes[event.paneKey] : undefined
-    if (pane && tracker.state().terminals[terminalId]?.sessionId !== pane.threadId)
+    if (pane && (tracker.state().terminals[terminalId]?.sessionId !== pane.threadId || tracker.state().terminals[terminalId]?.paneKey !== event.paneKey))
       await tracker.track(terminalId, pane.threadId, { pane: { key: event.paneKey, codexHome: pane.codexHome, promptHookSeen: pane.promptHookSeen } })
     if (pane && state !== 'done') await tracker.codexStatus(pane.threadId, false)
     if (state !== 'done') return
@@ -293,6 +293,21 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
     .then(() => tracker.prune())
     .catch(e => log(`start: ${message(e)}`))
 
+  /** The first session_meta time, or the timestamp Codex put in the rollout name. */
+  async function rolloutStart(path: string): Promise<number | null> {
+    const bytes = await deps.readFile(path)
+    if (bytes) {
+      try {
+        const row = JSON.parse(bytes.toString('utf8', 0, bytes.indexOf(10) + 1 || bytes.length))
+        const at = row.type === 'session_meta' ? Date.parse(row.timestamp) : NaN
+        if (Number.isFinite(at)) return at
+      } catch { /* use the rollout name */ }
+    }
+    const name = /rollout-(\d{4}-\d\d-\d\d)T(\d\d)-(\d\d)-(\d\d)/.exec(path)
+    const at = name ? Date.parse(`${name[1]}T${name[2]}:${name[3]}:${name[4]}Z`) : NaN
+    return Number.isFinite(at) ? at : null
+  }
+
   async function bindCodex(paneKey: string, threadId: string, codexHome: string, source: 'prompt' | 'tool' | 'notify', turnId?: string): Promise<void> {
     const previous = tracker.state().panes[paneKey]
     const home = codexHome || previous?.codexHome || ''
@@ -302,9 +317,18 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
       : home ? await (deps.codexRollout ?? rolloutFor)(home, threadId) : null
     // Notify has no thread-source marker; the rollout's session_meta must prove it is the main chat.
     if (source === 'notify' && !rollout) {
-      const terminal = paneTerminals.get(paneKey)
-      await tracker.stageCodex(paneKey, threadId, home, turnId ?? '', terminal ? statuses.get(terminal) === 'done' : false)
+      await tracker.stageCodex(paneKey, threadId, home, turnId ?? '')
       return
+    }
+    if (previous && previous.threadId !== threadId) {
+      const boundPath = tracker.state().sessions[previous.threadId]?.transcript ??
+        (previous.codexHome ? (await (deps.codexRollout ?? rolloutFor)(previous.codexHome, previous.threadId))?.path : null)
+      const older = boundPath ? await rolloutStart(boundPath) : null
+      const newer = rollout ? await rolloutStart(rollout.path) : null
+      if (older === null || newer === null || newer <= older) {
+        if (newer !== null && older !== null && newer <= older && turnId) await tracker.clearStagedCodex(paneKey, threadId, turnId)
+        return
+      }
     }
     const needsStart = !known || (known.offset === 0 && known.lastTurnId === null && known.queue.length === 0 && !known.transcript)
     const bytes = (needsStart || source === 'tool') && rollout ? await deps.readFile(rollout.path) : null
@@ -327,7 +351,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
     }))
     for (const pending of tracker.state().pendingCodex?.[paneKey] ?? []) {
       if (pending.threadId !== threadId) continue
-      await tracker.codexNotify(threadId, pending.turnId, pending.done || statuses.get(terminalId ?? '') === 'done')
+      await tracker.codexNotify(threadId, pending.turnId)
       await tracker.clearStagedCodex(paneKey, threadId, pending.turnId)
     }
     tracker.retryCodex(threadId)
@@ -341,15 +365,14 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
       const read = await readPlan(id)
       return read ? planNote(read.path, read.plan) : null
     },
-    bind: async (terminalId, sessionId) => {
-      if (!(await tracker.bind(terminalId, sessionId))) return
+    bind: async (terminalId, sessionId, paneKey) => {
+      if (!(await tracker.bind(terminalId, sessionId, paneKey))) return
       log('bind: terminal from prompt hook')
       orca.panels.post('inbox.changed', {})
     },
     bindCodex,
     notifyCodex: async (paneKey, threadId, turnId) => {
-      const terminalId = paneTerminals.get(paneKey)
-      await tracker.codexNotify(threadId, turnId, terminalId ? statuses.get(terminalId) === 'done' : false)
+      await tracker.codexNotify(threadId, turnId)
     },
   })
   void ready.then(async () => {
@@ -417,11 +440,12 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
       if (!statuses.has(agent.terminalId) && STATES.includes(mainState)) statuses.set(agent.terminalId, mainState as TerminalStatus)
       unread += s.unread
       const { plan, error: planError } = plans.get(sessionId) ?? (await readPlan(sessionId)) ?? { plan: null, error: null }
+      const pane = state.panes[state.terminals[agent.terminalId]?.paneKey ?? '']
       sections.push({
         terminalId: agent.terminalId,
         sessionId,
         title: agent.title ?? (s.agent === 'codex' ? 'Codex' : 'Claude Code'),
-        ...(s.agent === 'codex' ? { agent: 'codex' as const, trustHook: !Object.values(state.panes).some(p => p.threadId === sessionId && p.promptHookSeen) } : {}),
+        ...(s.agent === 'codex' ? { agent: 'codex' as const, trustHook: pane?.threadId !== sessionId || !pane.promptHookSeen } : {}),
         drawn: drawnToken(s),
         lastActivity: s.touchedAt,
         plan,

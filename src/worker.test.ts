@@ -146,7 +146,7 @@ test('a first-turn Codex tool saves before notify; status ties its pane to the t
     assert.equal(t.saved().sessions['thread-1'].ledger.findings[0].title, 'Retry loop')
     assert.equal(t.saved().sessions['thread-1'].activeTurn, 1)
     await t.worker.emit('agent.status.changed', status('working', { paneKey: 'pane-1' }))
-    assert.deepEqual(t.saved().terminals, { 'term-1': { sessionId: 'thread-1' } })
+    assert.deepEqual(t.saved().terminals, { 'term-1': { sessionId: 'thread-1', paneKey: 'pane-1' } })
     assert.deepEqual(await ask(socket, { type: 'codex-turn', payload: { paneKey: 'pane-1', codexHome: '/codex', threadId: 'thread-1', turnId: 'turn-1', type: 'agent-turn-complete' } }, 2000), { text: '' })
     assert.equal(t.saved().panes['pane-1'].codexHome, '/codex')
   } finally {
@@ -155,9 +155,9 @@ test('a first-turn Codex tool saves before notify; status ties its pane to the t
   }
 })
 
-test('notify replaces a pane thread and ignores a sub-agent rollout', async () => {
+test('a newer rollout rebinds a pane; late old notify, prompt and tool calls leave it bound', async () => {
   const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
-  const t = await setup({ socket, codexRollout: async (_home, threadId) => threadId.startsWith('sub') ? null : ({ path: `/codex/sessions/2026/11/05/rollout-${threadId}.jsonl`, cwd: WS.path }) })
+  const t = await setup({ socket, codexRollout: async (_home, threadId) => threadId.startsWith('sub') ? null : ({ path: `/codex/sessions/2026/11/05/rollout-2026-11-05T${threadId === 'thread-1' ? '10' : '11'}-00-00-${threadId}.jsonl`, cwd: WS.path }) })
   const notify = async (threadId: string) => ask(socket, { type: 'codex-turn', payload: { paneKey: 'pane-1', codexHome: '/codex', threadId, turnId: `turn-${threadId}`, type: 'agent-turn-complete' } }, 2000)
   try {
     assert.deepEqual(await notify('thread-1'), { text: '' })
@@ -165,6 +165,13 @@ test('notify replaces a pane thread and ignores a sub-agent rollout', async () =
     assert.deepEqual(await notify('sub-1'), { text: '' })
     assert.equal(t.saved().panes['pane-1'].threadId, 'thread-1')
     assert.deepEqual(await notify('thread-2'), { text: '' })
+    assert.equal(t.saved().panes['pane-1'].threadId, 'thread-2')
+    assert.equal(t.saved().panes['pane-1'].promptHookSeen, false)
+    await notify('thread-1')
+    assert.equal(t.saved().panes['pane-1'].threadId, 'thread-2')
+    await ask(socket, { type: 'prompt-start', paneKey: 'pane-1', codexHome: '/codex', sessionId: 'thread-1' }, 2000)
+    assert.equal(t.saved().panes['pane-1'].threadId, 'thread-2')
+    await ask(socket, { type: 'record', paneKey: 'pane-1', codexHome: '/codex', sessionId: 'thread-1', args: { kind: 'finding', finding_kind: 'issue', title: 'Old', detail: 'Old thread' } }, 2000)
     assert.equal(t.saved().panes['pane-1'].threadId, 'thread-2')
   } finally {
     await t.close()
@@ -187,7 +194,6 @@ test('a notify with a missing rollout is kept until a later status can verify it
     await t.worker.emit('agent.status.changed', status('working', { paneKey: 'pane-1' }))
     assert.equal(t.saved().panes['pane-1'].threadId, 'chat-1')
     assert.equal(t.saved().pendingCodex, undefined)
-    assert.deepEqual(t.saved().sessions['chat-1'].codexNotified, ['turn-1'])
     await t.worker.emit('agent.status.changed', status('done', { paneKey: 'pane-1' }))
     await t.time.run()
     assert.equal(t.models.length, 1)
@@ -487,6 +493,9 @@ test('inbox.view: a tracked Codex thread has Claude-shaped rows and clears hook-
   const state: CurrentState = { version: 2, terminals: { 'term-1': { sessionId: S } },
     sessions: { [S]: session }, panes: { 'pane-1': { agent: 'codex', threadId: S, codexHome: '/codex', promptHookSeen: true } } }
   const t = await setup({ state, agents: [{ terminalId: 'term-1', title: 'Codex', agent: 'codex', state: 'done', stateStartedAt: 1 }] })
+  assert.equal((await t.worker.request('inbox.view', undefined)).sections[0].trustHook, true)
+  await t.worker.emit('agent.status.changed', status('done', { paneKey: 'pane-1' }))
+  assert.equal(t.saved().terminals['term-1'].paneKey, 'pane-1')
   const view = await t.worker.request('inbox.view', undefined)
   assert.equal(view.sections.length, 1)
   assert.equal(view.sections[0].agent, 'codex')
@@ -494,14 +503,20 @@ test('inbox.view: a tracked Codex thread has Claude-shaped rows and clears hook-
   assert.equal(view.sections[0].questions[0].text, ledger.items[0].ask)
   assert.deepEqual(view.others, [])
   await t.worker.deactivate()
+
+  const other = await setup({ state: { ...state, terminals: { 'term-2': { sessionId: S, paneKey: 'pane-2' } }, panes: {
+    ...state.panes, 'pane-2': { agent: 'codex', threadId: S, codexHome: '/codex', promptHookSeen: false },
+  } }, agents: [{ terminalId: 'term-2', title: 'Codex', agent: 'codex', state: 'done', stateStartedAt: 1 }] })
+  assert.equal((await other.worker.request('inbox.view', undefined)).sections[0].trustHook, true)
+  await other.worker.deactivate()
 })
 
 for (const main of ['working', 'blocked', 'waiting', 'done'] as const) {
   test(`Codex mainAgent ${main} controls the press send despite combined done`, async () => {
     const ledger = openLedger()
     const session = { ...emptySession(100 * DAY), agent: 'codex' as const, codexHome: '/codex', ledger }
-    const state: CurrentState = { version: 2, terminals: { 'term-1': { sessionId: S } },
-      sessions: { [S]: session }, panes: { 'pane-1': { agent: 'codex', threadId: S, codexHome: '/codex', promptHookSeen: false } } }
+    const state: CurrentState = { version: 2, terminals: { 'term-1': { sessionId: S, paneKey: 'pane-1' } },
+      sessions: { [S]: session }, panes: { 'pane-1': { agent: 'codex', threadId: S, codexHome: '/codex', promptHookSeen: true } } }
     const t = await setup({ state, agents: [{ terminalId: 'term-1', title: 'Codex', agent: 'codex', state: 'done', stateStartedAt: 1 }] })
     await t.worker.emit('agent.status.changed', status('done', { mainAgent: { state: main, stateStartedAt: 1 } }))
     const out = await t.worker.request('inbox.press', { terminalId: 'term-1', sessionId: S, drawn: drawnToken(session),
