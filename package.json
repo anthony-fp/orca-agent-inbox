@@ -1,8 +1,8 @@
 {
   "name": "orca-agent-inbox",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
-  "description": "An Orca plugin that collects the questions and tasks Claude Code agents leave.",
+  "description": "Adds an Agent Inbox tab to the right sidebar. It gives a high-level view of the workspace plan, the questions waiting on your decision, and the bugs your agent finds as it reads your code. It also lists the follow-up tasks you must do yourself, so you don't lose track of them. Works with Claude Code.",
   "scripts": {
     "test": "orca plugin test .",
     "typecheck": "tsc --noEmit -p src/core && tsc --noEmit -p tsconfig.node.json"
