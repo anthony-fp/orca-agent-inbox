@@ -55,3 +55,8 @@
 - [fixed] Prune dropped a launch session's alias after 7 days while its switched-to session was live, so tool calls with the launch id failed → alias kept while its target lives, src/turns.ts prune; test "prune keeps an alias…"
 - [fixed] A new launch in a terminal kept the old Claude binding (clearPane returned early with no pane key), so a press could reach the new process → clearPane drops the terminal binding on every launch, src/turns.ts clearPane; test "a new launch … ends its old Claude binding"
 - Reviewer: Codex flags, main-thread binding, queued-turn survival, old state loading and held labels are sound.
+
+## Release round 2 — 2026-11-06
+- [fixed] Round 1's alias fix was not real: on restart upgradeState drops an alias whose launch session is gone, and bindClaude needs the launch session → prune now keeps a launch session while its alias target lives (src/turns.ts prune); test checks the alias across a restart.
+- [fixed] An older launch still reading its transcript could bind over a newer launch in the same terminal → per-terminal launch generation, checked before track (src/worker.ts launch hook); overlap test.
+- Reviewer: no further material issue in Codex, script-path or press paths; both fixes are targeted edits, no broad round needed.

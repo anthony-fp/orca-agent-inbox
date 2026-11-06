@@ -111,6 +111,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
     : Promise.resolve(null)
   const codexLaunches = new Map<string, { kind: 'tracked' | 'skipped'; at: number }>()
   let codexLaunchWithoutTerminal = false
+  const launchGenerations = new Map<string, number>()
 
   // Both are registered first, before any other work, so a launch or a status while the state loads still reaches
   // them. Each waits for `ready` inside.
@@ -120,6 +121,9 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
     // A launch with no terminal id is tagged too, and saved with no terminal: its prompt hook binds the terminal.
     const terminalId = event.terminalId ?? null
     const launchedAt = deps.clock.now()
+    // Each launch in a terminal is a new generation: an older launch still reading its transcript must not bind over it.
+    const generation = terminalId ? (launchGenerations.get(terminalId) ?? 0) + 1 : 0
+    if (terminalId) launchGenerations.set(terminalId, generation)
     const oldPaneKey = terminalId ? [...paneTerminals].find(([, terminal]) => terminal === terminalId)?.[0] : undefined
     if (terminalId) {
       codexLaunches.set(terminalId, { kind: 'skipped', at: launchedAt })
@@ -159,6 +163,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
         offset = wholeLinesEnd(found.bytes)
         turn = promptsBefore(found.bytes, offset)
       }
+      if (terminalId && launchGenerations.get(terminalId) !== generation) return
       await tracker.track(terminalId, id, { offset, turn, tools: tagged.tools })
       if (found) await learn(id, { transcript: found.path, cwd: cwdOf(found.bytes) })
     })().catch(e => log(`launch: could not track ${terminalId}: ${message(e)}`))

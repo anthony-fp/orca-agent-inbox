@@ -540,8 +540,22 @@ test('prune keeps an alias while its target lives, so launch-id tools still reac
     moved: { [S]: current },
   }
   const t = await setup({ state })
-  assert.equal(t.saved().sessions[S], undefined)
+  assert.ok(t.saved().sessions[S], 'the launch session stays while its alias target lives')
   assert.equal(t.saved().moved?.[S], current)
+  await t.worker.deactivate()
+  const again = await setup({ state: t.saved() })
+  assert.equal(again.saved().moved?.[S], current, 'the alias survives a restart')
+  await again.worker.deactivate()
+})
+
+test('an older launch still reading its transcript does not bind over a newer launch in the same terminal', async () => {
+  const t = await setup({ files: { [`${PROJECTS}/-work-my-app/${S}.jsonl`]: prompt('p-1', 'old') } })
+  const older = t.worker.hooks.fire('agent.launch.before', launch(`claude --resume ${S}`))
+  const newer = t.worker.hooks.fire('agent.launch.before', launch('claude'))
+  await Promise.all([older, newer])
+  await t.time.run()
+  const bound = t.saved().terminals['term-1']?.sessionId
+  assert.ok(bound && bound !== S, `the newer launch keeps the terminal, got ${bound}`)
   await t.worker.deactivate()
 })
 
