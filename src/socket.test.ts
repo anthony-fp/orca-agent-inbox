@@ -146,17 +146,21 @@ test('a first-turn Codex record binds and saves the main thread before answering
   assert.deepEqual(tracker.state().terminals[terminalId], { sessionId: 'thread-1', paneKey: 'pane-1' })
 })
 
-test('a prompt matching a press sent to another thread in the same pane is blocked', async () => {
+test('only a recent sending press to another thread in the same pane blocks a typed prompt', async () => {
   const storage = memoryStorage()
   const tracker = createTracker({ storage, clock: fakeClock().clock, read: async () => null, model: async () => ({ ok: false, reason: 'failed', detail: '', ms: 0 }) })
   await tracker.start()
   await tracker.track(null, 'thread-old', { pane: { key: 'pane-1', codexHome: '/codex', promptHookSeen: true } })
   await tracker.edit('thread-old', s => ({ ...s, presses: { i1: { state: 'sending', kind: 'answer', answer: 'Yes', text: 'Re "Ship?": Yes', at: 1, paneKey: 'pane-1' } } }))
   await tracker.track(null, 'thread-new', { pane: { key: 'pane-1', codexHome: '/codex', promptHookSeen: true } })
-  const answer = createAnswerer({ state: () => tracker.state(), edit: (id, change) => tracker.edit(id, change), now: () => 1, planNote: async () => null })
+  let now = 1
+  const answer = createAnswerer({ state: () => tracker.state(), edit: (id, change) => tracker.edit(id, change), now: () => now, planNote: async () => null })
   assert.deepEqual(await answer({ type: 'inbox-text', sessionId: 'thread-new', paneKey: 'pane-1', prompt: 'Re "Ship?": Yes' }), { error: 'press sent for a different Codex thread' })
   await tracker.edit('thread-old', s => ({ ...s, presses: { i1: { ...s.presses.i1, state: 'undelivered' } } }))
-  assert.deepEqual(await answer({ type: 'inbox-text', sessionId: 'thread-new', paneKey: 'pane-1', prompt: 'Re "Ship?": Yes' }), { error: 'press sent for a different Codex thread' })
+  assert.ok('text' in await answer({ type: 'inbox-text', sessionId: 'thread-new', paneKey: 'pane-1', prompt: 'Re "Ship?": Yes' }))
+  await tracker.edit('thread-old', s => ({ ...s, presses: { i1: { ...s.presses.i1, state: 'sending' } } }))
+  now = 10_002
+  assert.ok('text' in await answer({ type: 'inbox-text', sessionId: 'thread-new', paneKey: 'pane-1', prompt: 'Re "Ship?": Yes' }))
   assert.ok('text' in await answer({ type: 'inbox-text', sessionId: 'thread-new', paneKey: 'pane-1', prompt: 'A new request' }))
 })
 

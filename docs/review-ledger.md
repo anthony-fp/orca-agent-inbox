@@ -40,6 +40,6 @@
 
 ## Code round 2 — 2026-11-05
 - Verified real: all round 1 fixes; no duplicate-turn path found; restart between notify and read, and Codex outside Orca (`~/.codex`), raise nothing.
-- [open] A reused pane can tie a later Claude launch's status to the old Codex thread (`src/worker.ts:178-185`) → stored-state change. Fix: a tracked launch in a terminal clears any Codex pane binding for that terminal; status reattaches a pane only when the terminal's launch was Codex.
-- [open] A typed prompt equal to an old press can be blocked by exit 2 (`src/socket.ts:141-143`) → small edit. Fix: block only while that press is `sending` (sent under 10 s ago, not yet confirmed) to this terminal, never for `undelivered`.
-- [open] Missing rollout start times refuse every later thread switch (`src/worker.ts:323-330`) → small edit. Fix: a prompt hook or tool call (live in the pane, main thread) rebinds without times; only a notify needs the later start time.
+- [fixed] A tracked launch clears the terminal's old Codex pane binding; status keeps a Claude session or waits for the new Codex thread (`src/turns.ts:260`, `src/worker.ts:135`, `src/worker.ts:145`, `src/worker.test.ts:135`, `src/worker.test.ts:149`).
+- [fixed] A typed prompt matches another thread's press only while it is sending and under 10 s old; undelivered and older presses do not block (`src/socket.ts:142`, `src/socket.test.ts:149`).
+- [fixed] A live prompt hook or tool call can rebind without rollout times, while a notify still needs a later start (`src/worker.ts:336`, `src/worker.test.ts:215`).

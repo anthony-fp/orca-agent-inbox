@@ -132,6 +132,39 @@ test('the launch hook tags a new claude session and tracks its terminal', async 
   await t.worker.deactivate()
 })
 
+test('a Claude launch in a former Codex terminal keeps its session after status', async () => {
+  const old = { ...emptySession(100 * DAY), agent: 'codex' as const }
+  const state: CurrentState = { version: 2, terminals: { 'term-1': { sessionId: 'thread-old', paneKey: 'pane-1' } },
+    panes: { 'pane-1': { agent: 'codex', threadId: 'thread-old', codexHome: '/codex', promptHookSeen: true } },
+    sessions: { 'thread-old': old } }
+  const t = await setup({ state })
+  await t.worker.hooks.fire('agent.launch.before', launch(`claude --session-id ${S}`))
+  await t.worker.emit('agent.status.changed', status('working'))
+  assert.deepEqual(t.saved().terminals['term-1'], { sessionId: S })
+  assert.equal(t.saved().sessions[S].agent, 'claude')
+  assert.equal(t.saved().panes['pane-1'], undefined)
+  await t.worker.deactivate()
+})
+
+test('a tracked Codex relaunch clears its former pane before status', async () => {
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  const old = { ...emptySession(100 * DAY), agent: 'codex' as const }
+  const state: CurrentState = { version: 2, terminals: { 'term-1': { sessionId: 'thread-old', paneKey: 'pane-1' } },
+    panes: { 'pane-1': { agent: 'codex', threadId: 'thread-old', codexHome: '/codex', promptHookSeen: true } },
+    sessions: { 'thread-old': old } }
+  const t = await setup({ state, socket })
+  try {
+    const out = await t.worker.hooks.fire('agent.launch.before', launch('codex', { agent: 'codex' }))
+    assert.equal(out.kind, 'continue')
+    await t.worker.emit('agent.status.changed', status('working'))
+    assert.equal(t.saved().panes['pane-1'], undefined)
+    assert.equal(t.saved().terminals['term-1'], undefined)
+  } finally {
+    await t.close()
+    await t.worker.deactivate()
+  }
+})
+
 test('a first-turn Codex tool saves before notify; status ties its pane to the terminal', async () => {
   const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
   const t = await setup({ socket, codexRollout: async (home, threadId) => {
@@ -173,6 +206,27 @@ test('a newer rollout rebinds a pane; late old notify, prompt and tool calls lea
     assert.equal(t.saved().panes['pane-1'].threadId, 'thread-2')
     await ask(socket, { type: 'record', paneKey: 'pane-1', codexHome: '/codex', sessionId: 'thread-1', args: { kind: 'finding', finding_kind: 'issue', title: 'Old', detail: 'Old thread' } }, 2000)
     assert.equal(t.saved().panes['pane-1'].threadId, 'thread-2')
+  } finally {
+    await t.close()
+    await t.worker.deactivate()
+  }
+})
+
+test('a prompt hook rebinds a new main thread without rollout times, while notify does not', async () => {
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  const t = await setup({ socket, codexRollout: async (_home, threadId) =>
+    ({ path: `/codex/rollout-${threadId}.jsonl`, cwd: WS.path }) })
+  try {
+    const notify = (threadId: string) => ask(socket, { type: 'codex-turn', payload: {
+      paneKey: 'pane-1', codexHome: '/codex', threadId, turnId: `turn-${threadId}`, type: 'agent-turn-complete',
+    } }, 2000)
+    await ask(socket, { type: 'prompt-start', paneKey: 'pane-1', codexHome: '/codex', sessionId: 'thread-old' }, 2000)
+    assert.equal(t.saved().panes['pane-1'].threadId, 'thread-old')
+    await notify('thread-new')
+    assert.equal(t.saved().panes['pane-1'].threadId, 'thread-old')
+    await ask(socket, { type: 'prompt-start', paneKey: 'pane-1', codexHome: '/codex', sessionId: 'thread-new' }, 2000)
+    assert.equal(t.saved().panes['pane-1'].threadId, 'thread-new')
+    assert.equal(t.saved().panes['pane-1'].promptHookSeen, true)
   } finally {
     await t.close()
     await t.worker.deactivate()

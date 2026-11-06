@@ -139,7 +139,7 @@ export function createAnswerer(deps: AnswerDeps): (request: unknown) => Promise<
     const plan = await deps.planNote(sessionId)
     const prompt = typeof request.prompt === 'string' ? request.prompt : ''
     if (paneKey && prompt !== '' && Object.entries(deps.state().sessions).some(([id, s]) =>
-      id !== sessionId && s.agent === 'codex' && Object.values(s.presses).some(l => l.paneKey === paneKey && (l.state === 'sending' || l.state === 'undelivered') && l.text === prompt)))
+      id !== sessionId && s.agent === 'codex' && Object.values(s.presses).some(l => l.paneKey === paneKey && l.state === 'sending' && deps.now() - l.at < 10_000 && l.text === prompt)))
       return { error: 'press sent for a different Codex thread' }
     const notes = await apply(sessionId, s => {
       // A prompt the panel typed for a press is no answer to number: the skill passes isPress for its own sends.

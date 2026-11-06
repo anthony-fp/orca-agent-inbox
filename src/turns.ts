@@ -256,6 +256,19 @@ export function createTracker(deps: TrackerDeps) {
   }
 
   return {
+    /** A new Codex launch has no thread id yet; discard the old pane and terminal association. */
+    async clearPane(terminalId: string): Promise<void> {
+      const key = state.terminals[terminalId]?.paneKey
+      if (!key) return
+      state = {
+        ...state,
+        terminals: Object.fromEntries(Object.entries(state.terminals).filter(([id]) => id !== terminalId)),
+        panes: Object.fromEntries(Object.entries(state.panes).filter(([id]) => id !== key)),
+        pendingCodex: state.pendingCodex && Object.fromEntries(Object.entries(state.pendingCodex).filter(([id]) => id !== key)),
+      }
+      await save()
+    },
+
     /** Loads the saved state, runs every queued turn and reads each tracked session again. */
     async start(): Promise<void> {
       state = upgradeState(await storage.get(STATE_KEY), clock.now())

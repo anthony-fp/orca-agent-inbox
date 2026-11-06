@@ -115,6 +115,10 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
       log(`launch: agent=${event.agent} terminal=${event.terminalId ? 'yes' : 'no'} workspaceKind=${event.workspaceKind ?? 'none'} tagged=${tagged} tools=${tools ? 'yes' : 'no'} reason=${reason}`)
     // A launch with no terminal id is tagged too, and saved with no terminal: its prompt hook binds the terminal.
     const terminalId = event.terminalId ?? null
+    if (terminalId) {
+      codexLaunches.set(terminalId, { kind: 'skipped', at: deps.clock.now() })
+      for (const [key, terminal] of paneTerminals) if (terminal === terminalId) paneTerminals.delete(key)
+    }
     if (event.agent === 'codex' && !terminalId) codexLaunchWithoutTerminal = true
     let tagged: ReturnType<typeof tagLaunch>
     try {
@@ -123,11 +127,14 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
       return line('no', false, `error:${message(e)}`)
     }
     if (!tagged.session) {
-      if (event.agent === 'codex' && terminalId) codexLaunches.set(terminalId, { kind: 'skipped', at: deps.clock.now() })
       return line('no', false, untaggedReason(event.agent, event.command))
     }
     if (tagged.session.kind === 'codex') {
       if (terminalId) codexLaunches.set(terminalId, { kind: 'tracked', at: deps.clock.now() })
+      if (terminalId) {
+        const clearing = ready.then(() => tracker.clearPane(terminalId)).catch(e => log(`launch: could not clear ${terminalId}: ${message(e)}`))
+        await Promise.race([clearing, deps.clock.sleep(TRACK_WAIT_MS)])
+      }
       line('codex', tagged.tools, '-')
       return next({ ...event, command: tagged.command })
     }
@@ -135,6 +142,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
     line(kind, tagged.tools, '-')
     const tracking = (async () => {
       await ready
+      if (terminalId) await tracker.clearPane(terminalId)
       // A resumed session starts at its transcript's end, so the turns it had before are never read again.
       // Its turn count starts at the prompts before that end, so a prompt-start raises the turn the transcript gives.
       let offset = 0
@@ -171,15 +179,15 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
     // Spec step 2: the main agent's state, not the combined one; an older Orca has only `state`.
     const terminalId = event.terminalId
     if (!terminalId) return
-    if (event.paneKey) paneTerminals.set(event.paneKey, terminalId)
+    if (event.paneKey && codexLaunches.get(terminalId)?.kind !== 'skipped') paneTerminals.set(event.paneKey, terminalId)
     const state = (event.mainAgent?.state ?? event.state) as TerminalStatus
     statuses.set(terminalId, state)
     await ready
-    if (event.paneKey) {
+    if (event.paneKey && codexLaunches.get(terminalId)?.kind !== 'skipped') {
       for (const pending of tracker.state().pendingCodex?.[event.paneKey] ?? [])
         await bindCodex(event.paneKey, pending.threadId, pending.codexHome, 'notify', pending.turnId)
     }
-    const pane = event.paneKey ? tracker.state().panes[event.paneKey] : undefined
+    const pane = event.paneKey && codexLaunches.get(terminalId)?.kind !== 'skipped' ? tracker.state().panes[event.paneKey] : undefined
     if (pane && (tracker.state().terminals[terminalId]?.sessionId !== pane.threadId || tracker.state().terminals[terminalId]?.paneKey !== event.paneKey))
       await tracker.track(terminalId, pane.threadId, { pane: { key: event.paneKey, codexHome: pane.codexHome, promptHookSeen: pane.promptHookSeen } })
     if (pane && state !== 'done') await tracker.codexStatus(pane.threadId, false)
@@ -325,7 +333,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
         (previous.codexHome ? (await (deps.codexRollout ?? rolloutFor)(previous.codexHome, previous.threadId))?.path : null)
       const older = boundPath ? await rolloutStart(boundPath) : null
       const newer = rollout ? await rolloutStart(rollout.path) : null
-      if (older === null || newer === null || newer <= older) {
+      if ((source === 'notify' && (older === null || newer === null)) || (older !== null && newer !== null && newer <= older)) {
         if (newer !== null && older !== null && newer <= older && turnId) await tracker.clearStagedCodex(paneKey, threadId, turnId)
         return
       }
@@ -336,7 +344,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
     const currentOffset = known?.queue.at(-1)?.nextOffset ?? known?.offset ?? offset
     const toolTurn = source === 'tool' && bytes ? codexToolTurn(bytes, currentOffset, turnId) : null
     const terminalId = paneTerminals.get(paneKey) ??
-      Object.entries(tracker.state().terminals).find(([, t]) => t.sessionId === previous?.threadId)?.[0] ?? null
+      Object.entries(tracker.state().terminals).find(([id, t]) => codexLaunches.get(id)?.kind !== 'skipped' && t.sessionId === previous?.threadId)?.[0] ?? null
     await tracker.track(terminalId, threadId, {
       offset, turn,
       pane: { key: paneKey, codexHome: home, promptHookSeen: source === 'prompt' },
