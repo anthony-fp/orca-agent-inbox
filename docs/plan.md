@@ -12,6 +12,21 @@
 > 5. **Copy the types, and cut the Now view free before parallel work.** In T1, copy `types/index.d.ts` too. Define a small Now projection that needs no press state. Move panel integration (T6) after T4 and T7 settle the state and press contracts.
 >
 > **Status:** Fixes 1–5 written into T1, T3, T4, T5, T6 and T7 on 2026-11-05. Not blocked.
+>
+> **---- refresh 2026-11-05: Part 3 (Codex, T14–T21) ----**
+>
+> **⚠️ ADVERSARIAL AUDIT (Codex, 2026-11-05) — HIGH. Do not ship Part 3 yet: first-turn tools cannot reliably write, and the proposed transcript copy does not supply the durable turn boundary the tracker requires.**
+>
+> The audit found: T17 creates the pane-to-thread mapping only after the first turn's `notify`, so a `record` or `close` during the first turn cannot wait for its own turn to finish within 5 s; it returns "not available" and the finding is lost (plan T17, spec step 6). `turnIn` returns only dialogs and commands, and `readRollout` returns a flattened conversation and an earlier-turn count (inbox repo `codex/src/transcript.ts:198`, `:423`); neither returns one `Exchange`, a byte offset and the next complete turn that the queue requires (`src/turns.ts:88-98`, `:187-225`). The full `notify` payload includes `last-assistant-message`, and the socket drops requests over 1 MiB (`src/socket.ts:129-130`), so a long reply discards the turn notification. T18 caps `codex exec` at 45 s while the referenced runner allows 120 s (inbox repo `codex/src/update.ts:31-33`); under the three-failure rule (`src/turns.ts:171-180`) slow but healthy runs cause permanent inbox gaps. Probe C1 (run during the audit): a `UserPromptSubmit` hook given with `-c hooks.UserPromptSubmit=[…]` did not run under `codex exec` on 0.164.0; Codex keeps hook trust by source and hash in `hooks.state`.
+>
+> **Redesign required before build:**
+> 1. **Bind the pane to its thread before any tool can run.** In T14, probe whether the MCP server can find its own thread at start: the rollout its parent `codex` process holds open (`lsof -p <ppid>`), or thread metadata in the MCP request. In T17, bind at the first tool call, not at `notify`. Test a `record` in the first turn.
+> 2. **Write a real Codex turn adapter.** In T15, copy the readers, then add `readCodexTurn(file, offset) → { status, turnId, exchange, nextOffset }` with the same contract as `readTurn` (T3). `turnId` is the rollout's turn id. Test multi-turn catch-up after a restart and a `codex resume`.
+> 3. **Send only ids in `codex-turn`.** In T17, `bin/codex-notify.mjs` sends `{ paneKey, codexHome, threadId, turnId, type }` and drops the rest. Test a payload over 1 MiB.
+> 4. **Use 120 s for `codex exec`, and never drop a turn on timeout alone.** In T18, a timeout does not count toward the three failures. Test a slow run.
+> 5. **Settle the prompt hook in T14.** Probe the TUI (not `exec`) for a trust prompt on a `-c` hook, and the `hooks.json` route. If neither works without a trust bypass, the agent gets close ids from the tool answers only. Never set `bypass_hook_trust` or write `hooks.state` for the user.
+>
+> **Status:** Fixes 1–5 written into T14, T15, T17 and T18 on 2026-11-05. T17 waits on T14 step 5.
 
 Builds `docs/spec.md` (version 1, Claude Code only). One subagent per task. A failing test blocks the next task.
 
@@ -137,12 +152,15 @@ Builds spec section "Codex (version 2)". Same rules as above. "The inbox repo" i
   2. C1: run `codex` with `-c 'hooks.UserPromptSubmit=[…]'` (and the `hooks.json` form if `-c` is refused) and record whether the hook runs, whether Codex asks to trust it, and what its output does.
   3. C3: one Codex turn that starts a sub-agent, with a logging `notify`. Record each `notify` payload's `thread-id`, and whether the main thread's id can be told apart (the `threads.source` column in `state_5.sqlite`).
   4. Record whether `mcp_servers.<name>.env_vars` passes `ORCA_PANE_KEY` to an MCP server in Codex 0.164.0.
+  5. Audit fix 1: from inside an MCP server started by Codex, find the thread: the rollout file its parent `codex` process holds open (`lsof -p <ppid>`), or thread metadata in the `tools/call` request. Record which works.
+  6. Audit fix 5: C1 under `codex exec` failed (a `-c` `UserPromptSubmit` hook did not run). Probe the TUI for a trust prompt on a `-c` hook, then the `hooks.json` route. Never set `bypass_hook_trust` or write `hooks.state`.
 - Test: each probe has a result line in `docs/codex-probes.md`. If C1 fails, edit spec step 1 before T16.
 
 ## T15. Copy the Codex code
 - Files: `src/core/codex-transcript.ts`, `src/core/codex-transcript.test.ts`, `src/core/model-text.ts` (an `ORCA_CODEX` host), `NOTICE.md`.
 - Do: copy `rolloutFor`, `turnIn`, `readRollout` and what they need from the inbox repo's `codex/src/transcript.ts`, import paths only. Add `ORCA_CODEX`: the `ORCA` host with Codex's tool names, as the inbox repo's Codex host names them (`codex/src/texts.ts`).
-- Test: port the inbox repo's tests for these functions. `systemText(ORCA)` stays pinned and unchanged.
+- Do (audit fix 2): add `readCodexTurn(file, offset) → { status, turnId, exchange, nextOffset }`, the same contract as `readTurn` (T3), built on the copied readers. `turnId` is the rollout's turn id. It never parses a half-written last line.
+- Test: port the inbox repo's tests for these functions. `systemText(ORCA)` stays pinned and unchanged. Hand-written rollout fixtures: one turn, three turns read in one catch-up after a restart, a `codex resume` that appends to the same file, a half-written last line.
 
 ## T16. Launch hook for Codex
 - Files: `src/launch.ts`, `src/launch.test.ts`.
@@ -151,13 +169,13 @@ Builds spec section "Codex (version 2)". Same rules as above. "The inbox repo" i
 
 ## T17. Notify client and pane tracking
 - Files: `bin/codex-notify.mjs`, `src/socket.ts`, `src/socket.test.ts`, `src/state.ts`, `src/worker.ts`, `src/worker.test.ts`.
-- Do: spec steps 2, 3 and 6. A new socket message `codex-turn { paneKey, codexHome, payload }`. The state gains `panes: { [paneKey]: { agent: 'codex', threadId, codexHome } }`, with `upgradeState` from version 1. The worker keeps only the main thread (T14 C3). Tool calls with a `paneKey` find their session through `panes`, and wait up to 5 s for the first `codex-turn`. The script runs the person's own `notify` from `$CODEX_HOME/config.toml` after it reports.
-- Test: a version 1 state upgrades; a `codex-turn` maps a pane; a second thread id in the pane replaces the first; a sub-agent thread is ignored; a tool call before the first `codex-turn` waits, then answers "not available"; the script against a socket that never answers exits in 5 s and still runs the person's `notify`.
+- Do: spec steps 2, 3 and 6. A new socket message `codex-turn { paneKey, codexHome, payload }`. The script sends only `{ paneKey, codexHome, threadId, turnId, type }` and drops the rest of the payload (audit fix 3). The state gains `panes: { [paneKey]: { agent: 'codex', threadId, codexHome } }`, with `upgradeState` from version 1. The worker keeps only the main thread (T14 C3). The MCP server binds its pane to its thread at its first tool call, by the method T14 step 5 found, and the worker saves it before it answers (audit fix 1). A later `codex-turn` with a new thread id replaces it. The script runs the person's own `notify` from `$CODEX_HOME/config.toml` after it reports.
+- Test: a version 1 state upgrades; a `codex-turn` maps a pane; a second thread id in the pane replaces the first; a sub-agent thread is ignored; a `record` in the first turn, before any `codex-turn`, is saved; a payload over 1 MiB from Codex still reports its ids; the script against a socket that never answers exits in 5 s and still runs the person's `notify`.
 
 ## T18. Codex turns and the Codex model runner
 - Files: `src/turns.ts`, `src/turns.test.ts`, `src/model.ts`, `src/model.test.ts`.
-- Do: spec steps 4 and 5. A Codex turn completes at the later of `notify` and `done`, then goes through the same durable queue as T4. The exchange comes from `turnIn`/`readRollout`. The runner picks `codex exec` for a Codex session, with the inbox repo's flags (`codex/src/update.ts:110-135`), its `MODEL`, low effort, and the pane's `CODEX_HOME`; kill at 45 s.
-- Test: a fake rollout and fake `notify`/`done` in each order; a missing rollout; a stubbed `codex exec` with a good answer, a bad answer and a timeout; a Claude session still runs `claude -p`.
+- Do: spec steps 4 and 5. A Codex turn completes at the later of `notify` and `done`, then goes through the same durable queue as T4. The exchange comes from `turnIn`/`readRollout`. The runner picks `codex exec` for a Codex session, with the inbox repo's flags (`codex/src/update.ts:110-135`), its `MODEL`, low effort, and the pane's `CODEX_HOME`; kill at 120 s, as the inbox repo does. A timeout leaves the turn in the queue and does not count toward the three failures (audit fix 4).
+- Test: a fake rollout and fake `notify`/`done` in each order; a missing rollout; a stubbed `codex exec` with a good answer, a bad answer, a timeout, and four timeouts in a row that still keep the turn; a Claude session still runs `claude -p`.
 
 ## T19. Panel and presses for Codex
 - Files: `src/panel.tsx`, `src/panel.test.tsx`, `src/presses.ts`, `src/presses.test.ts`.
