@@ -519,12 +519,13 @@ export function codexToolTurn(bytes: Buffer, offset: number, turnId: string | un
   return read && (!turnId || read.turnId === turnId) ? read.exchange.turn : null
 }
 
-/** The first new person's prompt, for confirming a press sent to a Codex terminal. */
-export function codexPromptAfter(bytes: Buffer, offset: number): { uuid: string; text: string } | null {
+/** The first new person's prompt, optionally containing `contains`. */
+export function codexPromptAfter(bytes: Buffer, offset: number, contains?: string): { uuid: string; text: string } | null {
   for (let at = offset;;) {
     const turn = readCodexTurn(bytes, at)
     if (!turn) return null
-    if (turn.exchange.person !== null) return { uuid: turn.turnId, text: turn.exchange.person }
+    if (turn.exchange.person !== null && (contains === undefined || turn.exchange.person.replace(/\s+/g, ' ').includes(contains)))
+      return { uuid: turn.turnId, text: turn.exchange.person }
     if (turn.status === 'pending' || turn.nextOffset <= at) return null
     at = turn.nextOffset
   }

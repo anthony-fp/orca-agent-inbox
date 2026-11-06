@@ -329,6 +329,15 @@ export function createTracker(deps: TrackerDeps) {
       return true
     },
 
+    /** Keeps MCP calls tagged with Claude's launch id on the conversation now in that terminal. */
+    async move(launchSession: string, sessionId: string): Promise<void> {
+      const moved = { ...state.moved }
+      if (launchSession === sessionId) delete moved[launchSession]
+      else moved[launchSession] = sessionId
+      state = { ...state, moved }
+      await save()
+    },
+
     /** Changes a session and saves it. The change lands in this tick, before the write: a press checks and sends in one tick. */
     edit(sessionId: string, change: (s: SessionState) => SessionState): Promise<void> {
       if (!state.sessions[sessionId]) return Promise.resolve()
@@ -344,9 +353,10 @@ export function createTracker(deps: TrackerDeps) {
       )
       const terminals = Object.fromEntries(Object.entries(state.terminals).filter(([, t]) => sessions[t.sessionId]))
       const panes = Object.fromEntries(Object.entries(state.panes).filter(([, p]) => sessions[p.threadId]))
+      const moved = Object.fromEntries(Object.entries(state.moved ?? {}).filter(([id, target]) => sessions[id] && sessions[target]))
       const same = Object.keys(sessions).length === Object.keys(state.sessions).length && Object.keys(terminals).length === Object.keys(state.terminals).length && Object.keys(panes).length === Object.keys(state.panes).length
       if (same) return
-      state = { ...state, terminals, sessions, panes }
+      state = { ...state, terminals, sessions, panes, moved }
       await save()
     },
 

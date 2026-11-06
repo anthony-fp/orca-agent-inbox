@@ -275,6 +275,15 @@ function codexValues(command: string): Map<string, string> {
 }
 
 describe('tagLaunch: Codex', () => {
+  test('fixed script paths keep every Codex hook flag independent of the install folder', () => {
+    const bin = '/tmp/orca-agent-inbox-501/bin'
+    const fixed = { ...TOOLS, mcpServer: join(bin, 'mcp-server.mjs'), promptHook: join(bin, 'prompt-hook.mjs') }
+    const command = tagLaunch('codex', 'codex', fixedId, fixed).command
+    assert.match(command, /orca-agent-inbox-501\/bin/)
+    assert.ok(!command.includes('/plugins/agent inbox'))
+    assert.deepEqual(JSON.parse(codexValues(command).get('notify')!), ['node', join(bin, 'codex-notify.mjs'), TOOLS.socketPath])
+  })
+
   test('plain codex gets the seven TOML config values', () => {
     const r = withTools('codex', 'codex')
     assert.deepEqual(r.session, { kind: 'codex' })

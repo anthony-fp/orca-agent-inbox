@@ -2,7 +2,7 @@
 // against fake sockets (plan T10).
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -18,7 +18,7 @@ import { ORCA, inboxText } from './core/model-text'
 import { planNote } from './core/plan'
 import { agentTools, recordItem } from './core/tools'
 import type { ModelResult } from './model'
-import { activeTurn, binPaths, createAnswerer, listen, socketPath, type Answer } from './socket'
+import { activeTurn, binPaths, createAnswerer, listen, socketPath, stableBinPaths, type Answer } from './socket'
 import { STATE_KEY, type State } from './state'
 import { fakeClock } from './test-clock'
 import { createTracker } from './turns'
@@ -93,6 +93,15 @@ function text(a: Answer): string {
 }
 
 describe('tool calls on the session ledger', () => {
+  test('a launch-id record follows the saved Claude alias', async () => {
+    const t = setup(memoryStorage({ version: 3, terminals: { [T]: { sessionId: 'session-2' } },
+      sessions: { [S]: {}, 'session-2': {} }, panes: {}, paneLaunches: {}, moved: { [S]: 'session-2' } }))
+    await t.tracker.start()
+    assert.match(await t.call('record', QUESTION), /^Recorded\./)
+    assert.equal(t.storage.saved().sessions['session-2'].ledger.items[0].ask, QUESTION.ask)
+    assert.equal(t.storage.saved().sessions[S].ledger.items.length, 0)
+  })
+
   test('record answers as recordItem does, word for word, and saves the item', async () => {
     const t = setup()
     await t.tracker.track(T, S)
@@ -345,6 +354,25 @@ describe('the socket', () => {
     assert.ok(existsSync(bins.mcpServer) && existsSync(bins.promptHook))
   })
 
+  test('stable scripts include imports and a second start replaces their contents', async () => {
+    const root = tempDir()
+    const source = join(root, 'source')
+    mkdirSync(source)
+    const names = ['ask.mjs', 'tools.json', 'codex-notify.mjs', 'mcp-server.mjs', 'prompt-hook.mjs']
+    for (const name of names) writeFileSync(join(source, name), `old ${name}`)
+    const path = join(root, 'socket', 'worker.sock')
+    const first = await stableBinPaths(path, source)
+    assert.equal(first.mcpServer, join(root, 'socket', 'bin', 'mcp-server.mjs'))
+    assert.equal(first.promptHook, join(root, 'socket', 'bin', 'prompt-hook.mjs'))
+    assert.equal(statSync(join(root, 'socket', 'bin')).mode & 0o777, 0o700)
+    for (const name of names) {
+      assert.equal(readFileSync(join(root, 'socket', 'bin', name), 'utf8'), `old ${name}`)
+      writeFileSync(join(source, name), `new ${name}`)
+    }
+    await stableBinPaths(path, source)
+    for (const name of names) assert.equal(readFileSync(join(root, 'socket', 'bin', name), 'utf8'), `new ${name}`)
+  })
+
   test('a round trip over the socket, which is 0600 in a 0700 folder, and a stale file is replaced', async () => {
     const t = setup()
     await t.tracker.track(T, S)
@@ -595,12 +623,22 @@ describe('bin/prompt-hook.mjs', () => {
     }
   })
 
-  test('another session (after /clear), a missing socket or an error answer: prints nothing and exits 0', async () => {
+  test('a switched Claude session sends its id and transcript to the worker', async () => {
+    const sock = await fakeSocket(() => ({ text: '' }))
+    try {
+      await run('prompt-hook.mjs', ['--socket', sock.path, '--session', S], hookInput({ session_id: 'session-2', transcript_path: '/claude/session-2.jsonl' })).exited
+      assert.deepEqual(sock.requests, [
+        { type: 'prompt-start', sessionId: 'session-2', launchSession: S, transcript: '/claude/session-2.jsonl', cwd: '/work/app' },
+        { type: 'inbox-text', sessionId: 'session-2', prompt: 'carry on', cwd: '/work/app' },
+      ])
+    } finally {
+      await sock.close()
+    }
+  })
+
+  test('a missing socket or an error answer: prints nothing and exits 0', async () => {
     const sock = await fakeSocket(() => ({ error: 'unknown session' }))
     try {
-      const other = await run('prompt-hook.mjs', ['--socket', sock.path, '--session', S], hookInput({ session_id: 'session-2' })).exited
-      assert.deepEqual(other, { code: 0, out: '' })
-      assert.deepEqual(sock.requests, [])
       const failed = await run('prompt-hook.mjs', ['--socket', sock.path, '--session', S], hookInput()).exited
       assert.deepEqual(failed, { code: 0, out: '' })
       const missing = await run('prompt-hook.mjs', ['--socket', '/nonexistent/w.sock', '--session', S], hookInput()).exited

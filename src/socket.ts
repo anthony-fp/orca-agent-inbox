@@ -5,7 +5,7 @@
 // same ordered saves as the model runs, and is stamped with the session's active turn.
 import { randomBytes } from 'node:crypto'
 import { lstatSync, unlinkSync } from 'node:fs'
-import { chmod, lstat, mkdir, rename } from 'node:fs/promises'
+import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { createServer, type Server } from 'node:net'
 import { tmpdir, userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -35,8 +35,32 @@ export function binPaths(): { mcpServer: string; promptHook: string } {
   return { mcpServer: join(root, 'bin', 'mcp-server.mjs'), promptHook: join(root, 'bin', 'prompt-hook.mjs') }
 }
 
+/** Keep launch scripts at a path that survives replacement of the installed plugin. */
+export async function stableBinPaths(path: string, source = dirname(binPaths().mcpServer)): Promise<ReturnType<typeof binPaths>> {
+  const dir = dirname(path)
+  const bin = join(dir, 'bin')
+  for (const folder of [dir, bin]) {
+    await mkdir(folder, { recursive: true, mode: 0o700 })
+    const info = await lstat(folder)
+    if (!info.isDirectory() || (process.getuid && info.uid !== process.getuid())) throw new Error(`${folder} is not a folder this user owns`)
+    await chmod(folder, 0o700)
+  }
+  for (const name of ['ask.mjs', 'tools.json', 'codex-notify.mjs', 'mcp-server.mjs', 'prompt-hook.mjs']) {
+    const target = join(bin, name)
+    const temp = join(bin, `${name}.${randomBytes(6).toString('hex')}.tmp`)
+    try {
+      await writeFile(temp, await readFile(join(source, name)), { mode: 0o600 })
+      await rename(temp, target)
+    } catch (e) {
+      await unlink(temp).catch(() => undefined)
+      throw e
+    }
+  }
+  return { mcpServer: join(bin, 'mcp-server.mjs'), promptHook: join(bin, 'prompt-hook.mjs') }
+}
+
 export type Request =
-  | { type: 'prompt-start'; sessionId: string; cwd?: string; terminalId?: string }
+  | { type: 'prompt-start'; sessionId: string; cwd?: string; terminalId?: string; launchSession?: string; transcript?: string }
   | { type: 'inbox-text'; sessionId: string; prompt?: string; cwd?: string }
   | { type: 'record' | 'close'; sessionId: string; args: Record<string, unknown> }
   | { type: 'codex-turn'; payload: { paneKey: string; codexHome: string; threadId: string; turnId: string; type: string } }
@@ -52,6 +76,8 @@ export type AnswerDeps = {
   planNote(sessionId: string): Promise<string | null>
   /** Maps the prompt hook's terminal to a session that has none yet. */
   bind?(terminalId: string, sessionId: string, paneKey?: string): Promise<void>
+  /** Follows a Claude conversation switch inside a tracked terminal. */
+  bindClaude?(launchSession: string, sessionId: string, transcript?: string, cwd?: string, terminalId?: string): Promise<void>
   /** Saves a main Codex pane before its prompt or tool call receives an answer. */
   bindCodex?(paneKey: string, threadId: string, codexHome: string, source: 'prompt' | 'tool' | 'notify', turnId?: string): Promise<void>
   /** The notify id is saved after main-thread verification, before the socket replies. */
@@ -102,8 +128,19 @@ export function createAnswerer(deps: AnswerDeps): (request: unknown) => Promise<
     }
     const current = deps.state()
     const savedThread = paneKey && current.version !== 1 ? current.panes[paneKey]?.threadId : undefined
-    const sessionId = typeof request.sessionId === 'string' ? request.sessionId : savedThread
-    if (!sessionId) return { error: 'bad request' }
+    const requestedId = typeof request.sessionId === 'string' ? request.sessionId : savedThread
+    if (!requestedId) return { error: 'bad request' }
+    if (!paneKey && request.type === 'prompt-start' &&
+        ((typeof request.launchSession === 'string' && request.launchSession !== requestedId) || (current.version === 3 && current.moved?.[requestedId])))
+      await deps.bindClaude?.(
+        typeof request.launchSession === 'string' ? request.launchSession : requestedId,
+        requestedId,
+        typeof request.transcript === 'string' ? request.transcript : undefined,
+        typeof request.cwd === 'string' ? request.cwd : undefined,
+        typeof request.terminalId === 'string' ? request.terminalId : undefined,
+      )
+    const latest = deps.state()
+    const sessionId = !paneKey && request.type !== 'prompt-start' && latest.version === 3 ? latest.moved?.[requestedId] ?? requestedId : requestedId
     if (paneKey && typeof request.sessionId === 'string')
       await deps.bindCodex?.(paneKey, sessionId, codexHome, request.type === 'prompt-start' ? 'prompt' : 'tool', typeof request.codexTurnId === 'string' ? request.codexTurnId : undefined)
     const s0 = deps.state().sessions[sessionId]

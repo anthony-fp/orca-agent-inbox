@@ -55,8 +55,8 @@ export type SessionState = {
 
 /**
  * A press's result on its row. sending: typed into the terminal, no prompt seen yet. answered: the prompt showed in
- * the transcript. held: the agent was not waiting, so nothing was sent. undelivered: the send's result is not certain.
- * The plugin never sends a held or undelivered answer again by itself.
+ * the transcript. held: a saved label from an earlier version, or a failed session/trust check; nothing was sent.
+ * undelivered: the send's result is not certain. The plugin never sends either answer again by itself.
  */
 export type PressLabel = {
   state: 'sending' | 'answered' | 'held' | 'undelivered'
@@ -90,6 +90,8 @@ export type State = (StateBody & { version: 1 }) | (StateBody & { version: 2; pa
 export type CurrentState = StateBody & {
   version: 3
   panes: Record<string, CodexPane>
+  /** A Claude launch id points to the conversation currently bound to its terminal. */
+  moved?: Record<string, string>
   /** Last launch in each Codex pane, kept even while its thread binding is cleared. */
   paneLaunches: Record<string, number>
   /** Notify-only threads awaiting a rollout check before they may bind a pane. */
@@ -190,6 +192,9 @@ export function upgradeState(raw: unknown, now = 0): CurrentState {
   const paneLaunches: CurrentState['paneLaunches'] = {}
   for (const [key, at] of Object.entries(isObject(raw.paneLaunches) ? raw.paneLaunches : {}))
     if (typeof at === 'number' && Number.isFinite(at)) paneLaunches[key] = at
+  const moved: Record<string, string> = {}
+  for (const [id, target] of Object.entries(isObject(raw.moved) ? raw.moved : {}))
+    if (typeof target === 'string' && target !== id && sessions[id]?.agent === 'claude' && sessions[target]?.agent === 'claude') moved[id] = target
   const pendingCodex: NonNullable<CurrentState['pendingCodex']> = {}
   for (const [key, entries] of Object.entries(isObject(raw.pendingCodex) ? raw.pendingCodex : {})) {
     if (!Array.isArray(entries)) continue
@@ -198,5 +203,9 @@ export function upgradeState(raw: unknown, now = 0): CurrentState {
       .map(entry => ({ threadId: entry.threadId, codexHome: entry.codexHome, turnId: entry.turnId }))
     if (kept.length > 0) pendingCodex[key] = kept
   }
-  return Object.keys(pendingCodex).length > 0 ? { version: 3, terminals, sessions, panes, paneLaunches, pendingCodex } : { version: 3, terminals, sessions, panes, paneLaunches }
+  return {
+    version: 3, terminals, sessions, panes, paneLaunches,
+    ...(Object.keys(moved).length > 0 ? { moved } : {}),
+    ...(Object.keys(pendingCodex).length > 0 ? { pendingCodex } : {}),
+  }
 }

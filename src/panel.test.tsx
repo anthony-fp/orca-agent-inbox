@@ -427,6 +427,12 @@ test('an untracked Codex agent has its title and the untracked note', async () =
   await clean(view)
 })
 
+test('a Codex pane awaiting its first prompt explains how to start tracking', async () => {
+  const view = await open({ ...CODEX_ONLY, others: [{ key: 'codex-pane', title: 'Codex', agent: 'codex', reason: 'launch-unmatched' }] })
+  assert.ok(view.find({ text: 'Send a prompt in this Codex pane to start tracking it.' }))
+  await clean(view)
+})
+
 test('a tracked Codex agent uses the same rows and buttons as Claude', async () => {
   const codex = { ...ONE_AGENT, sections: ONE_AGENT.sections.map(s => ({ ...s, agent: 'codex' as const, title: 'Codex' })) }
   const view = await open(codex)

@@ -367,6 +367,7 @@ describe('upgradeState', () => {
     } })
     assert.deepEqual(current.panes, { good: { agent: 'codex', threadId: 'thread-1', codexHome: '/codex', promptHookSeen: true } })
     assert.deepEqual(current.paneLaunches, {})
+    assert.equal(old.moved, undefined, 'state saved before Claude aliases still loads')
   })
 
   test('a version 2 Codex binding survives upgrade with an empty launch history', () => {

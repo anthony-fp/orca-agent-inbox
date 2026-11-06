@@ -104,12 +104,12 @@ describe('presses', () => {
   })
 
   for (const state of ['working', 'blocked', 'waiting', 'done'] as const) {
-    test(`Codex main agent ${state}: ${state === 'done' ? 'sends' : 'holds'} the option`, async () => {
+    test(`Codex main agent ${state}: sends the option`, async () => {
       const t = await setup({ codex: true })
       t.status.set(T, state)
       const out = await t.presses.press(t.input())
-      assert.equal(out.ok && out.label?.text, state === 'done' ? 'Sending…' : 'Waits for the agent')
-      assert.equal(t.sent.length, state === 'done' ? 1 : 0)
+      assert.equal(out.ok && out.label?.text, 'Sending…')
+      assert.equal(t.sent.length, 1)
     })
   }
 
@@ -125,24 +125,23 @@ describe('presses', () => {
   })
 
   for (const state of ['working', 'blocked', 'waiting'] as const) {
-    test(`${state}: holds the answer, reads "Waits for the agent" with Copy, sends nothing`, async () => {
+    test(`${state}: sends the answer immediately`, async () => {
       const t = await setup()
       t.status.set(T, state)
       const out = await t.presses.press(t.input())
-      assert.deepEqual(out, { ok: true, label: { text: 'Waits for the agent', tone: 'muted', copy: `Re "${ASK}": Yes` } })
-      assert.deepEqual(t.sent, [])
+      assert.deepEqual(out, { ok: true, label: { text: 'Sending…', tone: 'muted', copy: null } })
+      assert.deepEqual(t.sent, [{ terminalId: T, text: `Re "${ASK}": Yes` }])
       await t.time.run(t.time.now() + CONFIRM_MS * 2)
-      assert.deepEqual(t.sent, [], 'a held answer is never sent by itself')
-      assert.equal(t.label()?.text, 'Waits for the agent')
+      assert.equal(t.label()?.text, 'Sending…', 'the confirmation timer waits while the agent works')
     })
   }
 
-  test('a status change to working between the press and the send holds the answer', async () => {
+  test('a status change to working between the press and the send still sends the answer', async () => {
     const t = await setup()
     t.beforeSend(() => t.status.set(T, 'working'))
     const out = await t.presses.press(t.input())
-    assert.equal(out.ok && out.label?.text, 'Waits for the agent')
-    assert.deepEqual(t.sent, [])
+    assert.equal(out.ok && out.label?.text, 'Sending…')
+    assert.equal(t.sent.length, 1)
   })
 
   test('a new session in the terminal between the press and the send holds the answer', async () => {
@@ -153,13 +152,72 @@ describe('presses', () => {
     assert.deepEqual(t.sent, [])
   })
 
-  test('a turn that ends between the draw and the press holds the answer', async () => {
+  test('a turn that ends between the draw and the press still sends the answer', async () => {
     const t = await setup()
     const drawn = drawnToken(t.s())
     await t.tracker.edit(S, s => ({ ...s, lastTurnId: 'p-9' }))
     const out = await t.presses.press(t.input({ drawn }))
-    assert.equal(out.ok && out.label?.text, 'Waits for the agent')
-    assert.deepEqual(t.sent, [])
+    assert.equal(out.ok && out.label?.text, 'Sending…')
+    assert.equal(t.sent.length, 1)
+  })
+
+  test('a queued answer confirms when its prompt appears after a long working turn', async () => {
+    const t = await setup()
+    t.status.set(T, 'working')
+    await t.presses.press(t.input())
+    await t.time.run(t.time.now() + CONFIRM_MS * 2)
+    assert.equal(t.label()?.text, 'Sending…')
+    t.file.text += prompt('p-2', `Re "${ASK}": Yes`)
+    await t.time.run(t.time.now() + 2000)
+    assert.equal(t.label()?.text, '✓ Yes')
+  })
+
+  test('a working press is not undelivered before done, even if another prompt appears', async () => {
+    const t = await setup()
+    t.status.set(T, 'working')
+    await t.presses.press(t.input())
+    t.file.text += prompt('p-2', 'Something else')
+    await t.time.run(t.time.now() + CONFIRM_MS * 2)
+    assert.equal(t.label()?.text, 'Sending…')
+    t.status.set(T, 'done')
+    await t.time.run(t.time.now() + 2000)
+    assert.equal(t.label()?.text, 'Not delivered')
+  })
+
+  test('a queued answer confirms after an unrelated prompt while working', async () => {
+    const t = await setup()
+    t.status.set(T, 'working')
+    await t.presses.press(t.input())
+    t.file.text += prompt('p-2', 'Something else')
+    await t.time.run(t.time.now() + 2000)
+    assert.equal(t.label()?.text, 'Sending…')
+    t.file.text += prompt('p-3', `Re "${ASK}": Yes`)
+    await t.time.run(t.time.now() + 2000)
+    assert.equal(t.label()?.text, '✓ Yes')
+    assert.equal(t.s().presses[t.item.id].turnId, 'p-3')
+  })
+
+  test('a working press starts its delivery deadline after done', async () => {
+    const t = await setup()
+    t.status.set(T, 'working')
+    await t.presses.press(t.input())
+    await t.time.run(t.time.now() + CONFIRM_MS * 2)
+    t.status.set(T, 'done')
+    await t.time.run(t.time.now() + 2000)
+    assert.equal(t.label()?.text, 'Sending…')
+    await t.time.run(t.time.now() + CONFIRM_MS)
+    assert.equal(t.label()?.text, 'Not delivered')
+  })
+
+  test('a saved held label leaves the normal press buttons available', async () => {
+    const t = await setup()
+    await t.tracker.edit(S, s => ({ ...s, presses: { ...s.presses, [t.item.id]: {
+      state: 'held', kind: 'answer', answer: 'Yes', text: `Re "${ASK}": Yes`, at: 1,
+    } } }))
+    assert.equal(t.label(), null)
+    assert.equal(upgradeState(t.saved.get('state')).sessions[S].presses[t.item.id].state, 'held')
+    assert.equal((await t.presses.press(t.input())).ok, true)
+    assert.equal(t.sent.length, 1)
   })
 
   test('no new prompt within 10 s reads "Not delivered" in red with Copy, and is never sent again', async () => {
@@ -350,10 +408,10 @@ describe('presses', () => {
     assert.ok(t.s().ledger.findings.some(f => f.id === ISSUE.id), 'the ledger keeps it open for the agent and the inbox model')
   })
 
-  // As in the inbox, a Fix that went out closes its question even when its delivery then fails; a held one sent nothing.
-  test('a held or undelivered Fix stays in the open list, and only the undelivered one closed its question; File issue closes nothing', async () => {
+  // A Fix that went out closes its question even when delivery then fails.
+  test('sent and undelivered Fixes close their question; File issue closes nothing', async () => {
     const cases = [
-      { status: 'working', accepted: true, action: 'fix', open: ['i1'] },
+      { status: 'working', accepted: true, action: 'fix', open: [] },
       { status: 'done', accepted: false, action: 'fix', open: [] },
       { status: 'done', accepted: true, action: 'issue', open: ['i1'] },
     ] as const
@@ -364,20 +422,20 @@ describe('presses', () => {
       t.file.text += prompt('p-2', findingText(ISSUE, c.action === 'fix' ? 'address' : 'issue'))
       await t.time.run(t.time.now() + 2000)
       assert.deepEqual(t.s().ledger.items.map(i => i.id), c.open)
-      assert.deepEqual(labelledRows(t.s()).findings.issues.map(r => r.id), [ISSUE.id])
+      assert.deepEqual(labelledRows(t.s()).findings.issues.map(r => r.id), c.action === 'fix' && c.accepted ? [] : [ISSUE.id])
     }
   })
 
-  test('a held Fix reads "Waits for the agent" with Copy; Dismiss closes the finding in state only; Done is refused', async () => {
+  test('a working Fix sends immediately; Dismiss closes the finding in state only; Done is refused', async () => {
     const t = await setup({ findings: [ISSUE] })
     t.status.set(T, 'working')
     const out = await t.presses.press(t.input({ id: ISSUE.id, action: 'fix' }))
-    assert.deepEqual(out, { ok: true, label: { text: 'Waits for the agent', tone: 'muted', copy: findingText(ISSUE, 'address') } })
+    assert.deepEqual(out, { ok: true, label: { text: 'Sending…', tone: 'muted', copy: null } })
     assert.deepEqual(await t.presses.press(t.input({ id: ISSUE.id, action: 'done' })), { ok: false, refused: 'invalid' })
     assert.deepEqual(await t.presses.press(t.input({ id: ISSUE.id, action: 'dismiss' })), { ok: true, label: null })
     assert.deepEqual(t.s().ledger.findings, [])
     assert.deepEqual([t.s().ledger.closedFindings[0].how, t.s().ledger.closedFindings[0].outcome], ['dismissed', 'dismissed'])
-    assert.deepEqual(t.sent, [])
+    assert.equal(t.sent.length, 1)
     assert.deepEqual(await t.presses.press(t.input({ id: ISSUE.id, action: 'fix' })), { ok: false, refused: 'closed' })
   })
 })

@@ -36,9 +36,11 @@ async function main() {
   // Claude passes --session. Codex passes its thread id on stdin and the pane key in the environment.
   const codex = session === ''
   if (codex && (typeof input.session_id !== 'string' || !input.session_id || Object.hasOwn(input, 'agent_id') || !process.env.ORCA_PANE_KEY)) return
-  // After Claude /clear the terminal runs a new session the plugin does not track.
-  if (!codex && typeof input.session_id === 'string' && input.session_id !== session) return
-  const id = codex ? input.session_id : session
+  const id = codex ? input.session_id : typeof input.session_id === 'string' ? input.session_id : session
+  const moved = !codex && id !== session ? {
+    launchSession: session,
+    ...(typeof input.transcript_path === 'string' ? { transcript: input.transcript_path } : {}),
+  } : {}
   const identity = codex ? {
     paneKey: process.env.ORCA_PANE_KEY,
     codexHome: process.env.CODEX_HOME || '',
@@ -50,7 +52,7 @@ async function main() {
   // Orca gave no terminal id with it.
   const handle = process.env.ORCA_TERMINAL_HANDLE
   const terminal = typeof handle === 'string' && handle !== '' ? { terminalId: handle } : {}
-  const started = await ask(socket, { type: 'prompt-start', sessionId: id, ...cwd, ...terminal, ...identity }, left())
+  const started = await ask(socket, { type: 'prompt-start', sessionId: id, ...cwd, ...terminal, ...identity, ...moved }, left())
   if (typeof started?.text !== 'string') return
   const prompt = typeof input.prompt === 'string' ? input.prompt : ''
   const answer = await ask(socket, { type: 'inbox-text', sessionId: id, prompt, ...cwd, ...identity }, left())

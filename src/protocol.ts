@@ -12,7 +12,7 @@ export type InboxSection = {
   agent?: 'codex'
   /** A Codex launch has not yet delivered a trusted prompt hook. */
   trustHook?: boolean
-  /** Pass back with each press: the press is held when a turn ended since. */
+  /** The row's token when drawn, passed back with each press. */
   drawn: string
   /** The last launch, `done` or press, in ms. Sections come newest first. */
   lastActivity: number

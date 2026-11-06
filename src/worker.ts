@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process'
 import { readFile, readdir } from 'node:fs/promises'
 import type { Server } from 'node:net'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import type { OrcaWorkerApi } from 'orca/worker'
 
@@ -15,7 +15,7 @@ import { tagLaunch, tokenize } from './launch'
 import { runInboxModel } from './model'
 import { createPresses, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
 import type { CopyOutcome, InboxSection, InboxView, OtherAgent } from './protocol'
-import { binPaths, createAnswerer, listen, socketPath } from './socket'
+import { binPaths, createAnswerer, listen, socketPath, stableBinPaths } from './socket'
 import { emptySession } from './state'
 import { cwdOf, promptsBefore, wholeLinesEnd } from './transcript'
 import { createTracker, type Clock, type TrackerDeps } from './turns'
@@ -105,6 +105,10 @@ function untaggedReason(agent: string, command: string): string {
 
 export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): Promise<void> } {
   const log = (m: string) => orca.log(m)
+  const launchTools = deps.tools
+    ? stableBinPaths(deps.tools.socketPath, dirname(deps.tools.mcpServer)).then(paths => ({ ...deps.tools!, ...paths }))
+      .catch(e => { log(`scripts: could not copy: ${message(e)}`); return deps.tools })
+    : Promise.resolve(null)
   const codexLaunches = new Map<string, { kind: 'tracked' | 'skipped'; at: number }>()
   let codexLaunchWithoutTerminal = false
 
@@ -126,7 +130,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
     if (event.agent === 'codex' && !terminalId) codexLaunchWithoutTerminal = true
     let tagged: ReturnType<typeof tagLaunch>
     try {
-      tagged = tagLaunch(event.agent, event.command, undefined, deps.tools ?? undefined)
+      tagged = tagLaunch(event.agent, event.command, undefined, (await launchTools) ?? undefined)
     } catch (e) {
       await waitForClear()
       return line('no', false, `error:${message(e)}`)
@@ -389,6 +393,35 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
     return run
   }
 
+  const claudeBindings = new Map<string, Promise<void>>()
+  function bindClaude(launchSession: string, sessionId: string, transcript?: string, cwd?: string, terminalId?: string): Promise<void> {
+    const state = tracker.state()
+    const bound = state.moved?.[launchSession] ?? launchSession
+    const key = Object.entries(state.terminals).find(([, t]) => t.sessionId === bound)?.[0] ?? terminalId ?? launchSession
+    const prior = claudeBindings.get(key) ?? Promise.resolve()
+    const run = prior.catch(() => undefined).then(async () => {
+      const state = tracker.state()
+      const launch = state.sessions[launchSession]
+      if (!launch || launch.agent !== 'claude') return
+      const bound = state.moved?.[launchSession] ?? launchSession
+      const terminal = Object.entries(state.terminals).find(([, t]) => t.sessionId === bound)?.[0] ??
+        (terminalId && /^term_[A-Za-z0-9-]{1,128}$/.test(terminalId) ? terminalId : null)
+      if (!terminal) return
+      const known = state.sessions[sessionId]
+      const bytes = !known && transcript ? await deps.readFile(transcript) : null
+      const found = !known && !bytes ? await find(sessionId) : null
+      const contents = bytes ?? found?.bytes ?? null
+      const offset = contents ? wholeLinesEnd(contents) : 0
+      const turn = contents ? promptsBefore(contents, offset) : 0
+      await tracker.track(terminal, sessionId, known ? {} : { offset, turn, tools: launch.tools })
+      if (!known) await learn(sessionId, { transcript: bytes ? transcript : found?.path ?? transcript, cwd: cwd ?? (contents ? cwdOf(contents) : null) })
+      await tracker.move(launchSession, sessionId)
+    })
+    claudeBindings.set(key, run)
+    void run.finally(() => { if (claudeBindings.get(key) === run) claudeBindings.delete(key) }).catch(() => undefined)
+    return run
+  }
+
   const answer = createAnswerer({
     state: () => tracker.state(),
     edit: (id, change) => tracker.edit(id, change),
@@ -403,6 +436,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
       orca.panels.post('inbox.changed', {})
     },
     bindCodex,
+    bindClaude,
     notifyCodex: async (paneKey, threadId, turnId) => {
       await tracker.codexNotify(threadId, turnId)
     },

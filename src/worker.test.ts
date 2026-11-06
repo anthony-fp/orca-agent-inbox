@@ -12,7 +12,7 @@ import { createWorker, liveTools } from './worker'
 import { ask } from '../bin/ask.mjs'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { binPaths } from './socket'
 
 const HOME = '/home/someone'
@@ -403,6 +403,71 @@ test('a --resume <uuid> session starts at the transcript end, not at 0', async (
   await t.worker.deactivate()
 })
 
+test('a Claude /resume follows the new transcript without reading old turns and routes launch-id tools there', async () => {
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  const next = 'bbbbbbbb-1111-4222-8333-444444444444'
+  const file = `${PROJECTS}/-work-my-app-v2/${next}.jsonl`
+  const old = prompt('p-old', 'Old prompt') + reply('a-old', 'Old reply')
+  const t = await setup({ socket, files: { [file]: old } })
+  try {
+    await t.worker.hooks.fire('agent.launch.before', launch(`claude --resume ${S}`))
+    assert.deepEqual(await ask(socket, { type: 'prompt-start', sessionId: next, launchSession: S, transcript: file, cwd: WS.path }, 2000), { text: '' })
+    assert.equal(t.saved().terminals['term-1'].sessionId, next)
+    assert.equal(t.saved().sessions[next].offset, Buffer.byteLength(old))
+    assert.equal(t.saved().sessions[next].ledger.turn, 1)
+    await t.worker.emit('agent.status.changed', status('done'))
+    await t.time.run()
+    assert.equal(t.models.length, 0)
+    assert.match(JSON.stringify(await ask(socket, { type: 'record', sessionId: S, args: { kind: 'question', ask: 'New conversation?', options: ['Yes', 'No'] } }, 2000)), /Recorded/)
+    assert.equal(t.saved().sessions[next].ledger.items[0].ask, 'New conversation?')
+    assert.equal(t.saved().sessions[S].ledger.items.length, 0)
+    t.files.set(file, old + prompt('p-new', 'New prompt') + reply('a-new', 'New reply'))
+    await t.worker.emit('agent.status.changed', status('done'))
+    await t.time.run()
+    assert.equal(t.models.length, 1)
+  } finally {
+    await t.close()
+    await t.worker.deactivate()
+  }
+})
+
+test('Claude /clear starts at zero, aliases chain, and switching back preserves a known offset', async () => {
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  const b = 'bbbbbbbb-1111-4222-8333-444444444444'
+  const c = 'cccccccc-1111-4222-8333-444444444444'
+  const bFile = `${PROJECTS}/-work-my-app-v2/${b}.jsonl`
+  const cFile = `${PROJECTS}/-work-my-app-v2/${c}.jsonl`
+  const t = await setup({ socket })
+  try {
+    await t.worker.hooks.fire('agent.launch.before', launch(`claude --resume ${S}`))
+    await ask(socket, { type: 'prompt-start', sessionId: b, launchSession: S, transcript: bFile }, 2000)
+    assert.equal(t.saved().sessions[b].offset, 0)
+    assert.equal(t.saved().sessions[b].transcript, bFile)
+    assert.equal(t.saved().terminals['term-1'].sessionId, b)
+    t.files.set(bFile, prompt('p-b', 'B prompt') + reply('a-b', 'B reply'))
+    await t.worker.emit('agent.status.changed', status('done'))
+    await t.time.run()
+    const savedOffset = t.saved().sessions[b].offset
+    assert.ok(savedOffset > 0)
+    await ask(socket, { type: 'prompt-start', sessionId: c, launchSession: S, transcript: cFile }, 2000)
+    assert.equal(t.saved().moved?.[S], c)
+    await ask(socket, { type: 'record', sessionId: S, args: { kind: 'question', ask: 'Third conversation?', options: ['Yes', 'No'] } }, 2000)
+    assert.equal(t.saved().sessions[c].ledger.items[0].ask, 'Third conversation?')
+    assert.deepEqual(t.saved().sessions[b].ledger.items.map(item => item.ask), ['Rename the folder to tools?'],
+      'b keeps the question produced by the fake inbox model for its reply turn')
+    await ask(socket, { type: 'prompt-start', sessionId: b, launchSession: S }, 2000)
+    assert.equal(t.saved().terminals['term-1'].sessionId, b)
+    assert.equal(t.saved().sessions[b].offset, savedOffset, 'a known session keeps its saved offset')
+    assert.equal(t.saved().moved?.[S], b)
+    await ask(socket, { type: 'prompt-start', sessionId: S }, 2000)
+    assert.equal(t.saved().terminals['term-1'].sessionId, S)
+    assert.equal(t.saved().moved?.[S], undefined)
+  } finally {
+    await t.close()
+    await t.worker.deactivate()
+  }
+})
+
 test('status changes tell the panel to reload, at most once per 250 ms', async () => {
   const t = await setup()
   const posts = () => t.worker.posts.filter(p => p.event === 'inbox.changed').length
@@ -667,7 +732,7 @@ test('inbox.view: a tracked Codex thread has Claude-shaped rows and clears hook-
 })
 
 for (const main of ['working', 'blocked', 'waiting', 'done'] as const) {
-  test(`Codex mainAgent ${main} controls the press send despite combined done`, async () => {
+  test(`Codex mainAgent ${main} allows the press send despite combined done`, async () => {
     const ledger = openLedger()
     const session = { ...emptySession(100 * DAY), agent: 'codex' as const, codexHome: '/codex', ledger }
     const state: State = { version: 2, terminals: { 'term-1': { sessionId: S, paneKey: 'pane-1' } },
@@ -676,8 +741,8 @@ for (const main of ['working', 'blocked', 'waiting', 'done'] as const) {
     await t.worker.emit('agent.status.changed', status('done', { mainAgent: { state: main, stateStartedAt: 1 } }))
     const out = await t.worker.request('inbox.press', { terminalId: 'term-1', sessionId: S, drawn: drawnToken(session),
       id: ledger.items[0].id, action: 'answer', answer: 'Yes' })
-    assert.equal(out.ok && out.label?.text, main === 'done' ? 'Sending…' : 'Waits for the agent')
-    assert.equal(t.host.callsOf('terminal.sendText').length, main === 'done' ? 1 : 0)
+    assert.equal(out.ok && out.label?.text, 'Sending…')
+    assert.equal(t.host.callsOf('terminal.sendText').length, 1)
     await t.worker.deactivate()
   })
 }
@@ -721,17 +786,18 @@ test('repro: a launch workspaceId that workspace.list does not give still finds 
 })
 
 /** The worker over a mock host whose log lines are kept, and whose storage load can be held forever. */
-async function logged(opts: { hang?: boolean } = {}) {
+async function logged(opts: { hang?: boolean; tools?: { socketPath: string; mcpServer: string; promptHook: string } } = {}) {
   const time = fakeClock(100 * DAY)
   const logs: string[] = []
   const host = mockHost({ storage: {}, results: { 'agents.list': { agents: [] } } })
-  const deps = { clock: time.clock, home: HOME, tools: null, copy: async () => {}, model: async (): Promise<ModelResult> => ({ ok: false, reason: 'failed', detail: '', ms: 1 }), listDirs: async () => [], readFile: async () => null }
+  const deps = { clock: time.clock, home: HOME, tools: opts.tools ?? null, copy: async () => {}, model: async (): Promise<ModelResult> => ({ ok: false, reason: 'failed', detail: '', ms: 1 }), listDirs: async () => [], readFile: async () => null }
   const hung = { get: () => new Promise<never>(() => {}), set: async () => {}, delete: async () => {} }
   const wrap = (orca: Parameters<typeof createWorker>[0]) =>
     ({ ...orca, log: (m: string) => void logs.push(m), ...(opts.hang ? { storage: hung } : {}) }) as typeof orca
-  const worker = await mountWorker({ default: (orca: Parameters<typeof createWorker>[0]) => createWorker(wrap(orca), deps) }, { host })
+  let made: ReturnType<typeof createWorker> | null = null
+  const worker = await mountWorker({ default: (orca: Parameters<typeof createWorker>[0]) => (made = createWorker(wrap(orca), deps)) }, { host })
   await time.run()
-  return { worker, time, logs, launches: () => logs.filter(l => l.startsWith('launch: ')) }
+  return { worker, time, logs, launches: () => logs.filter(l => l.startsWith('launch: ')), close: async () => { await made?.close() } }
 }
 
 test('each launch logs one line with its tag and why it was not tagged, never the command', async () => {
@@ -748,6 +814,34 @@ test('each launch logs one line with its tag and why it was not tagged, never th
     'launch: agent=claude terminal=yes workspaceKind=none tagged=no tools=no reason=continue',
   ])
   assert.ok(t.logs.every(l => !l.includes('secret')))
+  await t.worker.deactivate()
+})
+
+test('Claude and Codex launches use copied scripts beside the socket', async () => {
+  const socket = join(mkdtempSync(join(tmpdir(), 'inbox-scripts-')), 'worker.sock')
+  const t = await logged({ tools: { socketPath: socket, ...binPaths() } })
+  const claude = await t.worker.hooks.fire('agent.launch.before', launch('claude', { terminalId: undefined }))
+  const codex = await t.worker.hooks.fire('agent.launch.before', launch('codex', { agent: 'codex', terminalId: undefined }))
+  const claudeCommand = String(claude.event.command)
+  const codexCommand = String(codex.event.command)
+  for (const command of [claudeCommand, codexCommand]) {
+    assert.ok(command.includes(join(socket, '..', 'bin', 'mcp-server.mjs')))
+    assert.ok(command.includes(join(socket, '..', 'bin', 'prompt-hook.mjs')))
+    assert.ok(!command.includes(dirname(binPaths().mcpServer)))
+  }
+  assert.ok(codexCommand.includes(join(socket, '..', 'bin', 'codex-notify.mjs')))
+  await t.close()
+  await t.worker.deactivate()
+})
+
+test('script copy failure logs and uses install paths for the launch', async () => {
+  const socket = join(mkdtempSync(join(tmpdir(), 'inbox-scripts-')), 'worker.sock')
+  const install = join(socket, '..', 'missing-bin')
+  const t = await logged({ tools: { socketPath: socket, mcpServer: join(install, 'mcp-server.mjs'), promptHook: join(install, 'prompt-hook.mjs') } })
+  const result = await t.worker.hooks.fire('agent.launch.before', launch('codex', { agent: 'codex', terminalId: undefined }))
+  assert.match(String(result.event.command), /missing-bin\/mcp-server\.mjs/)
+  assert.ok(t.logs.some(line => line.startsWith('scripts: could not copy: ')))
+  await t.close()
   await t.worker.deactivate()
 })
 

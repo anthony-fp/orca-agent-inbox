@@ -35,7 +35,7 @@ Loading grants the plugin its access, so read the manifest and the sections belo
 | `agent.launch.before` hook | Tags each new `claude` launch and adds config flags to each `codex` launch, so the plugin knows its session (see below). It passes every other launch through unchanged. |
 | `agent.status.changed` event | Learns when an agent's turn ends (`done`), so it reads the turn from the transcript (a Codex rollout, for Codex). |
 | `agent:read` | Lists the agents in the focused workspace, to draw a section for each one and to count the agents it does not track. |
-| `terminal:send` | Types your answer, reply or hand-off into the agent's terminal when you press a button. It sends only when the agent waits at its prompt. |
+| `terminal:send` | Types your answer, reply or hand-off into the agent's terminal when you press a button, including while the agent is working. |
 | `storage:own` | Keeps one ledger (questions, tasks, findings, press labels) per agent session in the plugin's own storage. |
 | `workspace:read` | Unused. The plugin finds each transcript by its session id, so it needs no workspace list. A later version drops it. |
 
@@ -51,6 +51,7 @@ The launch hook inserts these flags right after `claude` and changes nothing els
 If the launch already sets `--mcp-config`, `--strict-mcp-config`, `--append-system-prompt` or `--settings`, the plugin tracks the session but adds no tools, and the panel says "No tools" for that agent.
 
 The MCP server (`bin/mcp-server.mjs`) and the prompt hook (`bin/prompt-hook.mjs`) are thin clients. They pass each call to the worker over a local Unix socket, `orca-agent-inbox-<uid>/worker.sock` in the system temp folder, with mode 0600 in a folder only your user can open. The worker is the only writer.
+Launch scripts run from a fixed copy beside the socket, so running sessions survive plugin updates.
 
 ## What it adds to each tracked `codex` launch
 
@@ -75,9 +76,10 @@ For a Codex agent it runs `codex exec --ephemeral --ignore-user-config --ignore-
 
 - A session started outside Orca's agent launcher, such as `claude` or `codex resume` typed into a plain shell. The panel shows how many such agents it sees as "N agents not tracked".
 - A restored session, `--continue`, `--resume` with a name or no id, and `--fork-session`.
-- A terminal after `/clear` starts a new session file, until the next launch.
 - Agents on SSH or WSL hosts.
 - Files and PRs: Orca's sidebar has its own.
+
+Inside a tracked Claude pane, the panel follows `/resume` and `/clear` to the new conversation.
 
 ## Credits
 

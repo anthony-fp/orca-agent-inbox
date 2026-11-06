@@ -1,13 +1,11 @@
 // Presses on a row (spec step 6, plans T7 and T12). An option, a typed reply, a step that runs a command, and a
-// finding's Fix or File issue each type the inbox's message into the agent's terminal, only when the agent waits at
-// its prompt; the panel does the other steps. Done and Dismiss close the row in the plugin's own state; nothing goes
+// finding's Fix or File issue each type the inbox's message into the agent's terminal; the panel does the other steps.
+// Done and Dismiss close the row in the plugin's own state; nothing goes
 // to the agent.
 //
-// The send check (audit fix 2): each press carries the terminal, session and `drawn` token the row was drawn with.
-// In the same tick as the send, the worker checks that the terminal still maps to that session, that the newest
-// status says the main agent is `done`, and that the session's lastTurnId and queue still match `drawn`. A failed
-// check holds the answer ("Waits for the agent"). A send whose result is not certain reads "Not delivered". The
-// plugin never sends a held or undelivered answer again by itself.
+// The send check: each press carries its terminal and session.
+// In the same tick as the send, the worker checks that the terminal still maps to that session and, for Codex, that
+// the prompt hook was trusted. A failed check holds the answer. A send whose result is not certain reads "Not delivered".
 import { closeFinding, closeItem } from './core/ledger'
 import { findingRows, fixLabel, nowRows, stepsOf, type FindingGroups, type FindingRow, type NowGroups, type NowRow } from './core/now'
 import type { Finding, Item, Ledger } from './core/types'
@@ -16,7 +14,7 @@ import { codexPromptAfter } from './core/codex-transcript'
 import { promptAfter } from './transcript'
 import type { Clock } from './turns'
 
-/** How long a send waits for its prompt to show in the transcript. */
+/** How long a send waits for its prompt after the agent is done. */
 export const CONFIRM_MS = 10_000
 export const CONFIRM_POLL_MS = 1000
 
@@ -68,7 +66,7 @@ export type PressDeps = {
   log?(message: string): void
 }
 
-/** What a row is drawn with, beside its terminal and session: the press is stale when this changes. */
+/** What a row is drawn with, beside its terminal and session. */
 export function drawnToken(s: SessionState): string {
   return JSON.stringify([s.lastTurnId, s.queue.map(t => t.turnId)])
 }
@@ -180,7 +178,7 @@ export function labelledRows(
     Object.entries(s.presses).flatMap(([id, l]) => (l.kind === 'fix' && l.state === 'answered' ? [[id, l.at]] : [])),
   )
   const found = findingRows(s.ledger, now, fixesSent)
-  const label = (id: string) => (s.presses[id] ? rowLabel(s.presses[id]) : null)
+  const label = (id: string) => (s.presses[id] && s.presses[id].state !== 'held' ? rowLabel(s.presses[id]) : null)
   const add = (r: NowRow): LabelledRow => ({ ...r, label: label(r.id) })
   const addFinding = (r: FindingRow): LabelledFinding => ({ ...r, label: label(r.id) })
   return {
@@ -197,11 +195,10 @@ export function isOpenRow(ledger: Ledger, id: string): boolean {
 }
 
 /** The send check, in one tick. Null when the send may go, else why it holds. */
-export function sendCheck(state: State, status: TerminalStatus | undefined, p: PressInput): string | null {
+export function sendCheck(state: State, p: PressInput): string | null {
   if (state.terminals[p.terminalId]?.sessionId !== p.sessionId) return 'the terminal has another session'
-  if (status !== 'done') return `the agent is ${status ?? 'not known'}`
   const s = state.sessions[p.sessionId]
-  if (!s || drawnToken(s) !== p.drawn) return 'a turn ended since the row was drawn'
+  if (!s) return 'the session is missing'
   const paneKey = state.terminals[p.terminalId]?.paneKey
   if (s.agent === 'codex' && (state.version === 1 || !paneKey || state.panes[paneKey]?.threadId !== p.sessionId || !state.panes[paneKey]?.promptHookSeen))
     return 'Trust the Agent Inbox hook in Codex to send answers'
@@ -233,20 +230,25 @@ export function createPresses(deps: PressDeps) {
     })
   }
 
-  /** Reads the transcript once a second for up to CONFIRM_MS, for the prompt the send typed. */
-  async function confirm(sessionId: string, id: string, label: PressLabel): Promise<void> {
-    const deadline = clock.now() + CONFIRM_MS
+  /** Reads the transcript until the prompt appears, or for CONFIRM_MS after the agent is done. */
+  async function confirm(terminalId: string, sessionId: string, id: string, label: PressLabel): Promise<void> {
+    let deadline: number | null = null
     for (;;) {
       const bytes = await deps.read(sessionId)
       const prompt = bytes ? deps.state().sessions[sessionId]?.agent === 'codex'
-        ? codexPromptAfter(bytes, label.from ?? 0)
-        : promptAfter(bytes, label.from ?? 0) : null
-      if (prompt) {
-        // Another prompt first means this answer's fate is not known.
-        const ours = prompt.text.replace(/\s+/g, ' ').includes(label.text)
-        return settle(sessionId, id, label.at, ours ? { state: 'answered', turnId: prompt.uuid } : { state: 'undelivered' })
-      }
-      if (clock.now() >= deadline) return settle(sessionId, id, label.at, { state: 'undelivered' })
+        ? codexPromptAfter(bytes, label.from ?? 0, label.text)
+        : promptAfter(bytes, label.from ?? 0, label.text) : null
+      const done = deps.status(terminalId) === 'done'
+      if (prompt)
+        return settle(sessionId, id, label.at, { state: 'answered', turnId: prompt.uuid })
+      // A queued answer has no transcript prompt until the current turn ends.
+      if (done) {
+        deadline ??= clock.now() + CONFIRM_MS
+        const otherPrompt = bytes ? deps.state().sessions[sessionId]?.agent === 'codex'
+          ? codexPromptAfter(bytes, label.from ?? 0)
+          : promptAfter(bytes, label.from ?? 0) : null
+        if (otherPrompt || clock.now() >= deadline) return settle(sessionId, id, label.at, { state: 'undelivered' })
+      } else deadline = null
       await clock.sleep(CONFIRM_POLL_MS)
     }
   }
@@ -277,8 +279,7 @@ export function createPresses(deps: PressDeps) {
       if (!sent) return { ok: false, refused: 'invalid' }
       const label: PressLabel = { state: 'sending', ...sent, at: clock.now() }
       if (s.agent === 'codex') label.paneKey = state.terminals[p.terminalId]?.paneKey
-      const status = deps.status(p.terminalId)
-      const why = sendCheck(state, status, p)
+      const why = sendCheck(state, p)
       if (why) {
         deps.log?.(`press: held for ${p.id}: ${why}`)
         const held = { ...label, state: 'held' as const }
@@ -300,7 +301,7 @@ export function createPresses(deps: PressDeps) {
       }
       // Orca's answer does not say the agent took the text: a status change during the send is the agent starting,
       // or something else. Only the answer's own prompt in the transcript confirms it; anything else reads "Not delivered".
-      void confirm(p.sessionId, p.id, label).catch(e => deps.log?.(`press: ${e instanceof Error ? e.message : String(e)}`))
+      void confirm(p.terminalId, p.sessionId, p.id, label).catch(e => deps.log?.(`press: ${e instanceof Error ? e.message : String(e)}`))
       return { ok: true, label: rowLabel(label) }
     },
   }

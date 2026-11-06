@@ -306,10 +306,10 @@ function ReplyField({ section, row, hint, busy }: { section: InboxSection; row: 
  * The row's text, with the question's number before it and the age on the right, as the inbox draws a row. Each age
  * sits in a Box that does not shrink, so a narrow panel wraps the text beside it and never the age.
  */
-function RowHead({ row, truncate }: { row: LabelledRow; truncate?: boolean }) {
+function RowHead({ row }: { row: LabelledRow }) {
   return (
     <Row gap="sm" align="start" justify="between">
-      <Text truncate={truncate}>{row.handle ? `${row.handle} ${row.text}` : row.text}</Text>
+      <Text>{row.handle ? `${row.handle} ${row.text}` : row.text}</Text>
       {row.age !== null && (
         <Box shrink={false}>
           <Text size="sm" muted>
@@ -365,12 +365,12 @@ function Question({ section, row }: { section: InboxSection; row: LabelledRow })
   )
 }
 
-/** A task: its text on one line with its age, then its steps, Done and Reply (`rowActions` in `hooks/view.ts`). */
+/** A task: its whole text with its age, then its steps, Done and Reply (`rowActions` in `hooks/view.ts`). */
 function Task({ section, row }: { section: InboxSection; row: LabelledRow }) {
   const { key, label, busy } = rowState(section, row)
   return (
     <Stack gap="xs">
-      <RowHead row={row} truncate />
+      <RowHead row={row} />
       <Row gap="xs" wrap>
         <StepButtons section={section} row={row} busy={busy} />
         <Button size="sm" variant="solid" disabled={busy} onPress={() => press(section, row, { action: 'done' })}>
@@ -617,7 +617,7 @@ function Section({ section }: { section: InboxSection }) {
 function otherNote(agent: OtherAgent): string {
   if (agent.agent !== 'codex') return 'Agent Inbox does not track this agent.'
   if (agent.reason === 'launch-skipped') return 'Agent Inbox did not track this Codex launch.'
-  if (agent.reason === 'launch-unmatched') return 'A Codex launch had no terminal ID; this pane may be untracked.'
+  if (agent.reason === 'launch-unmatched') return 'Send a prompt in this Codex pane to start tracking it.'
   return 'Started before Agent Inbox; not tracked.'
 }
 

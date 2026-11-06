@@ -177,9 +177,10 @@ export function readTurnFile(path: string, offset: number, prompts?: number): Tu
   return readTurn(readFileSync(path), offset, prompts)
 }
 
-/** The first prompt that starts at or after `offset`, with its uuid and text, or null: how a press confirms its answer arrived (plan T7). */
-export function promptAfter(bytes: Buffer, offset: number): { uuid: string; text: string } | null {
-  const found = lines(bytes, offset).find(({ line }) => isTurnStart(line))?.line
+/** The first prompt at or after `offset`, optionally containing `contains`. */
+export function promptAfter(bytes: Buffer, offset: number, contains?: string): { uuid: string; text: string } | null {
+  const found = lines(bytes, offset).find(({ line }) => isTurnStart(line) &&
+    (contains === undefined || text(line?.message?.content).replace(/\s+/g, ' ').includes(contains)))?.line
   return found ? { uuid: String(found.uuid), text: text(found.message?.content) } : null
 }
 
