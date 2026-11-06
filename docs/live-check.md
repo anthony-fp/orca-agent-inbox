@@ -51,3 +51,70 @@ Blocked by the workspace-id bug:
 - Findings, the plan, the no-tools note and the Claude-only note in the live panel.
 - A launch from workspace create.
 - Any panel shot.
+
+# Second pass
+
+Run: 2026-11-05, Orca 1.4.248, Claude Code 2.1.318, on the fix at `6856a79`. During the run, another commit (`74070af`, launch logging) landed and the worker restarted several times on folder changes. Four agents were launched from Orca's launcher into the same throwaway folder workspace, and one `claude` was typed into a plain shell there. The person also used Orca during the run, so focus moved away from the test workspace more than once. `inbox.view` covers only the focused workspace, so each read below was made right after a switch to a test terminal. Times are UTC.
+
+## Bug: the inbox model is never logged in
+
+Every inbox-model run fails with `Not logged in · Please run /login`, so no row comes from the model. Found in this pass, not fixed.
+
+- The worker runs `claude -p` with `process.env` (`src/model.ts:72-74`). Orca starts the worker with only `HOME`, `PATH`, `TMPDIR` and its Electron and Node channel variables. `USER` is missing.
+- Without `USER`, `claude` cannot find its login. With the worker's own variables, `claude -p` printed `Not logged in · Please run /login`. With the same variables plus `USER`, it answered `ok`.
+- Effect: after three failures a turn is dropped and the panel shows "N turns not read" (`src/turns.ts:172-174`). The plugin log shows one failure line per try.
+
+## Bug: the socket file can vanish after a worker restart
+
+Seen once, cause not proven. After four worker starts within one minute (23:51:07 to 23:52:04), the socket folder was empty while the worker ran. `record`, `close` and the prompt hook then have no worker to reach. A run of `bin/prompt-hook.mjs` by hand printed nothing. `orca plugin restart` made the socket again.
+
+- A likely cause: Node removes a Unix socket's file when its server closes. If the old worker closes after the new worker listens on the same path (`src/socket.ts:133`, `src/worker.ts:257-269`), the old worker removes the new worker's file.
+
+## Bug: the panel does not reload on focus or untracked changes
+
+The panel asks for `inbox.view` only at setup and on `inbox.changed` (`src/panel.tsx:206-208`). The worker posts `inbox.changed` only after a save (`src/turns.ts:114`). A focus change, a `claude` typed into a plain shell, and an agent that `agents.list` gives only after its launch save do not save anything.
+
+- Evidence: `inbox.view` gave 3 sections and `untracked: 1`. Two shots of the open panel taken then both read "2 agents tracked" with no "not tracked" line.
+
+## 3. Done means: partly pass
+
+- Fail (bug above): an agent asked a multiple-choice question in its reply text only, with no tool call (turn end 23:48:03). No row came in 90 s. The log reads `turns: model failed for <turn>: Not logged in`. The time from `done` to a model row was not measured.
+- Pass: the worker now reads the transcript. The session's saved `transcript` and `cwd` were set and the turn was queued for the model, where the first pass left them null.
+- Pass: an agent called `mcp__orca-inbox__record` at 23:58:53.2 with a question. The row showed under Questions, with its two options and the recommendation, before the turn ended at 23:58:58.7.
+- Pass: `inbox.press` `answer` with a fresh `drawn` answered `{ ok: true, label: "Sending…" }` in 0.8 s. The answer reached the correct terminal as `Re "<question>": No, leave it` (00:00:03.6). The label read "✓ No, leave it" 2.3 s after the press. The agent then called `mcp__orca-inbox__close` with the answer (00:00:09.9).
+
+## 4. The plugin's prompt hook, findings and plan: pass
+
+- Pass: the transcript has a `hook_success` entry for the plugin's command, `node …/bin/prompt-hook.mjs --socket … --session …`, with `inbox:` text on each prompt. The person's own inbox mod adds its own `inbox:` text under the hook name `prompt.submit`, so the two are told apart by hook name. On the first prompt the plugin printed the plan-file note. After the `record`, it printed the open items with their close ids.
+- Pass: asked to leave a finding, the agent recorded an opportunity. It showed under "Opportunities · 1" with Do it, File issue, Reply and Dismiss, and "Issues · 0".
+- Pass: asked for a three-step task, the agent wrote `.inbox/plans/<session>.md` as the plan note says. `inbox.view` gave `done: 2, total: 3`, the third step `current` and the task open. The panel drew "PLAN 2 of 3 steps", the progress bar, ✓ on two steps and ◐ on the third.
+- Seen: in a session where the person's own inbox mod already listed a question, the agent would not record it again, because it saw a duplicate.
+
+## 5. Three agents and shots: partly pass
+
+- Pass: with three tracked agents and one plain-shell `claude` in the workspace, `inbox.view` gave three sections, newest first, and `untracked: 1`.
+- Fail (panel bug above): the open panel still drew two agents and no "not tracked" line.
+- Not done: light and dark shots. `orca plugin shot --theme dark` answered `themeApplied: false` because the Orca window was visible, so both files are the light theme. Shots at 320 px:
+  - `second-pass-light-320.png`: the empty state, "2 agents tracked", "2 turns not read".
+  - `second-pass-plan-320.png`: a question with its options, the plan open.
+  - `second-pass-findings-320.png`: the opportunity, one closed question, the plan folded.
+- Seen at 320 px: the row age "now" wraps into "no" and "w" on two lines, beside a question and a finding title.
+
+## 6. Not tracked and restart: pass
+
+- Pass: a `claude` typed into a plain shell in the workspace counted in `untracked` and got no section.
+- Pass: `orca plugin restart local.agent-inbox` needs no approval. `inbox.view` before and after, with the same focus, differed only in a row's age ("3m" to "4m"). The question's closed row, the opportunity, the plan and `unread: 2` all stayed.
+
+## Other things seen
+
+- One launched agent's session id changed before its first turn. The launch passed `--session-id <A>`, but Claude Code's own record for that process gave a new id `<B>`, and the transcript is `<B>.jsonl` with a `SessionStart` of kind `startup`. The person had typed into that terminal. The plugin kept it as a tracked section under `<A>`, which never gets a transcript. The cause was not found. The other three launches kept their ids.
+- One launched agent exited 21 s after launch, before any prompt. The cause was not found.
+
+## States not seen (second pass)
+
+- A row that the inbox model adds, and its time from `done`: blocked by the login bug.
+- A dark-theme shot, and a narrow light shot of three sections.
+- A press label "Waits for the agent" or "Not delivered".
+- A finding press (Do it, File issue), and a `step` press.
+- The no-tools note and the Claude-only note in the live panel.
+- A launch from workspace create.
