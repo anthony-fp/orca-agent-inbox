@@ -28,5 +28,9 @@
     { "kind": "terminal:send" },
     { "kind": "storage:own" },
     { "kind": "workspace:read" }
-  ]
+  ],
+  "cover": {
+    "path": "images/cover.png",
+    "alt": "Agent Inbox panel in Orca's right sidebar, with questions, tasks, issues, opportunities and the workspace plan"
+  }
 }
