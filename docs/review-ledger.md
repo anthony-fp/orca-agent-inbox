@@ -60,3 +60,8 @@
 - [fixed] Round 1's alias fix was not real: on restart upgradeState drops an alias whose launch session is gone, and bindClaude needs the launch session → prune now keeps a launch session while its alias target lives (src/turns.ts prune); test checks the alias across a restart.
 - [fixed] An older launch still reading its transcript could bind over a newer launch in the same terminal → per-terminal launch generation, checked before track (src/worker.ts launch hook); overlap test.
 - Reviewer: no further material issue in Codex, script-path or press paths; both fixes are targeted edits, no broad round needed.
+
+## Release round 3 — 2026-11-06
+- Reviewer: both round 2 fixes are real (direct alias across restart, overlapping launches).
+- [fixed] Prune lost an alias chain A→B→C when it visited A before keeping B → prune repeats the alias pass until nothing changes (src/turns.ts prune); restart test with a live chain and a cycle with no live session.
+- Converged: reviewer says a fourth broad round costs more than the remaining risk; this was the one targeted fix left.

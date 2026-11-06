@@ -548,6 +548,23 @@ test('prune keeps an alias while its target lives, so launch-id tools still reac
   await again.worker.deactivate()
 })
 
+test('prune keeps a whole alias chain to a live session across a restart, and drops a chain with no live session', async () => {
+  const now = 100 * DAY
+  const [a, b, c, x, y] = ['aaaaaaaa', 'bbbbbbbb', 'cccccccc', 'dddddddd', 'eeeeeeee'].map(p => `${p}-1111-4222-8333-444444444444`)
+  const old = emptySession(now - PRUNE_MS - 1)
+  const state: State = {
+    version: 3, terminals: {}, panes: {}, paneLaunches: {},
+    sessions: { [a]: old, [b]: old, [c]: emptySession(now - DAY), [x]: old, [y]: old },
+    moved: { [a]: b, [b]: c, [x]: y, [y]: x },
+  }
+  const t = await setup({ state })
+  await t.worker.deactivate()
+  const again = await setup({ state: t.saved() })
+  assert.deepEqual(Object.keys(again.saved().sessions).sort(), [a, b, c].sort())
+  assert.deepEqual(again.saved().moved, { [a]: b, [b]: c })
+  await again.worker.deactivate()
+})
+
 test('an older launch still reading its transcript does not bind over a newer launch in the same terminal', async () => {
   const t = await setup({ files: { [`${PROJECTS}/-work-my-app/${S}.jsonl`]: prompt('p-1', 'old') } })
   const older = t.worker.hooks.fire('agent.launch.before', launch(`claude --resume ${S}`))

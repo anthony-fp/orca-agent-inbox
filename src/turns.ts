@@ -357,7 +357,12 @@ export function createTracker(deps: TrackerDeps) {
         Object.entries(state.sessions).filter(([, s]) => s.ledger.items.length > 0 || s.queue.length > 0 || now - s.touchedAt < PRUNE_MS),
       )
       // A launch session whose alias points at a kept session stays too: tool calls and /resume still use its id.
-      for (const [id, target] of Object.entries(state.moved ?? {})) if (sessions[target] && state.sessions[id]) sessions[id] = state.sessions[id]
+      // Repeat until nothing changes, so a chain A→B→C keeps A once C keeps B.
+      for (let grew = true; grew;) {
+        grew = false
+        for (const [id, target] of Object.entries(state.moved ?? {}))
+          if (sessions[target] && !sessions[id] && state.sessions[id]) { sessions[id] = state.sessions[id]; grew = true }
+      }
       const terminals = Object.fromEntries(Object.entries(state.terminals).filter(([, t]) => sessions[t.sessionId]))
       const panes = Object.fromEntries(Object.entries(state.panes).filter(([, p]) => sessions[p.threadId]))
       const moved = Object.fromEntries(Object.entries(state.moved ?? {}).filter(([id, target]) => sessions[id] && sessions[target]))
