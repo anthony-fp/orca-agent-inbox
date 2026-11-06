@@ -122,3 +122,21 @@ The panel asks for `inbox.view` only at setup and on `inbox.changed` (`src/panel
 ## Note for checks
 
 `orca plugin check` and `orca plugin test` start the real worker on this machine (they set `ORCA_PLUGIN_TEST_ROOT`). Any side effect on a shared path, such as the socket, needs that guard (`src/worker.ts:373`). Before the guard, each check run deleted the live socket.
+
+## Codex live check (T21) — 2026-11-06
+
+Dev plugin from commit `51a4fe5`, Orca's Codex 0.166.0, Claude Code 2.1.319. Two Codex agents and one Claude agent started from Orca (`orca agent launch --surface terminal`) in one worktree.
+
+| Check | Result |
+|---|---|
+| Launch hook tags each agent | Pass. Log: two `agent=codex … tagged=codex tools=yes`, one `agent=claude … tagged=new tools=yes`. |
+| Codex asks to trust the prompt hook | Pass. "Hooks need review: 1 hook is new or changed" in each Codex agent; "Trust all and continue". |
+| Each pane gets its own rows | Pass. Codex A: a question with "Tab (recommended)", "Pane". Codex B: one issue with Fix, File issue, Reply, Dismiss. Claude: a question with "Keep it (recommended)", "Rename". Three sections. |
+| An answer press reaches the right Codex pane | Pass. `inbox.press` answer "Tab" on Codex A's row returned "Sending…"; Codex A replied "I took your answer as Tab and closed the Agent Inbox question"; Codex B's screen did not change; the row closed. |
+| `codex resume <id>` typed in the pane after `/quit` | Not tracked. The typed command has none of the plugin's flags, so the agent used the person's own Codex `inbox` plugin, not `orca-inbox`. The spec now says so. |
+| The person's own `notify` still runs | Not seen live: this Codex account sets no `notify`. Covered by `src/socket.test.ts` (notify script). |
+| Panel before trust | Not seen: Codex reports no status while its trust dialog is open, so the panel showed only "1 agent not tracked" until the trust. |
+
+States not seen: sub-agent threads, a press while Codex works, the panel in the dark theme, `/new` in a pane.
+
+Found: a person who also has the inbox repo's Codex plugin installed gets both `inbox` and `orca-inbox` tools in an Orca Codex launch. The agents here used `orca-inbox` in every tracked turn.
