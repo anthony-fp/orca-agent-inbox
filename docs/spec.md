@@ -8,7 +8,7 @@ An Orca plugin that adds an inbox icon to Orca's right sidebar. The panel shows 
 |---|---|
 | Where it shows | A new icon in Orca's right sidebar. The panel is the inbox's "Now" tab: questions, tasks, findings and the session plan with collapsible tasks. Files and PRs stay out: Orca's sidebar has its own. |
 | Who does the work | The plugin, alone. It needs no inbox mod, Codex plugin or MCP server. |
-| Which agents | Claude Code only in version 1. Codex in version 2. |
+| Which agents | Claude Code in version 1. Codex in version 2: see "Codex (version 2)". |
 | How items arrive | Two ways, as in the inbox skill: the agent calls `record` and `close` and sees the open items beside each prompt, and the inbox model reads each finished turn. The launch hook adds the tools and the guidance to each tracked `claude` launch. |
 | Findings | Shown as in the inbox skill: Issues and Opportunities sections in the panel. A finding may show at once or at the end of the turn; it does not need to be instant. |
 | Shared code | Copied once from the inbox repo. This repo owns the copy from then on. |
@@ -74,6 +74,30 @@ As in the inbox skill, with the skill's own code from the inbox repo's `hooks/pl
 3. **The panel draws it** after Issues and Opportunities, in each agent's section: "PLAN N of M steps" with the progress bar, then one line per task with its count. Each task heading is collapsible: a task with a `[~]` step is open by default, every other task is closed. A press toggles it, and the panel keeps the choice while it runs. Steps show ✓ done, ◐ in progress, ○ waiting, as `planLines` gives them.
 4. **The plan file is the agent's.** The plugin only reads it. It never writes or deletes it.
 
+## Codex (version 2)
+
+Codex has no session id flag, and the plugin cannot add an `ORCA_*` env name. Orca gives each Codex process `ORCA_PANE_KEY`, and reports the same value as `paneKey` in `agent.status.changed` (`~/.orca/agent-hooks/codex-hook.sh:81`). Codex's `notify` program gets that env and the thread id. So the plugin matches each Codex pane to its rollout exactly, with no time guess. Probe on Codex 0.164.0, 2026-11-05: one `codex exec` turn with `-c notify=[script]` gave the script `ORCA_PANE_KEY`, `CODEX_HOME`, and `{"type":"agent-turn-complete","thread-id","turn-id","cwd","last-assistant-message"}`.
+
+1. **The launch hook adds `-c` flags** to a `codex` launch. It changes nothing else.
+   - `notify=["node","<plugin>/bin/codex-notify.mjs","<socket>"]`.
+   - `mcp_servers.orca-inbox.command` and `.args` for the same `bin/mcp-server.mjs` as Claude, with `mcp_servers.orca-inbox.env_vars=["ORCA_PANE_KEY"]`, because Codex gives an MCP server only a short list of env names.
+   - `developer_instructions=<guidanceText(ORCA_CODEX)>`. `ORCA_CODEX` is the `ORCA` host with Codex's tool names.
+   - A prompt hook that prints `inboxText` and the plan note before each prompt, as for Claude. Risk C1 says how.
+   - If the command already sets `notify`, `mcp_servers.orca-inbox` or `developer_instructions`, the launch is not tracked, and the panel says so for that agent.
+2. **`bin/codex-notify.mjs` is a thin client.** It sends `{ paneKey, codexHome, payload }` to the worker over the socket and exits. It then runs the `notify` from `$CODEX_HOME/config.toml`, if one is set, with the same payload, so a person's own `notify` still runs. It never waits more than 5 seconds for the worker.
+3. **The worker ties the pane to the thread.** It saves `paneKey → { agent: "codex", threadId, codexHome }`. It finds the rollout with `rolloutFor(codexHome, threadId)` (inbox repo `codex/src/transcript.ts:85`). A `codex resume` gives its thread id in the same way, so resumes are tracked too. A new thread id in the same pane, as after `/new`, replaces the old one.
+4. **A turn ends** at the `notify` call or the `done` event, whichever comes second. The same pending rules as Claude apply (step 2 of "How it works"). The adapter is the inbox repo's Codex code, `turnIn` and `readRollout` (`codex/src/transcript.ts:198`, `:423`), copied word for word.
+5. **The inbox model for a Codex turn is `codex exec`**, run as the inbox repo runs it (`codex/src/update.ts:110-135`): `--ephemeral --ignore-user-config --ignore-rules -s read-only`, the model in `MODEL`, low effort, `systemText` as `model_instructions_file`. It runs with that pane's `CODEX_HOME`, so it uses the same account. A Codex-only user needs no Claude sign-in. Claude Code turns keep `claude -p`.
+6. **Tool calls** from Codex carry `ORCA_PANE_KEY`, not a session id. The worker finds the session from the pane. A call before the first `notify` waits up to 5 seconds for it, then answers that the inbox is not available.
+7. **The panel and presses** do not change. A press sends its text with `terminal:send` when `mainAgent.state` is `done`, as for Claude. "✓ Answered" shows when the rollout has the answer as a new prompt.
+
+Codex risks, each probed first in the build plan:
+
+- **C1. The prompt hook.** Find out whether Codex 0.164.0 takes a `UserPromptSubmit` hook from `-c`, and whether it asks for trust. If it does not, the agent gets its close ids from the `record` and `close` answers and the guidance only. Say which in the README.
+- **C2. The `agent` value.** Find the `agent` string that `agent.launch.before` gives for Codex, and how the command looks (`codex`, a path, or a wrapper).
+- **C3. Sub-agent threads.** Find out whether `notify` fires for a guardian or sub-agent thread, and keep only the pane's main thread.
+- **C4. The eval.** Run the inbox repo's agent eval with `ORCA_CODEX` on Codex, as for Claude, and the model eval for `codex exec`.
+
 ## State
 
 - The plugin keeps one ledger per agent session in Orca's plugin storage (`storage:own`), keyed by the session file's id.
@@ -81,13 +105,13 @@ As in the inbox skill, with the skill's own code from the inbox repo's `hooks/pl
 
 ## Access the plugin asks for
 
-`agent:read`, `terminal:send`, `storage:own`, `workspace:read`, and the `agent.launch.before` hook. Its README says that the hook adds a session id to each new `claude` session and changes nothing else. It also says what each is for, and that the plugin runs `claude -p` on your account after each agent turn.
+`agent:read`, `terminal:send`, `storage:own`, `workspace:read`, and the `agent.launch.before` hook. Its README says that the hook adds a session id to each new `claude` session and changes nothing else. It also says what each is for, and that the plugin runs `claude -p` on your account after each agent turn. For Codex, it says that the hook adds `-c` flags for `notify`, the `orca-inbox` tools and the guidance, and that the plugin runs `codex exec` on that Codex account after each turn.
 
 ## Out of scope for version 1
 
 - Files and PRs.
 - Agents on SSH or WSL hosts.
-- Agents other than Claude Code. Codex comes in version 2: it has no session id flag, and Orca reserves `ORCA_*` env names, so it needs its own matching rule (see `review-ledger.md`, rounds 2 and 3).
+- Agents other than Claude Code and Codex. Codex comes in version 2 ("Codex (version 2)"). It replaces the time-based rule in `review-ledger.md`, rounds 2 and 3.
 
 ## Risks to settle in the build plan
 

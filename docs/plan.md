@@ -123,3 +123,53 @@ Builds spec sections "The agent's tools (findings)" and "The session plan". Same
 - Do: in a temporary copy of the inbox repo (never in the real clone), add the `ORCA` host and run `./scripts/eval.sh --suite agent --agent claude` once with `ORCA` and once with `CLAUDE_CODE`. Quote both results files.
 - Also (from T10): the new tool answer "The inbox is not available, so this was not saved." (`bin/mcp-server.mjs:20`) and the joined prompt notes (`src/socket.ts:107-111`) are text a model reads. Add one case where `record` answers "not available", and check the agent does not claim the item was saved.
 - Test: `ORCA` passes every case that `CLAUDE_CODE` passes. A case that fails only with `ORCA` blocks T8.
+
+# Part 3 — Codex (version 2)
+
+Builds spec section "Codex (version 2)". Same rules as above. "The inbox repo" includes its `codex/` folder.
+
+**Order:** T14 → T15 → (T16, T17, T18 at the same time) → T19 → T20 → T21. A probe that fails in T14 changes the spec before any later task starts.
+
+## T14. Codex probes
+- Files: `docs/codex-probes.md`.
+- Do: settle risks C1–C3 with real runs, each in a scratch folder outside the repo, with no session content recorded.
+  1. C2: with the plugin loaded as a dev plugin, log the `agent` and `command` of a Codex launch from a new tab, a launch with a prompt, and a `codex resume`.
+  2. C1: run `codex` with `-c 'hooks.UserPromptSubmit=[…]'` (and the `hooks.json` form if `-c` is refused) and record whether the hook runs, whether Codex asks to trust it, and what its output does.
+  3. C3: one Codex turn that starts a sub-agent, with a logging `notify`. Record each `notify` payload's `thread-id`, and whether the main thread's id can be told apart (the `threads.source` column in `state_5.sqlite`).
+  4. Record whether `mcp_servers.<name>.env_vars` passes `ORCA_PANE_KEY` to an MCP server in Codex 0.164.0.
+- Test: each probe has a result line in `docs/codex-probes.md`. If C1 fails, edit spec step 1 before T16.
+
+## T15. Copy the Codex code
+- Files: `src/core/codex-transcript.ts`, `src/core/codex-transcript.test.ts`, `src/core/model-text.ts` (an `ORCA_CODEX` host), `NOTICE.md`.
+- Do: copy `rolloutFor`, `turnIn`, `readRollout` and what they need from the inbox repo's `codex/src/transcript.ts`, import paths only. Add `ORCA_CODEX`: the `ORCA` host with Codex's tool names, as the inbox repo's Codex host names them (`codex/src/texts.ts`).
+- Test: port the inbox repo's tests for these functions. `systemText(ORCA)` stays pinned and unchanged.
+
+## T16. Launch hook for Codex
+- Files: `src/launch.ts`, `src/launch.test.ts`.
+- Do: spec "Codex (version 2)" step 1. `tagLaunch` returns `{ kind: 'codex' }` for a Codex launch (the form from T14 C2) and adds the `-c` flags: `notify`, `mcp_servers.orca-inbox.*`, `developer_instructions`, and the prompt hook if C1 passed. A command that already sets any of them is not tracked. Quote each value as TOML inside a shell word.
+- Test: plain `codex`; `codex` with a prompt; `codex resume <id>`; `codex exec` (not tracked); each skip case; the added values parse back as TOML; a prompt argument still comes last; every Claude case from T2 and T11 is unchanged.
+
+## T17. Notify client and pane tracking
+- Files: `bin/codex-notify.mjs`, `src/socket.ts`, `src/socket.test.ts`, `src/state.ts`, `src/worker.ts`, `src/worker.test.ts`.
+- Do: spec steps 2, 3 and 6. A new socket message `codex-turn { paneKey, codexHome, payload }`. The state gains `panes: { [paneKey]: { agent: 'codex', threadId, codexHome } }`, with `upgradeState` from version 1. The worker keeps only the main thread (T14 C3). Tool calls with a `paneKey` find their session through `panes`, and wait up to 5 s for the first `codex-turn`. The script runs the person's own `notify` from `$CODEX_HOME/config.toml` after it reports.
+- Test: a version 1 state upgrades; a `codex-turn` maps a pane; a second thread id in the pane replaces the first; a sub-agent thread is ignored; a tool call before the first `codex-turn` waits, then answers "not available"; the script against a socket that never answers exits in 5 s and still runs the person's `notify`.
+
+## T18. Codex turns and the Codex model runner
+- Files: `src/turns.ts`, `src/turns.test.ts`, `src/model.ts`, `src/model.test.ts`.
+- Do: spec steps 4 and 5. A Codex turn completes at the later of `notify` and `done`, then goes through the same durable queue as T4. The exchange comes from `turnIn`/`readRollout`. The runner picks `codex exec` for a Codex session, with the inbox repo's flags (`codex/src/update.ts:110-135`), its `MODEL`, low effort, and the pane's `CODEX_HOME`; kill at 45 s.
+- Test: a fake rollout and fake `notify`/`done` in each order; a missing rollout; a stubbed `codex exec` with a good answer, a bad answer and a timeout; a Claude session still runs `claude -p`.
+
+## T19. Panel and presses for Codex
+- Files: `src/panel.tsx`, `src/panel.test.tsx`, `src/presses.ts`, `src/presses.test.ts`.
+- Do: spec step 7. A tracked Codex agent gets the same section as a Claude agent. The "Codex support is coming soon" section from T12 shows only for a Codex agent the plugin did not see launch, with the text "Started before Agent Inbox; not tracked." A press confirms delivery from the rollout's next prompt.
+- Test: a tracked Codex agent's rows; an untracked Codex agent; a press to a Codex terminal in each `mainAgent.state`.
+
+## T20. Evals
+- Files: `docs/agent-eval.md`, `docs/model-compare.md`.
+- Do: spec risk C4. In a temporary copy of the inbox repo, run `./scripts/eval.sh --suite agent --agent codex` with `ORCA_CODEX`, and `./scripts/eval.sh` for the `codex exec` model. Quote both results files.
+- Test: `ORCA_CODEX` passes every case the inbox repo's Codex host passes.
+
+## T21. Live check, README, release
+- Files: `README.md`, `docs/live-check.md`, `orca-plugin.json`, `package.json`.
+- Do: load the dev plugin. Start two Codex agents in one folder and one Claude agent. Check: each pane gets its own rows; a question, a task and a finding from each; an answer press reaches the right Codex pane; a `codex resume` stays tracked; the person's own `notify` still runs. README says what the Codex flags do and that the plugin runs `codex exec` on that account. Description ends "Works with Claude Code and Codex." Version `0.2.0`.
+- Test: `docs/live-check.md` records each check. Then tag `v0.2.0` (after the user's OK).
