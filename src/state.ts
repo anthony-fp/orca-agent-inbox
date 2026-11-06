@@ -86,10 +86,12 @@ type StateBody = {
 }
 
 export type CodexPane = { agent: 'codex'; threadId: string; codexHome: string; promptHookSeen: boolean }
-export type State = (StateBody & { version: 1 }) | CurrentState
+export type State = (StateBody & { version: 1 }) | (StateBody & { version: 2; panes: Record<string, CodexPane>; pendingCodex?: CurrentState['pendingCodex'] }) | CurrentState
 export type CurrentState = StateBody & {
-  version: 2
+  version: 3
   panes: Record<string, CodexPane>
+  /** Last launch in each Codex pane, kept even while its thread binding is cleared. */
+  paneLaunches: Record<string, number>
   /** Notify-only threads awaiting a rollout check before they may bind a pane. */
   pendingCodex?: Record<string, { threadId: string; codexHome: string; turnId: string }[]>
 }
@@ -99,7 +101,7 @@ export function emptySession(now = 0): SessionState {
 }
 
 export function emptyState(): CurrentState {
-  return { version: 2, terminals: {}, sessions: {}, panes: {} }
+  return { version: 3, terminals: {}, sessions: {}, panes: {}, paneLaunches: {} }
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -185,6 +187,9 @@ export function upgradeState(raw: unknown, now = 0): CurrentState {
     const session = sessions[pane.threadId]
     if (session) sessions[pane.threadId] = { ...session, agent: 'codex', codexHome: pane.codexHome || session.codexHome }
   }
+  const paneLaunches: CurrentState['paneLaunches'] = {}
+  for (const [key, at] of Object.entries(isObject(raw.paneLaunches) ? raw.paneLaunches : {}))
+    if (typeof at === 'number' && Number.isFinite(at)) paneLaunches[key] = at
   const pendingCodex: NonNullable<CurrentState['pendingCodex']> = {}
   for (const [key, entries] of Object.entries(isObject(raw.pendingCodex) ? raw.pendingCodex : {})) {
     if (!Array.isArray(entries)) continue
@@ -193,5 +198,5 @@ export function upgradeState(raw: unknown, now = 0): CurrentState {
       .map(entry => ({ threadId: entry.threadId, codexHome: entry.codexHome, turnId: entry.turnId }))
     if (kept.length > 0) pendingCodex[key] = kept
   }
-  return Object.keys(pendingCodex).length > 0 ? { version: 2, terminals, sessions, panes, pendingCodex } : { version: 2, terminals, sessions, panes }
+  return Object.keys(pendingCodex).length > 0 ? { version: 3, terminals, sessions, panes, paneLaunches, pendingCodex } : { version: 3, terminals, sessions, panes, paneLaunches }
 }

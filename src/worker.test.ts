@@ -37,8 +37,8 @@ const openLedger = () => {
   return applyUpdate(EMPTY, u, 0, 1)
 }
 
-async function setup(opts: { state?: State; files?: Record<string, string>; unreadable?: string[]; agents?: unknown[]; copyFails?: boolean; list?: unknown[]; socket?: string; codexRollout?: (home: string, threadId: string) => Promise<{ path: string; cwd: string } | null> } = {}) {
-  const time = fakeClock(100 * DAY)
+async function setup(opts: { state?: State; files?: Record<string, string>; unreadable?: string[]; agents?: unknown[]; copyFails?: boolean; list?: unknown[]; socket?: string; clockAt?: number; codexRollout?: (home: string, threadId: string) => Promise<{ path: string; cwd: string } | null> } = {}) {
+  const time = fakeClock(opts.clockAt ?? 100 * DAY)
   const files = new Map(Object.entries(opts.files ?? {}))
   const reads: string[] = []
   const models: string[] = []
@@ -134,7 +134,7 @@ test('the launch hook tags a new claude session and tracks its terminal', async 
 
 test('a Claude launch in a former Codex terminal keeps its session after status', async () => {
   const old = { ...emptySession(100 * DAY), agent: 'codex' as const }
-  const state: CurrentState = { version: 2, terminals: { 'term-1': { sessionId: 'thread-old', paneKey: 'pane-1' } },
+  const state: State = { version: 2, terminals: { 'term-1': { sessionId: 'thread-old', paneKey: 'pane-1' } },
     panes: { 'pane-1': { agent: 'codex', threadId: 'thread-old', codexHome: '/codex', promptHookSeen: true } },
     sessions: { 'thread-old': old } }
   const t = await setup({ state })
@@ -149,7 +149,7 @@ test('a Claude launch in a former Codex terminal keeps its session after status'
 test('a tracked Codex relaunch clears its former pane before status', async () => {
   const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
   const old = { ...emptySession(100 * DAY), agent: 'codex' as const }
-  const state: CurrentState = { version: 2, terminals: { 'term-1': { sessionId: 'thread-old', paneKey: 'pane-1' } },
+  const state: State = { version: 2, terminals: { 'term-1': { sessionId: 'thread-old', paneKey: 'pane-1' } },
     panes: { 'pane-1': { agent: 'codex', threadId: 'thread-old', codexHome: '/codex', promptHookSeen: true } },
     sessions: { 'thread-old': old } }
   const t = await setup({ state, socket })
@@ -159,6 +159,107 @@ test('a tracked Codex relaunch clears its former pane before status', async () =
     await t.worker.emit('agent.status.changed', status('working'))
     assert.equal(t.saved().panes['pane-1'], undefined)
     assert.equal(t.saved().terminals['term-1'], undefined)
+  } finally {
+    await t.close()
+    await t.worker.deactivate()
+  }
+})
+
+test('a skipped Codex launch clears a saved pane and refuses its old row press', async () => {
+  const ledger = openLedger()
+  const session = { ...emptySession(100 * DAY), agent: 'codex' as const, ledger }
+  const state: State = { version: 2, terminals: { 'term-1': { sessionId: 'thread-old', paneKey: 'pane-1' } },
+    panes: { 'pane-1': { agent: 'codex', threadId: 'thread-old', codexHome: '/codex', promptHookSeen: true } },
+    sessions: { 'thread-old': session } }
+  const t = await setup({ state, agents: [{ terminalId: 'term-1', title: 'Codex', agent: 'codex', state: 'done', stateStartedAt: 1 }] })
+  const out = await t.worker.hooks.fire('agent.launch.before', launch('codex', { agent: 'codex' }))
+  assert.equal(out.kind === 'continue' && out.event.command, 'codex')
+  await t.worker.emit('agent.status.changed', status('done'))
+  await t.worker.request('inbox.press', { terminalId: 'term-1', sessionId: 'thread-old', drawn: drawnToken(session),
+    id: ledger.items[0].id, action: 'answer', answer: 'Yes' })
+  assert.equal(t.host.callsOf('terminal.sendText').length, 0)
+  assert.equal(t.saved().terminals['term-1'], undefined)
+  assert.equal(t.saved().panes['pane-1'], undefined)
+  await t.worker.deactivate()
+})
+
+test('a skipped launch dates a known pane even before any thread binds', async () => {
+  const t = await setup()
+  await t.worker.emit('agent.status.changed', status('working'))
+  await t.worker.hooks.fire('agent.launch.before', launch('codex', { agent: 'codex' }))
+  assert.equal(t.saved().paneLaunches['pane-1'], 100 * DAY)
+  assert.deepEqual(t.saved().panes, {})
+  await t.worker.deactivate()
+})
+
+test('a tracked Codex launch followed by a skipped launch cannot send an old row', async () => {
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  const t = await setup({ socket, agents: [{ terminalId: 'term-1', title: 'Codex', agent: 'codex', state: 'done', stateStartedAt: 1 }],
+    codexRollout: async () => ({ path: '/codex/rollout-2026-11-05T12-00-00-thread-new.jsonl', cwd: WS.path }) })
+  try {
+    await t.worker.hooks.fire('agent.launch.before', launch('codex', { agent: 'codex' }))
+    await t.worker.emit('agent.status.changed', status('working'))
+    await ask(socket, { type: 'prompt-start', paneKey: 'pane-1', codexHome: '/codex', sessionId: 'thread-new' }, 2000)
+    await ask(socket, { type: 'record', paneKey: 'pane-1', codexHome: '/codex', sessionId: 'thread-new',
+      args: { kind: 'question', ask: 'Ship it?', options: ['Yes', 'No'] } }, 2000)
+    const session = t.saved().sessions['thread-new']
+    const id = session.ledger.items[0].id
+    const drawn = drawnToken(session)
+    const skipped = await t.worker.hooks.fire('agent.launch.before', launch('codex -c notify=custom', { agent: 'codex' }))
+    assert.equal(skipped.kind === 'continue' && skipped.event.command, 'codex -c notify=custom')
+    await t.worker.emit('agent.status.changed', status('done'))
+    await t.worker.request('inbox.press', { terminalId: 'term-1', sessionId: 'thread-new', drawn, id, action: 'answer', answer: 'Yes' })
+    assert.equal(t.host.callsOf('terminal.sendText').length, 0)
+    assert.equal(t.saved().panes['pane-1'], undefined)
+    assert.equal(t.saved().terminals['term-1'], undefined)
+  } finally {
+    await t.close()
+    await t.worker.deactivate()
+  }
+})
+
+test('a late old notify cannot rebind a pane cleared by relaunch', async () => {
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  const old = { ...emptySession(), agent: 'codex' as const, touchedAt: Date.parse('2026-11-05T10:30:00Z') }
+  const state: State = { version: 2, terminals: { 'term-1': { sessionId: 'thread-old', paneKey: 'pane-1' } },
+    panes: { 'pane-1': { agent: 'codex', threadId: 'thread-old', codexHome: '/codex', promptHookSeen: true } },
+    sessions: { 'thread-old': old } }
+  const t = await setup({ state, socket, clockAt: Date.parse('2026-11-05T11:00:00Z'),
+    codexRollout: async () => ({ path: '/codex/rollout-2026-11-05T10-00-00-thread-old.jsonl', cwd: WS.path }) })
+  try {
+    await t.worker.hooks.fire('agent.launch.before', launch('codex', { agent: 'codex' }))
+    assert.equal(t.saved().paneLaunches['pane-1'], Date.parse('2026-11-05T11:00:00Z'))
+    await ask(socket, { type: 'codex-turn', payload: { paneKey: 'pane-1', codexHome: '/codex', threadId: 'thread-old',
+      turnId: 'turn-old', type: 'agent-turn-complete' } }, 2000)
+    assert.equal(t.saved().panes['pane-1'], undefined)
+    assert.equal(t.saved().terminals['term-1'], undefined)
+  } finally {
+    await t.close()
+    await t.worker.deactivate()
+  }
+})
+
+test('concurrent old and new binds leave the new Codex thread bound', async () => {
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  let resolveOld!: (value: { path: string; cwd: string }) => void
+  let oldStarted!: () => void
+  const started = new Promise<void>(resolve => { oldStarted = resolve })
+  const t = await setup({ socket, codexRollout: async (_home, threadId) => {
+    if (threadId === 'thread-old') {
+      oldStarted()
+      return new Promise(resolve => { resolveOld = resolve })
+    }
+    return { path: '/codex/rollout-2026-11-05T11-00-00-thread-new.jsonl', cwd: WS.path }
+  } })
+  const notify = (threadId: string) => ask(socket, { type: 'codex-turn', payload: { paneKey: 'pane-1', codexHome: '/codex',
+    threadId, turnId: `turn-${threadId}`, type: 'agent-turn-complete' } }, 2000)
+  try {
+    const oldCall = notify('thread-old')
+    await started
+    const newCall = notify('thread-new')
+    resolveOld({ path: '/codex/rollout-2026-11-05T10-00-00-thread-old.jsonl', cwd: WS.path })
+    await Promise.all([oldCall, newCall])
+    assert.equal(t.saved().panes['pane-1'].threadId, 'thread-new')
   } finally {
     await t.close()
     await t.worker.deactivate()
@@ -544,7 +645,7 @@ test('a Codex launch without terminal identity gets an uncertain note until a th
 test('inbox.view: a tracked Codex thread has Claude-shaped rows and clears hook-trust after a prompt', async () => {
   const ledger = openLedger()
   const session = { ...emptySession(100 * DAY), agent: 'codex' as const, codexHome: '/codex', ledger }
-  const state: CurrentState = { version: 2, terminals: { 'term-1': { sessionId: S } },
+  const state: State = { version: 2, terminals: { 'term-1': { sessionId: S } },
     sessions: { [S]: session }, panes: { 'pane-1': { agent: 'codex', threadId: S, codexHome: '/codex', promptHookSeen: true } } }
   const t = await setup({ state, agents: [{ terminalId: 'term-1', title: 'Codex', agent: 'codex', state: 'done', stateStartedAt: 1 }] })
   assert.equal((await t.worker.request('inbox.view', undefined)).sections[0].trustHook, true)
@@ -569,7 +670,7 @@ for (const main of ['working', 'blocked', 'waiting', 'done'] as const) {
   test(`Codex mainAgent ${main} controls the press send despite combined done`, async () => {
     const ledger = openLedger()
     const session = { ...emptySession(100 * DAY), agent: 'codex' as const, codexHome: '/codex', ledger }
-    const state: CurrentState = { version: 2, terminals: { 'term-1': { sessionId: S, paneKey: 'pane-1' } },
+    const state: State = { version: 2, terminals: { 'term-1': { sessionId: S, paneKey: 'pane-1' } },
       sessions: { [S]: session }, panes: { 'pane-1': { agent: 'codex', threadId: S, codexHome: '/codex', promptHookSeen: true } } }
     const t = await setup({ state, agents: [{ terminalId: 'term-1', title: 'Codex', agent: 'codex', state: 'done', stateStartedAt: 1 }] })
     await t.worker.emit('agent.status.changed', status('done', { mainAgent: { state: main, stateStartedAt: 1 } }))

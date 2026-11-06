@@ -96,12 +96,12 @@ export function createAnswerer(deps: AnswerDeps): (request: unknown) => Promise<
         return { error: 'bad request' }
       await deps.bindCodex?.(payload.paneKey, payload.threadId, payload.codexHome, 'notify', typeof payload.turnId === 'string' ? payload.turnId : undefined)
       const state = deps.state()
-      if (state.version === 2 && state.panes[payload.paneKey]?.threadId === payload.threadId)
+      if (state.version !== 1 && state.panes[payload.paneKey]?.threadId === payload.threadId)
         await deps.notifyCodex?.(payload.paneKey, payload.threadId, typeof payload.turnId === 'string' ? payload.turnId : '')
       return { text: '' }
     }
     const current = deps.state()
-    const savedThread = paneKey && current.version === 2 ? current.panes[paneKey]?.threadId : undefined
+    const savedThread = paneKey && current.version !== 1 ? current.panes[paneKey]?.threadId : undefined
     const sessionId = typeof request.sessionId === 'string' ? request.sessionId : savedThread
     if (!sessionId) return { error: 'bad request' }
     if (paneKey && typeof request.sessionId === 'string')

@@ -203,7 +203,7 @@ export function sendCheck(state: State, status: TerminalStatus | undefined, p: P
   const s = state.sessions[p.sessionId]
   if (!s || drawnToken(s) !== p.drawn) return 'a turn ended since the row was drawn'
   const paneKey = state.terminals[p.terminalId]?.paneKey
-  if (s.agent === 'codex' && (state.version !== 2 || !paneKey || state.panes[paneKey]?.threadId !== p.sessionId || !state.panes[paneKey]?.promptHookSeen))
+  if (s.agent === 'codex' && (state.version === 1 || !paneKey || state.panes[paneKey]?.threadId !== p.sessionId || !state.panes[paneKey]?.promptHookSeen))
     return 'Trust the Agent Inbox hook in Codex to send answers'
   return null
 }

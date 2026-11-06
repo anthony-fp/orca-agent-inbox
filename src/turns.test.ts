@@ -356,9 +356,9 @@ describe('turn tracker', () => {
 })
 
 describe('upgradeState', () => {
-  test('upgrades version 1 and keeps only valid Codex pane records in version 2', () => {
+  test('upgrades older state and keeps only valid Codex pane records', () => {
     const old = upgradeState({ version: 1, terminals: { t: { sessionId: 's' } }, sessions: { s: {} } })
-    assert.equal(old.version, 2)
+    assert.equal(old.version, 3)
     assert.deepEqual(old.panes, {})
     assert.ok(old.sessions.s)
     const current = upgradeState({ ...old, panes: {
@@ -366,6 +366,17 @@ describe('upgradeState', () => {
       bad: { agent: 'codex', threadId: 4, codexHome: '/codex' },
     } })
     assert.deepEqual(current.panes, { good: { agent: 'codex', threadId: 'thread-1', codexHome: '/codex', promptHookSeen: true } })
+    assert.deepEqual(current.paneLaunches, {})
+  })
+
+  test('a version 2 Codex binding survives upgrade with an empty launch history', () => {
+    const state = upgradeState({ version: 2, terminals: { t: { sessionId: 'thread-1', paneKey: 'pane-1' } },
+      sessions: { 'thread-1': { agent: 'codex' } },
+      panes: { 'pane-1': { agent: 'codex', threadId: 'thread-1', codexHome: '/codex', promptHookSeen: true } } })
+    assert.equal(state.version, 3)
+    assert.deepEqual(state.terminals.t, { sessionId: 'thread-1', paneKey: 'pane-1' })
+    assert.equal(state.panes['pane-1'].threadId, 'thread-1')
+    assert.deepEqual(state.paneLaunches, {})
   })
 
   test('drops saved Codex notify/done pairing fields', () => {
@@ -378,8 +389,8 @@ describe('upgradeState', () => {
   })
 
   test('a missing or unreadable value is the empty state', () => {
-    assert.deepEqual(upgradeState(null), { version: 2, terminals: {}, sessions: {}, panes: {} })
-    assert.deepEqual(upgradeState('x'), { version: 2, terminals: {}, sessions: {}, panes: {} })
+    assert.deepEqual(upgradeState(null), { version: 3, terminals: {}, sessions: {}, panes: {}, paneLaunches: {} })
+    assert.deepEqual(upgradeState('x'), { version: 3, terminals: {}, sessions: {}, panes: {}, paneLaunches: {} })
   })
 
   test('fills fields a session saved without', () => {
@@ -412,7 +423,7 @@ describe('upgradeState', () => {
       terminals: { t: { sessionId: 's' } },
       sessions: { s: { ...emptySession(), offset: 4, lastTurnId: 'p', unread: 2, transcript: '/h/.claude/projects/-w/s.jsonl', cwd: '/w' } },
     }
-    assert.deepEqual(upgradeState(JSON.parse(JSON.stringify(s))), { ...s, version: 2, panes: {} })
+    assert.deepEqual(upgradeState(JSON.parse(JSON.stringify(s))), { ...s, version: 3, panes: {}, paneLaunches: {} })
   })
 })
 
@@ -438,6 +449,21 @@ async function codexTrack(t: ReturnType<typeof codexSetup>, home = '/codex') {
 }
 
 describe('Codex turns use the durable queue', () => {
+  test('an interrupted turn and the next complete turn both reach the model, first with an empty reply', async () => {
+    const lines = codexThree().toString('utf8').split('\n').filter(Boolean)
+    const file = Buffer.from(lines.slice(0, 10).filter(line => !line.includes('"task_complete","turn_id":"turn-1"')).join('\n') + '\n')
+    const t = codexSetup(file)
+    await codexTrack(t)
+    await t.tracker.codexNotify(S, 'turn-2')
+    await t.time.run()
+    assert.equal(t.model.calls.length, 2)
+    assert.match(t.model.calls[0].prompt, /<person>\nWhat is here\?\n<\/person>/)
+    assert.match(t.model.calls[0].prompt, /<reply>\n\n<\/reply>/)
+    assert.match(t.model.calls[1].prompt, /<reply>\nAll tests passed\.\n<\/reply>/)
+    assert.equal(t.storage.saved().sessions[S].lastTurnId, 'turn-2')
+    assert.equal(t.storage.saved().sessions[S].ledger.turn, 2)
+  })
+
   for (const order of ['notify first', 'done first'] as const) {
     test(`one ${order === 'notify first' ? 'notify' : 'done'} signal reads a complete rollout turn`, async () => {
       const t = codexSetup()

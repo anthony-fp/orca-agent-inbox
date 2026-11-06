@@ -228,13 +228,8 @@ export function createTracker(deps: TrackerDeps) {
         const read = bytes
           ? s.agent === 'codex' ? await deps.codexTurn?.(sessionId, readFrom(s)) ?? null : readTurn(bytes, readFrom(s), promptsBefore(s))
           : null
-        if (s.agent === 'codex' && read?.status === 'incomplete') {
-          update(sessionId, cur => ({ ...cur, offset: read.nextOffset }))
-          await save()
-          continue
-        }
         // An incomplete turn is final: a later prompt follows it. A complete one may still grow.
-        const isDone = s.agent === 'codex' ? read?.status === 'complete' : read?.status === 'incomplete' || (read?.status === 'complete' && clock.now() - grewAt >= QUIET_MS)
+        const isDone = read?.status === 'incomplete' || (read?.status === 'complete' && (s.agent === 'codex' || clock.now() - grewAt >= QUIET_MS))
         if (read && isDone && (await enqueue(sessionId, read))) continue
         if (clock.now() >= (deadlines.get(sessionId) as number)) return
         await clock.sleep(POLL_MS)
@@ -256,16 +251,23 @@ export function createTracker(deps: TrackerDeps) {
   }
 
   return {
-    /** A new Codex launch has no thread id yet; discard the old pane and terminal association. */
-    async clearPane(terminalId: string): Promise<void> {
-      const key = state.terminals[terminalId]?.paneKey
+    /** A launch discards the old Codex binding but keeps the pane's launch time. */
+    async clearPane(terminalId: string, launchedAt = clock.now(), paneKey?: string): Promise<void> {
+      const key = state.terminals[terminalId]?.paneKey ?? paneKey
       if (!key) return
       state = {
         ...state,
         terminals: Object.fromEntries(Object.entries(state.terminals).filter(([id]) => id !== terminalId)),
         panes: Object.fromEntries(Object.entries(state.panes).filter(([id]) => id !== key)),
+        paneLaunches: { ...state.paneLaunches, [key]: launchedAt },
         pendingCodex: state.pendingCodex && Object.fromEntries(Object.entries(state.pendingCodex).filter(([id]) => id !== key)),
       }
+      await save()
+    },
+
+    async markPaneLaunch(paneKey: string, launchedAt: number): Promise<void> {
+      if ((state.paneLaunches[paneKey] ?? -Infinity) >= launchedAt) return
+      state = { ...state, paneLaunches: { ...state.paneLaunches, [paneKey]: launchedAt } }
       await save()
     },
 

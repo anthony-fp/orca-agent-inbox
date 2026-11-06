@@ -46,7 +46,7 @@
 
 ## Code round 3 — 2026-11-05
 - Verified real: round 2 fixes (`src/turns.ts:260`, `src/socket.ts:142`, `src/worker.ts:336`).
-- [open] A skipped Codex launch keeps the terminal's old pane binding (`src/worker.ts:118-135`), so an old row can be sent into the new chat → small edit. Fix: every launch in a terminal, tracked or skipped, clears that terminal's pane binding.
-- [open] A late signal can bind a cleared pane again, and two signals can commit out of order across the awaited rollout lookup (`src/worker.ts:319-350`) → stored-state change. Fix: each pane saves the time of its last launch; a signal for a thread whose rollout started before it is refused; `bindCodex` runs one at a time per pane and reads the binding again after its awaits.
-- [open] An interrupted Codex turn is skipped, not sent with an empty reply (`src/turns.ts:231-234`), against `docs/spec.md:37` → small edit. Fix: treat `incomplete` as final for Codex as for Claude.
+- [fixed] Every terminal launch clears its old Codex pane binding; a skipped launch cannot send an old row (`src/worker.ts:118`, `src/turns.ts:255`, `src/worker.test.ts:168`, `src/worker.test.ts:195`).
+- [fixed] Pane launch times survive state upgrade; old rollouts cannot rebind after relaunch, and binds run in pane order with a post-await check (`src/state.ts:90`, `src/turns.ts:262`, `src/worker.ts:330`, `src/worker.ts:358`, `src/worker.ts:382`, `src/worker.test.ts:186`, `src/worker.test.ts:221`, `src/worker.test.ts:242`, `src/turns.test.ts:372`).
+- [fixed] An interrupted Codex turn reaches the model with an empty reply before the next complete turn (`src/turns.ts:231`, `src/turns.test.ts:452`).
 - Converged: the reviewer said another broad round is not worth more than these targeted fixes and the live check (T21), and that no external interface changes. These three are fixed with tests and then checked live in T21; no round 4.
