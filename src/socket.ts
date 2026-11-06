@@ -3,7 +3,9 @@
 //
 // The worker is the only writer. A tool call is applied at once, through the tracker's `edit`, so it lands in the
 // same ordered saves as the model runs, and is stamped with the session's active turn.
-import { chmod, lstat, mkdir, rm } from 'node:fs/promises'
+import { randomBytes } from 'node:crypto'
+import { lstatSync, unlinkSync } from 'node:fs'
+import { chmod, lstat, mkdir, rename } from 'node:fs/promises'
 import { createServer, type Server } from 'node:net'
 import { tmpdir, userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -34,7 +36,7 @@ export function binPaths(): { mcpServer: string; promptHook: string } {
 }
 
 export type Request =
-  | { type: 'prompt-start'; sessionId: string; cwd?: string }
+  | { type: 'prompt-start'; sessionId: string; cwd?: string; terminalId?: string }
   | { type: 'inbox-text'; sessionId: string; prompt?: string; cwd?: string }
   | { type: 'record' | 'close'; sessionId: string; args: Record<string, unknown> }
 
@@ -47,7 +49,12 @@ export type AnswerDeps = {
   now(): number
   /** The plan note for a session (planNote), read from its plan file now; null when its folder is not known. */
   planNote(sessionId: string): Promise<string | null>
+  /** Maps the prompt hook's terminal to a session that has none yet. */
+  bind?(terminalId: string, sessionId: string): Promise<void>
 }
+
+/** Orca's terminal handle, `term_` and an id, as Orca sets ORCA_TERMINAL_HANDLE. Any other value is ignored. */
+const HANDLE = /^term_[A-Za-z0-9-]{1,128}$/
 
 /** The turn a tool call made now belongs to. The transcript's count can catch up with the prompt-starts. */
 export function activeTurn(s: SessionState): number {
@@ -84,6 +91,8 @@ export function createAnswerer(deps: AnswerDeps): (request: unknown) => Promise<
     const withCwd = (s: SessionState): SessionState => (s.cwd || !cwd ? s : { ...s, cwd })
 
     if (request.type === 'prompt-start') {
+      // A launch Orca gave no terminal id is bound to the terminal its prompt hook runs in.
+      if (typeof request.terminalId === 'string' && HANDLE.test(request.terminalId)) await deps.bind?.(request.terminalId, sessionId)
       // Raised and saved before the answer, so the agent's first call in this turn carries the new turn.
       const started = await apply(sessionId, s => ({ session: { ...withCwd(s), activeTurn: activeTurn(s) + 1 }, out: true }))
       return started === null ? { error: 'unknown session' } : { text: '' }
@@ -121,8 +130,10 @@ export function createAnswerer(deps: AnswerDeps): (request: unknown) => Promise<
 const MAX_REQUEST = 1 << 20
 
 /**
- * Listens on `path`: a 0600 socket in a 0700 folder the user owns. A file left by an earlier worker is removed first,
- * so a restart makes the socket again.
+ * Listens on `path`: a 0600 socket in a 0700 folder the user owns. The socket is made under a name of its own, then
+ * renamed onto `path`, which replaces a file an earlier worker left. Node removes the name a socket was made under
+ * when its server closes, so a closing server removes `path` only while `path` is still its own socket: an old worker
+ * that closes after a new one started leaves the new one's file.
  */
 export async function listen(path: string, answer: (request: unknown) => Promise<Answer>, log?: (m: string) => void): Promise<Server> {
   const dir = dirname(path)
@@ -130,7 +141,7 @@ export async function listen(path: string, answer: (request: unknown) => Promise
   const info = await lstat(dir)
   if (!info.isDirectory() || (process.getuid && info.uid !== process.getuid())) throw new Error(`${dir} is not a folder this user owns`)
   await chmod(dir, 0o700)
-  await rm(path, { force: true })
+  const own = join(dir, `${randomBytes(3).toString('hex')}.s`)
 
   const server = createServer(conn => {
     let buf = ''
@@ -160,12 +171,21 @@ export async function listen(path: string, answer: (request: unknown) => Promise
   })
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
-    server.listen(path, () => {
+    server.listen(own, () => {
       server.off('error', reject)
       resolve()
     })
   })
-  await chmod(path, 0o600)
+  await chmod(own, 0o600)
+  const { ino } = await lstat(own)
+  await rename(own, path)
+  server.on('close', () => {
+    try {
+      if (lstatSync(path).ino === ino) unlinkSync(path)
+    } catch {
+      // gone already
+    }
+  })
   server.on('error', e => log?.(`socket: ${e.message}`))
   return server
 }

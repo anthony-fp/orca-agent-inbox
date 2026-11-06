@@ -6,7 +6,13 @@ import { planPath } from './core/plan'
 import { emptySession, type State } from './state'
 import { fakeClock } from './test-clock'
 import { PRUNE_MS } from './turns'
-import { createWorker } from './worker'
+import { createWorker, liveTools } from './worker'
+// @ts-expect-error: a plain Node script with no types
+import { ask } from '../bin/ask.mjs'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { binPaths } from './socket'
 
 const HOME = '/home/someone'
 const WS = { id: 'ws-1', kind: 'worktree', name: 'one', path: '/work/my_app.v2', branch: null, hostId: null }
@@ -30,7 +36,7 @@ const openLedger = () => {
   return applyUpdate(EMPTY, u, 0, 1)
 }
 
-async function setup(opts: { state?: State; files?: Record<string, string>; unreadable?: string[]; agents?: unknown[]; copyFails?: boolean; list?: unknown[] } = {}) {
+async function setup(opts: { state?: State; files?: Record<string, string>; unreadable?: string[]; agents?: unknown[]; copyFails?: boolean; list?: unknown[]; socket?: string } = {}) {
   const time = fakeClock(100 * DAY)
   const files = new Map(Object.entries(opts.files ?? {}))
   const reads: string[] = []
@@ -47,7 +53,7 @@ async function setup(opts: { state?: State; files?: Record<string, string>; unre
   const deps = {
     clock: time.clock,
     home: HOME,
-    tools: null,
+    tools: opts.socket ? { socketPath: opts.socket, ...binPaths() } : null,
     copy: async (text: string) => {
       if (opts.copyFails) throw new Error('no clipboard command on this system')
       copied.push(text)
@@ -67,10 +73,11 @@ async function setup(opts: { state?: State; files?: Record<string, string>; unre
       return text === undefined ? null : Buffer.from(text)
     },
   }
-  const worker = await mountWorker({ default: (orca: Parameters<typeof createWorker>[0]) => createWorker(orca, deps) }, { host })
+  let made: ReturnType<typeof createWorker> | null = null
+  const worker = await mountWorker({ default: (orca: Parameters<typeof createWorker>[0]) => (made = createWorker(orca, deps)) }, { host })
   await time.run()
   const saved = () => (host.data() as { storage: Record<string, State> }).storage.state
-  return { worker, host, time, files, reads, models, saved, copied }
+  return { worker, host, time, files, reads, models, saved, copied, close: () => made?.close() }
 }
 
 const launch = (command: string, over: Record<string, unknown> = {}) => ({
@@ -125,11 +132,33 @@ test('the launch hook tags a new claude session and tracks its terminal', async 
 
 test('a launch that is not tracked passes through unchanged', async () => {
   const t = await setup()
-  for (const event of [launch('codex', { agent: 'codex' }), launch('claude --continue'), launch('claude', { terminalId: undefined })]) {
+  for (const event of [launch('codex', { agent: 'codex' }), launch('claude --continue')]) {
     const out = await t.worker.hooks.fire('agent.launch.before', event)
     assert.equal(out.kind === 'continue' && out.event.command, event.command)
   }
   assert.equal(t.saved(), undefined)
+  await t.worker.deactivate()
+})
+
+test('a launch with no terminal is tagged; the prompt hook\'s terminal binds it, and inbox.view then shows its section', async () => {
+  const TERM = 'term_0f0f0f0f-1111-4222-8333-444444444444'
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  const t = await setup({ socket, agents: [{ terminalId: TERM, title: 'From the UI', agent: 'claude', state: 'working', stateStartedAt: 1 }] })
+  const out = await t.worker.hooks.fire('agent.launch.before', launch('claude', { terminalId: undefined }))
+  const id = /--session-id (\S+)/.exec(out.kind === 'continue' ? String(out.event.command) : '')?.[1]
+  assert.ok(id, 'tagged without a terminal')
+  assert.deepEqual(t.saved().terminals, {}, 'saved with no terminal mapping')
+  assert.ok(t.saved().sessions[id])
+  assert.deepEqual((await t.worker.request('inbox.view', undefined)).sections, [], 'no section before the first prompt')
+
+  // A value that is not a terminal handle binds nothing.
+  assert.deepEqual(await ask(socket, { type: 'prompt-start', sessionId: id, terminalId: '../etc' }, 2000), { text: '' })
+  assert.deepEqual(t.saved().terminals, {})
+  assert.deepEqual(await ask(socket, { type: 'prompt-start', sessionId: id, terminalId: TERM }, 2000), { text: '' })
+  assert.deepEqual(t.saved().terminals, { [TERM]: { sessionId: id } })
+  const view = await t.worker.request('inbox.view', undefined)
+  assert.deepEqual(view.sections.map((s: { terminalId: string; sessionId: string }) => [s.terminalId, s.sessionId]), [[TERM, id]])
+  await t.close()
   await t.worker.deactivate()
 })
 
@@ -143,6 +172,24 @@ test('a --resume <uuid> session starts at the transcript end, not at 0', async (
   await t.worker.emit('agent.status.changed', status('done', { mainAgent: { state: 'done', stateStartedAt: 1 } }))
   await t.time.run()
   assert.equal(t.models.length, 0, 'the old turn is never read')
+  await t.worker.deactivate()
+})
+
+test('status changes tell the panel to reload, at most once per 250 ms', async () => {
+  const t = await setup()
+  const posts = () => t.worker.posts.filter(p => p.event === 'inbox.changed').length
+  const before = posts()
+  // A new agent's or untracked agent's status reloads the panel too: agents.list gives what it shows.
+  await t.worker.emit('agent.status.changed', status('working', { terminalId: 'term-9' }))
+  await t.worker.emit('agent.status.changed', status('working', { terminalId: undefined }))
+  await t.worker.emit('agent.status.changed', status('blocked', { terminalId: 'term-9' }))
+  await t.time.run(t.time.now() + 249)
+  assert.equal(posts(), before)
+  await t.time.run(t.time.now() + 1)
+  assert.equal(posts(), before + 1)
+  await t.worker.emit('agent.status.changed', status('waiting', { terminalId: 'term-9' }))
+  await t.time.run(t.time.now() + 250)
+  assert.equal(posts(), before + 2)
   await t.worker.deactivate()
 })
 
@@ -266,6 +313,25 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
   await t.worker.deactivate()
 })
 
+test('inbox.view counts unread turns only for the sections it shows: the focused workspace, each terminal once', async () => {
+  const state: State = {
+    version: 1,
+    terminals: { 'term-1': { sessionId: S }, 'term-2': { sessionId: 's-2' } },
+    sessions: { [S]: { ...emptySession(100 * DAY), unread: 1 }, 's-2': { ...emptySession(100 * DAY), unread: 4 } },
+  }
+  // term-2 runs in another workspace, so agents.list (the focused workspace) leaves it out. Orca can give two
+  // statuses that resolve to one terminal.
+  const agents = [
+    { terminalId: 'term-1', title: 'Here', agent: 'claude', state: 'done', stateStartedAt: 2 },
+    { terminalId: 'term-1', title: 'Here', agent: 'claude', state: 'working', stateStartedAt: 1 },
+  ]
+  const t = await setup({ state, agents })
+  const view = await t.worker.request('inbox.view', undefined)
+  assert.deepEqual(view.sections.map((s: { terminalId: string }) => s.terminalId), ['term-1'])
+  assert.deepEqual([view.unread, view.untracked, view.others.length], [1, 0, 0])
+  await t.worker.deactivate()
+})
+
 test('inbox.view gives each section its plan, read again at a done; a changed plan tells the panel', async () => {
   const state: State = { version: 1, terminals: { 'term-1': { sessionId: S } }, sessions: { [S]: { ...emptySession(100 * DAY), cwd: WS.path } } }
   const agents = [{ terminalId: 'term-1', title: 'Fixer', agent: 'claude', state: 'done', stateStartedAt: 1 }]
@@ -383,7 +449,7 @@ test('each launch logs one line with its tag and why it was not tagged, never th
   assert.deepEqual(t.launches(), [
     'launch: agent=claude terminal=yes workspaceKind=worktree tagged=new tools=no reason=-',
     'launch: agent=codex terminal=yes workspaceKind=none tagged=no tools=no reason=not-claude',
-    'launch: agent=claude terminal=no workspaceKind=folder tagged=no tools=no reason=no-terminal',
+    'launch: agent=claude terminal=no workspaceKind=folder tagged=new tools=no reason=-',
     'launch: agent=claude terminal=yes workspaceKind=none tagged=no tools=no reason=continue',
   ])
   assert.ok(t.logs.every(l => !l.includes('secret')))
@@ -399,4 +465,9 @@ test('the hook is registered before the state loads: a launch while storage neve
   assert.ok(out.kind === 'continue' && /--session-id \S+/.test(String(out.event.command)))
   assert.deepEqual(t.launches(), ['launch: agent=claude terminal=yes workspaceKind=none tagged=new tools=no reason=-'])
   await t.worker.deactivate()
+})
+
+test("a worker that orca plugin check or test starts gets no socket, so it never replaces the live worker's", () => {
+  assert.equal(liveTools({ ORCA_PLUGIN_TEST_ROOT: '/some/plugin' }), null)
+  assert.match(liveTools({})?.socketPath ?? '', /worker\.sock$/)
 })

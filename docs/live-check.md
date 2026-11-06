@@ -118,3 +118,7 @@ The panel asks for `inbox.view` only at setup and on `inbox.changed` (`src/panel
 - A finding press (Do it, File issue), and a `step` press.
 - The no-tools note and the Claude-only note in the live panel.
 - A launch from workspace create.
+
+## Note for checks
+
+`orca plugin check` and `orca plugin test` start the real worker on this machine (they set `ORCA_PLUGIN_TEST_ROOT`). Any side effect on a shared path, such as the socket, needs that guard (`src/worker.ts:373`). Before the guard, each check run deleted the live socket.

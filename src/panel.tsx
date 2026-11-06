@@ -4,6 +4,7 @@
 // No build step: Orca strips the types and compiles the JSX when the panel loads.
 import {
   atom,
+  Box,
   Button,
   Callout,
   CodeView,
@@ -11,6 +12,7 @@ import {
   EmptyState,
   Heading,
   Input,
+  on,
   plugin,
   Progress,
   read,
@@ -205,6 +207,8 @@ function Labels({ rowKey: key, label }: { rowKey: string; label: RowLabel | null
 
 export function setup(ctx: { subscriptions: { dispose(): void }[] }) {
   ctx.subscriptions.push(plugin.on('inbox.changed', () => void load()))
+  // A focus change saves nothing in the worker, so the panel hears it from Orca. A panel needs no manifest entry.
+  ctx.subscriptions.push(on('workspace.changed', () => void load()))
   void load()
 }
 
@@ -294,15 +298,20 @@ function ReplyField({ section, row, hint, busy }: { section: InboxSection; row: 
   )
 }
 
-/** The row's text, with the question's number before it and the age on the right, as the inbox draws a row. */
+/**
+ * The row's text, with the question's number before it and the age on the right, as the inbox draws a row. Each age
+ * sits in a Box that does not shrink, so a narrow panel wraps the text beside it and never the age.
+ */
 function RowHead({ row, truncate }: { row: LabelledRow; truncate?: boolean }) {
   return (
     <Row gap="sm" align="start" justify="between">
       <Text truncate={truncate}>{row.handle ? `${row.handle} ${row.text}` : row.text}</Text>
       {row.age !== null && (
-        <Text size="sm" muted>
-          {row.age}
-        </Text>
+        <Box shrink={false}>
+          <Text size="sm" muted>
+            {row.age}
+          </Text>
+        </Box>
       )}
     </Row>
   )
@@ -388,9 +397,11 @@ function ClosedFold({ group }: { group: ClosedGroup }) {
               <Text size="sm" muted>
                 {c.mark ? `${c.mark} ${c.text}` : c.text}
               </Text>
-              <Text size="sm" muted>
-                {c.age}
-              </Text>
+              <Box shrink={false}>
+                <Text size="sm" muted>
+                  {c.age}
+                </Text>
+              </Box>
             </Row>
             <Text size="xs" muted>
               {c.outcome}
@@ -423,9 +434,11 @@ function Finding({ section, row }: { section: InboxSection; row: LabelledFinding
           <Text tone={FINDING_TONES[row.kind]}>{row.mark}</Text>
           <Text>{row.title}</Text>
         </Row>
-        <Text size="sm" muted>
-          {row.age}
-        </Text>
+        <Box shrink={false}>
+          <Text size="sm" muted>
+            {row.age}
+          </Text>
+        </Box>
       </Row>
       <Text size="sm">{row.detail}</Text>
       {row.fileName !== null && (

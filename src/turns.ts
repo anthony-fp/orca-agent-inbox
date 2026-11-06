@@ -244,18 +244,19 @@ export function createTracker(deps: TrackerDeps) {
      * `offset`: a resumed session's transcript end, so its old turns are never read again. Its ledger's turn starts at
      * `turn`: the person's prompts before `offset`, so the turn a prompt-start raises matches the turn the transcript
      * gives. A known session keeps its own offset and turn.
-     * Another terminal mapped to the same session stops being tracked.
+     * Another terminal mapped to the same session stops being tracked. A null terminal saves the session with no
+     * terminal: a launch Orca gave no terminal id, bound later by `bind`.
      */
     async track(
-      terminalId: string,
+      terminalId: string | null,
       sessionId: string,
       opts: { offset?: number; turn?: number; tools?: boolean } = {},
     ): Promise<void> {
-      const terminals = Object.fromEntries(Object.entries(state.terminals).filter(([, t]) => t.sessionId !== sessionId))
+      const terminals = terminalId === null ? state.terminals : Object.fromEntries(Object.entries(state.terminals).filter(([, t]) => t.sessionId !== sessionId))
       const known = state.sessions[sessionId]
       state = {
         ...state,
-        terminals: { ...terminals, [terminalId]: { sessionId } },
+        terminals: terminalId === null ? terminals : { ...terminals, [terminalId]: { sessionId } },
         sessions: {
           ...state.sessions,
           [sessionId]: known
@@ -264,6 +265,17 @@ export function createTracker(deps: TrackerDeps) {
         },
       }
       await save()
+    },
+
+    /**
+     * Maps a terminal to a known session that has no terminal yet: the prompt hook's terminal, for a launch Orca gave
+     * no terminal id. False when nothing changed.
+     */
+    async bind(terminalId: string, sessionId: string): Promise<boolean> {
+      if (!state.sessions[sessionId] || Object.values(state.terminals).some(t => t.sessionId === sessionId)) return false
+      state = { ...state, terminals: { ...state.terminals, [terminalId]: { sessionId } } }
+      await save()
+      return true
     },
 
     /** Changes a session and saves it. The change lands in this tick, before the write: a press checks and sends in one tick. */

@@ -266,7 +266,8 @@ describe('the socket', () => {
     await t.tracker.track(T, S)
     const path = join(tempDir(), 'run', 'w.sock')
     // A worker that stopped left its file behind: a plain file in the way.
-    await listen(path, async () => ({ text: 'first' })).then(s => s.close())
+    const first = await listen(path, async () => ({ text: 'first' }))
+    await new Promise<void>(r => first.close(() => r()))
     writeFileSync(path, 'stale')
     const server = await listen(path, request => t.send(request))
     servers.push(server)
@@ -278,6 +279,16 @@ describe('the socket', () => {
     assert.deepEqual(await ask(path, { type: 'record', sessionId: 'nobody', args: QUESTION }, 2000), { error: 'unknown session' })
     assert.deepEqual(await ask(path, 'not json', 2000), { error: 'bad request' })
     assert.equal(t.items()[0].turn, 1)
+  })
+
+  test('a worker that closes after a new one listens on the same path leaves the new socket in place', async () => {
+    const path = join(tempDir(), 'w.sock')
+    const a = await listen(path, async () => ({ text: 'a' }))
+    const b = await listen(path, async () => ({ text: 'b' }))
+    servers.push(b)
+    await new Promise<void>(r => a.close(() => r()))
+    assert.equal(existsSync(path), true)
+    assert.deepEqual(await ask(path, { type: 'prompt-start', sessionId: S }, 2000), { text: 'b' })
   })
 
   test('closing the server removes its file', async () => {
@@ -326,8 +337,10 @@ async function fakeSocket(reply: (request: Record<string, unknown>) => Answer | 
 }
 
 /** Runs a bin script with these lines on stdin, and gives what it printed once it exits. */
-function run(script: string, args: string[], input: string, opts: { keepOpen?: boolean } = {}) {
-  const child = spawn(process.execPath, [join(BIN, script), ...args], { stdio: ['pipe', 'pipe', 'pipe'] })
+function run(script: string, args: string[], input: string, opts: { keepOpen?: boolean; handle?: string } = {}) {
+  // A test run inside an Orca terminal inherits its handle: each run sets its own.
+  const { ORCA_TERMINAL_HANDLE: _, ...env } = process.env
+  const child = spawn(process.execPath, [join(BIN, script), ...args], { stdio: ['pipe', 'pipe', 'pipe'], env: opts.handle ? { ...env, ORCA_TERMINAL_HANDLE: opts.handle } : env })
   let out = ''
   child.stdout.setEncoding('utf8').on('data', (d: string) => (out += d))
   child.stdin.write(input)
@@ -411,6 +424,17 @@ describe('bin/prompt-hook.mjs', () => {
         { type: 'prompt-start', sessionId: S, cwd: '/work/app' },
         { type: 'inbox-text', sessionId: S, prompt: 'carry on', cwd: '/work/app' },
       ])
+    } finally {
+      await sock.close()
+    }
+  })
+
+  test("sends the terminal's ORCA_TERMINAL_HANDLE on prompt-start", async () => {
+    const sock = await fakeSocket(() => ({ text: '' }))
+    try {
+      const handle = 'term_0f0f0f0f-1111-4222-8333-444444444444'
+      await run('prompt-hook.mjs', ['--socket', sock.path, '--session', S], hookInput(), { handle }).exited
+      assert.deepEqual(sock.requests[0], { type: 'prompt-start', sessionId: S, cwd: '/work/app', terminalId: handle })
     } finally {
       await sock.close()
     }

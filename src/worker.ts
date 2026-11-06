@@ -78,6 +78,9 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 /** How long a launch waits for its tracking before Orca starts it anyway. The tracking goes on. */
 const TRACK_WAIT_MS = 1000
 
+/** How long the panel's reload after a status change waits, so a burst of changes reloads it once. */
+const RELOAD_MS = 250
+
 /**
  * Why `tagLaunch` left a launch untagged, for the launch log. It reads the command as `tagLaunch` does and never
  * changes it. The log never holds the command, which can hold a prompt.
@@ -104,8 +107,8 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
   orca.hooks.on('agent.launch.before', async (event, next) => {
     const line = (tagged: string, tools: boolean, reason: string) =>
       log(`launch: agent=${event.agent} terminal=${event.terminalId ? 'yes' : 'no'} workspaceKind=${event.workspaceKind ?? 'none'} tagged=${tagged} tools=${tools ? 'yes' : 'no'} reason=${reason}`)
-    const terminalId = event.terminalId
-    if (!terminalId) return line('no', false, 'no-terminal')
+    // A launch with no terminal id is tagged too, and saved with no terminal: its prompt hook binds the terminal.
+    const terminalId = event.terminalId ?? null
     let tagged: ReturnType<typeof tagLaunch>
     try {
       tagged = tagLaunch(event.agent, event.command, undefined, deps.tools ?? undefined)
@@ -134,7 +137,22 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
     return tagged.command === event.command ? undefined : next({ ...event, command: tagged.command })
   })
 
+  /**
+   * The panel reloads after every status change, at most once per RELOAD_MS: a new agent, a status or an untracked
+   * agent saves nothing, so no save tells the panel.
+   */
+  let reloading = false
+  function reloadSoon(): void {
+    if (reloading) return
+    reloading = true
+    void deps.clock.sleep(RELOAD_MS).then(() => {
+      reloading = false
+      orca.panels.post('inbox.changed', {})
+    })
+  }
+
   orca.events.on('agent.status.changed', async event => {
+    reloadSoon()
     // Spec step 2: the main agent's state, not the combined one; an older Orca has only `state`.
     const terminalId = event.terminalId
     if (!terminalId) return
@@ -253,6 +271,11 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
       const read = await readPlan(id)
       return read ? planNote(read.path, read.plan) : null
     },
+    bind: async (terminalId, sessionId) => {
+      if (!(await tracker.bind(terminalId, sessionId))) return
+      log('bind: terminal from prompt hook')
+      orca.panels.post('inbox.changed', {})
+    },
   })
   const server: Promise<Server | null> = deps.tools
     ? listen(
@@ -276,7 +299,14 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
     const others: OtherAgent[] = []
     let untracked = 0
     let unread = 0
+    // Orca gives one entry per status, and two statuses can resolve to one terminal: the newest entry comes first and
+    // stands for the terminal, so a section and its unread turns count once.
+    const seen = new Set<string>()
     for (const [n, agent] of agents.entries()) {
+      if (agent.terminalId) {
+        if (seen.has(agent.terminalId)) continue
+        seen.add(agent.terminalId)
+      }
       if (isOther(agent)) {
         const name = agent.agent ?? ''
         others.push({ key: agent.terminalId ?? `agent-${n}`, title: agent.title ?? name.charAt(0).toUpperCase() + name.slice(1) })
@@ -335,6 +365,15 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
 
 let worker: { close(): Promise<void> } | null = null
 
+/**
+ * The socket and scripts for a worker Orca runs. `orca plugin check` and `orca plugin test` set ORCA_PLUGIN_TEST_ROOT
+ * and start the worker on this machine: there it gets no socket, since one on the shared path would replace the live
+ * worker's socket and remove it on close.
+ */
+export function liveTools(env: NodeJS.ProcessEnv): WorkerDeps['tools'] {
+  return env.ORCA_PLUGIN_TEST_ROOT ? null : { socketPath: socketPath(), ...binPaths() }
+}
+
 export default function activate(orca: OrcaWorkerApi): void {
   worker = createWorker(orca, {
     clock: realClock,
@@ -343,7 +382,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     readFile: readOrNull,
     listDirs,
     copy: copyToClipboard,
-    tools: { socketPath: socketPath(), ...binPaths() },
+    tools: liveTools(process.env),
   })
 }
 

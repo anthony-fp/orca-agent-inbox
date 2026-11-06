@@ -282,6 +282,27 @@ test('inbox.changed asks for the view again', async () => {
   await clean(view)
 })
 
+test('a workspace change, as on a focus change, asks for the view again', async () => {
+  let current: InboxView = EMPTY_VIEW
+  const host = mockHost({ requests: { 'inbox.view': () => current } })
+  const view = await mount(panel, { host })
+  current = ONE_AGENT
+  await view.emit('workspace.changed', { context: { branch: 'main', displayName: 'two', terminals: [] } })
+  assert.ok(view.find({ text: '1) Rename the folder to tools?' }))
+  await clean(view)
+})
+
+test("a row's age never shrinks, so a narrow panel keeps it on one line", async () => {
+  for (const v of [ONE_AGENT, FINDINGS, THREE_AGENTS]) {
+    const view = await open(v)
+    const ages = view.findAll({ type: 'Text' }).filter(t => /^(now|\d+[smhd])$/.test(t.text)).map(t => t.text)
+    const kept = view.findAll({ type: 'Box' }).filter(b => b.props.shrink === false).map(b => b.text)
+    assert.ok(ages.length > 0)
+    assert.deepEqual(kept, ages)
+    await clean(view)
+  }
+})
+
 test('findings: Issues and Opportunities after Tasks, each row with its mark, detail, file and the inbox finding buttons', async () => {
   const view = await open(FINDINGS)
   const groups = texts(view, 'Text').filter(t => / · \d+$/.test(t))
