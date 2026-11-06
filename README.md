@@ -9,9 +9,9 @@ An Orca plugin that adds an inbox icon to Orca's right sidebar. The panel shows 
 
 The panel has one section per tracked agent, newest activity first.
 
-## Claude Code only
+## Claude Code and Codex
 
-Version 1 tracks Claude Code. Codex support is coming. A Codex agent in the workspace gets a short section that says so.
+The plugin tracks Claude Code and Codex agents that Orca launches. The first time a Codex agent starts with the plugin, Codex shows "Hooks need review". Choose "Trust all and continue" once for each Codex account. Until you do, that agent's section says "Trust the Agent Inbox hook in Codex", and its answer buttons offer Copy instead of sending.
 
 ## Install and develop
 
@@ -32,8 +32,8 @@ Loading grants the plugin its access, so read the manifest and the sections belo
 
 | Access | What the plugin does with it |
 |---|---|
-| `agent.launch.before` hook | Tags each new `claude` launch so the plugin knows its session (see below). It passes every other launch through unchanged. |
-| `agent.status.changed` event | Learns when an agent's turn ends (`done`), so it reads the turn from the transcript. |
+| `agent.launch.before` hook | Tags each new `claude` launch and adds config flags to each `codex` launch, so the plugin knows its session (see below). It passes every other launch through unchanged. |
+| `agent.status.changed` event | Learns when an agent's turn ends (`done`), so it reads the turn from the transcript (a Codex rollout, for Codex). |
 | `agent:read` | Lists the agents in the focused workspace, to draw a section for each one and to count the agents it does not track. |
 | `terminal:send` | Types your answer, reply or hand-off into the agent's terminal when you press a button. It sends only when the agent waits at its prompt. |
 | `storage:own` | Keeps one ledger (questions, tasks, findings, press labels) per agent session in the plugin's own storage. |
@@ -52,7 +52,16 @@ If the launch already sets `--mcp-config`, `--strict-mcp-config`, `--append-syst
 
 The MCP server (`bin/mcp-server.mjs`) and the prompt hook (`bin/prompt-hook.mjs`) are thin clients. They pass each call to the worker over a local Unix socket, `orca-agent-inbox-<uid>/worker.sock` in the system temp folder, with mode 0600 in a folder only your user can open. The worker is the only writer.
 
-## It runs `claude -p` on your account
+## What it adds to each tracked `codex` launch
+
+The launch hook inserts `-c` flags right after `codex` and changes nothing else. It does not change `codex exec`, or a launch that already sets `notify`, `developer_instructions` or `mcp_servers.orca-inbox`.
+
+- `notify`: runs `bin/codex-notify.mjs` at each turn end. It sends the worker only the pane, thread and turn ids, then runs the `notify` from your Codex `config.toml`, if you set one.
+- `mcp_servers.orca-inbox`: the same `record` and `close` tools as for Claude, with `ORCA_PANE_KEY` and `CODEX_HOME` passed through.
+- `developer_instructions`: the inbox guidance.
+- `hooks.UserPromptSubmit`: the same prompt hook as for Claude. Codex asks you to trust it once.
+
+## It runs `claude -p` or `codex exec` on your account
 
 After each tracked turn ends, the worker reads the new part of the transcript and runs the inbox model on it, to catch a question or task the agent asked in its reply but did not record:
 
@@ -60,11 +69,11 @@ After each tracked turn ends, the worker reads the new part of the transcript an
 claude -p --model sonnet --effort low --no-session-persistence --strict-mcp-config --setting-sources "" --tools ""
 ```
 
-This is one Sonnet call per turn, on your own Claude account and its usage. The call loads none of your settings, tools or MCP servers, and saves no session. After three failed runs on one turn, the panel shows "N turns not read".
+For a Codex agent it runs `codex exec --ephemeral --ignore-user-config --ignore-rules -s read-only` instead, on that agent's Codex account, with a 120 s limit. This is one model call per turn, on your own account and its usage. The call loads none of your settings, tools or MCP servers, and saves no session. After three failed runs on one turn, the panel shows "N turns not read".
 
 ## What it does not track
 
-- A session started outside Orca's agent launcher, such as `claude` typed into a plain shell. The panel shows how many such agents it sees as "N agents not tracked".
+- A session started outside Orca's agent launcher, such as `claude` or `codex resume` typed into a plain shell. The panel shows how many such agents it sees as "N agents not tracked".
 - A restored session, `--continue`, `--resume` with a name or no id, and `--fork-session`.
 - A terminal after `/clear` starts a new session file, until the next launch.
 - Agents on SSH or WSL hosts.
