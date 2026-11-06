@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { test } from 'node:test'
+import { userInfo } from 'node:os'
 
 import { modelArgs, runInboxModel, type ModelProcess, type Spawn } from './model'
 
@@ -59,6 +60,20 @@ test('a good answer parses into an update', async () => {
   assert.equal(s.calls[0]?.stdin, '<card>\n</card>')
   assert.deepEqual(s.calls[0]?.args, modelArgs('SYSTEM'))
   assert.equal(s.calls[0]?.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, '1600')
+})
+
+test('the run carries USER and LOGNAME, which the CLI needs to find its login, when the worker has none', async () => {
+  const saved = { USER: process.env.USER, LOGNAME: process.env.LOGNAME }
+  delete process.env.USER
+  delete process.env.LOGNAME
+  try {
+    const s = stub({ stdout: GOOD })
+    await runInboxModel('p', { spawn: s.spawn })
+    assert.equal(s.calls[0]?.env.USER, userInfo().username)
+    assert.equal(s.calls[0]?.env.LOGNAME, userInfo().username)
+  } finally {
+    for (const [k, v] of Object.entries(saved)) if (v !== undefined) process.env[k] = v
+  }
 })
 
 test('an answer with no known key is unparsed', async () => {

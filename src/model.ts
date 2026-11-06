@@ -2,7 +2,7 @@
 // Sonnet, low effort, 1600 output tokens at most, 45 s. Orca gives a plugin no model call, so this
 // runs `claude -p`. One run per terminal at a time is the turn tracker's job, not this file's.
 import { spawn as nodeSpawn } from 'node:child_process'
-import { tmpdir } from 'node:os'
+import { tmpdir, userInfo } from 'node:os'
 
 import { parseReply, type Update } from './core/ledger'
 import { ORCA, systemText } from './core/model-text'
@@ -69,9 +69,16 @@ export function runInboxModel(prompt: string, opts: ModelOptions = {}): Promise<
       finish({ ok: false, reason, detail, ms: Date.now() - started })
 
     // The cwd is a temp folder so the run reads no project's files.
+    // Orca starts the worker with no USER or LOGNAME, and without USER the CLI cannot find its login in the macOS keychain.
+    const user = userInfo().username
     const child = spawn('claude', modelArgs(system), {
       cwd: tmpdir(),
-      env: { ...process.env, CLAUDE_CODE_MAX_OUTPUT_TOKENS: MAX_OUTPUT_TOKENS },
+      env: {
+        ...process.env,
+        USER: process.env.USER || user,
+        LOGNAME: process.env.LOGNAME || user,
+        CLAUDE_CODE_MAX_OUTPUT_TOKENS: MAX_OUTPUT_TOKENS,
+      },
     })
     const timer = setTimeout(() => {
       fail('timeout', `no answer in ${timeoutMs} ms`)
