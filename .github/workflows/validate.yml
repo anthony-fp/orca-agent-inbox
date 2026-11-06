@@ -1,0 +1,60 @@
+name: Validate plugin
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+env:
+  # The Orca commit whose validator checks this plugin. Bump it on purpose, as stablyai/orca-plugins does.
+  ORCA_REF: 239e17f84fc920bc2be62b6a73336dc57fc0150b
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out plugin
+        uses: actions/checkout@v4
+        with:
+          path: plugin
+          persist-credentials: false
+
+      - name: Check out Orca
+        uses: actions/checkout@v4
+        with:
+          repository: stablyai/orca
+          ref: ${{ env.ORCA_REF }}
+          path: orca
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: orca/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: orca/pnpm-lock.yaml
+
+      # The validator needs only Orca's JavaScript dependencies, not Electron.
+      - name: Install Orca validator
+        working-directory: orca
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run build:packages
+
+      - name: Validate manifest and files
+        working-directory: orca
+        run: pnpm validate:plugin "$GITHUB_WORKSPACE/plugin"
+
+      - name: Typecheck
+        working-directory: plugin
+        run: |
+          npm ci --ignore-scripts
+          npm run typecheck
