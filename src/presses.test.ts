@@ -439,3 +439,8 @@ describe('presses', () => {
     assert.deepEqual(await t.presses.press(t.input({ id: ISSUE.id, action: 'fix' })), { ok: false, refused: 'closed' })
   })
 })
+
+test('press text drops control characters an agent could put in a row', async () => {
+  const { oneLine } = await import('./presses')
+  assert.equal(oneLine('Use \u001b[2Jport\u0003 4000\tnow\nplease\u007f'), 'Use [2Jport 4000 now please')
+})

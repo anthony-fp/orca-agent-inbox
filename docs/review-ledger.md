@@ -65,3 +65,7 @@
 - Reviewer: both round 2 fixes are real (direct alias across restart, overlapping launches).
 - [fixed] Prune lost an alias chain A→B→C when it visited A before keeping B → prune repeats the alias pass until nothing changes (src/turns.ts prune); restart test with a live chain and a cycle with no live session.
 - Converged: reviewer says a fourth broad round costs more than the remaining risk; this was the one targeted fix left.
+
+## Security review (v0.1.1..HEAD) — 2026-11-06
+- No high-confidence vulnerabilities. Traced: socket and fixed script folder (owner and symlink refused, 0700), launch quoting, hook scripts, presses, transcript paths, model calls, panel text.
+- [fixed] Needs verification: ESC, Ctrl-C and other control characters an agent puts in row text reached terminal.sendText → oneLine drops them and turns tabs into spaces (src/presses.ts oneLine); test.

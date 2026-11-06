@@ -71,9 +71,12 @@ export function drawnToken(s: SessionState): string {
   return JSON.stringify([s.lastTurnId, s.queue.map(t => t.turnId)])
 }
 
-/** A message on one line: a newline would submit early. */
-function oneLine(text: string): string {
-  return text.replace(/\s*[\r\n]+\s*/g, ' ').trim()
+/**
+ * A message on one line: a newline would submit early. Other control characters, such as ESC or Ctrl-C, are
+ * dropped: row text comes from an agent, and the terminal could act on them.
+ */
+export function oneLine(text: string): string {
+  return text.replace(/\s*[\r\n]+\s*/g, ' ').replace(/\t/g, ' ').replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '').trim()
 }
 
 /**
