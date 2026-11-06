@@ -1,6 +1,6 @@
 {
   "name": "orca-agent-inbox",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "Adds an Agent Inbox tab to the right sidebar. It gives a high-level view of the workspace plan, the questions waiting on your decision, and the bugs your agent finds as it reads your code. It also lists the follow-up tasks you must do yourself, so you don't lose track of them. Works with Claude Code and Codex.",
   "scripts": {
