@@ -1,0 +1,5 @@
+{"type":"session_meta","payload":{"cwd":"/repo","source":"interactive"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}
+{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"What is here?"}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"A small project."}]}}
+{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-1"}}

@@ -16,3 +16,12 @@ Parts of this plugin are copied from the inbox repo, `github.com/anthony-fp/inbo
 | `src/core/plan.test.ts` | `tests/plan.test.ts` | Run on `node:test` |
 
 `src/core/now.ts` is new.
+
+Codex transcript code was copied from `github.com/anthony-fp/inbox` at commit `aed5f528752ab9fe7417d063a317c4163eb75469`:
+
+| File here | Copied from | Changes |
+|---|---|---|
+| `src/core/codex-transcript.ts` | `codex/src/transcript.ts` | Import paths and the new `readCodexTurn` adapter |
+| `src/core/codex-conversation.ts` | `hooks/conversation.ts` | The `Turn` type and `flattenConversation` only |
+| `src/core/codex-activity.ts` | `codex/src/core.ts` | The `activityOf` and `patchFiles` helpers only |
+| `src/core/model-text.ts` | `codex/src/texts.ts` | Added the `ORCA_CODEX` host with Orca tool names |

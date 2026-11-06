@@ -297,6 +297,9 @@ export const ORCA: Host = {
     "The inbox plugin shows the user what waits on them: your open questions and the tasks only they can do, in the Agent Inbox panel in Orca's sidebar, and your findings, in the panel's Issues and Opportunities sections.",
 }
 
+/** Codex uses the same Orca panel and the same MCP server tool names. */
+export const ORCA_CODEX: Host = { ...ORCA, agent: 'Codex' }
+
 function surfaceAtStart(host: Host): string {
   return host.surface.charAt(0).toUpperCase() + host.surface.slice(1)
 }
