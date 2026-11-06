@@ -10,11 +10,13 @@ import { join } from 'node:path'
 import type { OrcaWorkerApi } from 'orca/worker'
 
 import { parsePlan, planNote, planPath, type PlanView } from './core/plan'
+import { codexResumeStart, codexToolTurn, readCodexTurn, rolloutFor } from './core/codex-transcript'
 import { tagLaunch, tokenize } from './launch'
 import { runInboxModel } from './model'
 import { createPresses, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
 import type { CopyOutcome, InboxSection, InboxView, OtherAgent } from './protocol'
 import { binPaths, createAnswerer, listen, socketPath } from './socket'
+import { emptySession } from './state'
 import { cwdOf, promptsBefore, wholeLinesEnd } from './transcript'
 import { createTracker, type Clock, type TrackerDeps } from './turns'
 
@@ -28,6 +30,8 @@ export type WorkerDeps = {
   readFile(path: string): Promise<Buffer | null>
   /** The names of the folders in a folder; none when it does not exist. */
   listDirs(path: string): Promise<string[]>
+  /** Codex's rollout lookup, replaceable for tests that use hand-written files. */
+  codexRollout?: typeof rolloutFor
   /** The socket the agent's tools and prompt hook reach, and their scripts. Null: no socket, and launches get no tools. */
   tools: { socketPath: string; mcpServer: string; promptHook: string } | null
   /** Writes the text to the system clipboard; throws when it cannot. Orca gives a panel no clipboard. */
@@ -68,10 +72,10 @@ function copyToClipboard(text: string): Promise<void> {
 }
 
 /** `agent` is Orca's name for the agent, such as `claude` or `codex`; an older Orca may leave it out. */
-type Agent = { terminalId: string | null; title: string | null; state: string; agent?: string }
+type Agent = { terminalId: string | null; title: string | null; state: string; agent?: string; mainAgent?: { state?: string } }
 
-/** Version 1 tracks Claude Code only (spec step 5). An agent with no name counts as Claude: it may be one. */
-const isOther = (agent: Agent) => agent.agent !== undefined && agent.agent !== 'claude'
+/** An agent with no name counts as Claude: older Orca may leave it out. */
+const isOther = (agent: Agent) => agent.agent !== undefined && agent.agent !== 'claude' && agent.agent !== 'codex'
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
@@ -101,6 +105,8 @@ function untaggedReason(agent: string, command: string): string {
 
 export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): Promise<void> } {
   const log = (m: string) => orca.log(m)
+  const codexLaunches = new Map<string, { kind: 'tracked' | 'skipped'; at: number }>()
+  let codexLaunchWithoutTerminal = false
 
   // Both are registered first, before any other work, so a launch or a status while the state loads still reaches
   // them. Each waits for `ready` inside.
@@ -109,13 +115,22 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
       log(`launch: agent=${event.agent} terminal=${event.terminalId ? 'yes' : 'no'} workspaceKind=${event.workspaceKind ?? 'none'} tagged=${tagged} tools=${tools ? 'yes' : 'no'} reason=${reason}`)
     // A launch with no terminal id is tagged too, and saved with no terminal: its prompt hook binds the terminal.
     const terminalId = event.terminalId ?? null
+    if (event.agent === 'codex' && !terminalId) codexLaunchWithoutTerminal = true
     let tagged: ReturnType<typeof tagLaunch>
     try {
       tagged = tagLaunch(event.agent, event.command, undefined, deps.tools ?? undefined)
     } catch (e) {
       return line('no', false, `error:${message(e)}`)
     }
-    if (!tagged.session) return line('no', false, untaggedReason(event.agent, event.command))
+    if (!tagged.session) {
+      if (event.agent === 'codex' && terminalId) codexLaunches.set(terminalId, { kind: 'skipped', at: deps.clock.now() })
+      return line('no', false, untaggedReason(event.agent, event.command))
+    }
+    if (tagged.session.kind === 'codex') {
+      if (terminalId) codexLaunches.set(terminalId, { kind: 'tracked', at: deps.clock.now() })
+      line('codex', tagged.tools, '-')
+      return next({ ...event, command: tagged.command })
+    }
     const { id, kind } = tagged.session
     line(kind, tagged.tools, '-')
     const tracking = (async () => {
@@ -156,10 +171,19 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
     // Spec step 2: the main agent's state, not the combined one; an older Orca has only `state`.
     const terminalId = event.terminalId
     if (!terminalId) return
+    if (event.paneKey) paneTerminals.set(event.paneKey, terminalId)
     const state = (event.mainAgent?.state ?? event.state) as TerminalStatus
     statuses.set(terminalId, state)
-    if (state !== 'done') return
     await ready
+    if (event.paneKey) {
+      for (const pending of tracker.state().pendingCodex?.[event.paneKey] ?? [])
+        await bindCodex(event.paneKey, pending.threadId, pending.codexHome, 'notify', pending.turnId)
+    }
+    const pane = event.paneKey ? tracker.state().panes[event.paneKey] : undefined
+    if (pane && tracker.state().terminals[terminalId]?.sessionId !== pane.threadId)
+      await tracker.track(terminalId, pane.threadId, { pane: { key: event.paneKey, codexHome: pane.codexHome, promptHookSeen: pane.promptHookSeen } })
+    if (pane && state !== 'done') await tracker.codexStatus(pane.threadId, false)
+    if (state !== 'done') return
     const sessionId = tracker.state().terminals[terminalId]?.sessionId
     if (sessionId) void readPlan(sessionId).catch(e => log(`plan: ${message(e)}`))
     void tracker.done(terminalId).catch(e => log(`done: ${message(e)}`))
@@ -193,6 +217,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
   async function read(sessionId: string): Promise<Buffer | null> {
     const s = tracker.state().sessions[sessionId]
     if (!s) return null
+    if (s.agent === 'codex') return s.transcript ? deps.readFile(s.transcript) : null
     const hit = s.transcript ? { path: s.transcript, bytes: await deps.readFile(s.transcript) } : await find(sessionId)
     if (!hit?.bytes) return null
     await learn(sessionId, { transcript: hit.path, cwd: s.cwd ? undefined : cwdOf(hit.bytes) })
@@ -236,11 +261,16 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
 
   /** The newest main-agent status per terminal, for the send check. Lost on a restart; agents.list fills it again. */
   const statuses = new Map<string, TerminalStatus>()
+  const paneTerminals = new Map<string, string>()
 
   const tracker = createTracker({
     storage: orca.storage,
     clock: deps.clock,
     read,
+    codexTurn: async (sessionId, offset) => {
+      const bytes = await read(sessionId)
+      return bytes ? readCodexTurn(bytes, offset) : null
+    },
     model: deps.model,
     log,
     changed: () => orca.panels.post('inbox.changed', {}),
@@ -263,6 +293,46 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
     .then(() => tracker.prune())
     .catch(e => log(`start: ${message(e)}`))
 
+  async function bindCodex(paneKey: string, threadId: string, codexHome: string, source: 'prompt' | 'tool' | 'notify', turnId?: string): Promise<void> {
+    const previous = tracker.state().panes[paneKey]
+    const home = codexHome || previous?.codexHome || ''
+    const known = tracker.state().sessions[threadId]
+    const rollout = known?.transcript && previous?.threadId === threadId
+      ? { path: known.transcript, cwd: known.cwd ?? '' }
+      : home ? await (deps.codexRollout ?? rolloutFor)(home, threadId) : null
+    // Notify has no thread-source marker; the rollout's session_meta must prove it is the main chat.
+    if (source === 'notify' && !rollout) {
+      const terminal = paneTerminals.get(paneKey)
+      await tracker.stageCodex(paneKey, threadId, home, turnId ?? '', terminal ? statuses.get(terminal) === 'done' : false)
+      return
+    }
+    const needsStart = !known || (known.offset === 0 && known.lastTurnId === null && known.queue.length === 0 && !known.transcript)
+    const bytes = (needsStart || source === 'tool') && rollout ? await deps.readFile(rollout.path) : null
+    const { offset, turn } = needsStart && bytes ? codexResumeStart(bytes, turnId) : { offset: 0, turn: 0 }
+    const currentOffset = known?.queue.at(-1)?.nextOffset ?? known?.offset ?? offset
+    const toolTurn = source === 'tool' && bytes ? codexToolTurn(bytes, currentOffset, turnId) : null
+    const terminalId = paneTerminals.get(paneKey) ??
+      Object.entries(tracker.state().terminals).find(([, t]) => t.sessionId === previous?.threadId)?.[0] ?? null
+    await tracker.track(terminalId, threadId, {
+      offset, turn,
+      pane: { key: paneKey, codexHome: home, promptHookSeen: source === 'prompt' },
+    })
+    if (rollout || source === 'tool') await tracker.edit(threadId, s => ({
+      ...s,
+      transcript: rollout?.path ?? s.transcript,
+      cwd: s.cwd ?? rollout?.cwd ?? null,
+      ...(s.offset === 0 && s.lastTurnId === null && s.queue.length === 0 && offset > 0
+        ? { offset, ledger: { ...s.ledger, turn: Math.max(s.ledger.turn, turn) } } : {}),
+      activeTurn: source === 'tool' ? Math.max(s.activeTurn, toolTurn ?? turn + 1) : s.activeTurn,
+    }))
+    for (const pending of tracker.state().pendingCodex?.[paneKey] ?? []) {
+      if (pending.threadId !== threadId) continue
+      await tracker.codexNotify(threadId, pending.turnId, pending.done || statuses.get(terminalId ?? '') === 'done')
+      await tracker.clearStagedCodex(paneKey, threadId, pending.turnId)
+    }
+    tracker.retryCodex(threadId)
+  }
+
   const answer = createAnswerer({
     state: () => tracker.state(),
     edit: (id, change) => tracker.edit(id, change),
@@ -276,7 +346,16 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
       log('bind: terminal from prompt hook')
       orca.panels.post('inbox.changed', {})
     },
+    bindCodex,
+    notifyCodex: async (paneKey, threadId, turnId) => {
+      const terminalId = paneTerminals.get(paneKey)
+      await tracker.codexNotify(threadId, turnId, terminalId ? statuses.get(terminalId) === 'done' : false)
+    },
   })
+  void ready.then(async () => {
+    for (const [paneKey, pending] of Object.entries(tracker.state().pendingCodex ?? {}))
+      for (const notice of pending) await bindCodex(paneKey, notice.threadId, notice.codexHome, 'notify', notice.turnId)
+  }).catch(e => log(`codex: could not retry notify: ${message(e)}`))
   const server: Promise<Server | null> = deps.tools
     ? listen(
         deps.tools.socketPath,
@@ -309,23 +388,40 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
       }
       if (isOther(agent)) {
         const name = agent.agent ?? ''
-        others.push({ key: agent.terminalId ?? `agent-${n}`, title: agent.title ?? name.charAt(0).toUpperCase() + name.slice(1) })
+        others.push({ key: agent.terminalId ?? `agent-${n}`, title: agent.title ?? name.charAt(0).toUpperCase() + name.slice(1), agent: name })
         continue
       }
       const sessionId = agent.terminalId ? state.terminals[agent.terminalId]?.sessionId : undefined
       const s = sessionId ? state.sessions[sessionId] : undefined
       if (!agent.terminalId || !sessionId || !s) {
+        if (agent.agent === 'codex') {
+          const launch = agent.terminalId ? codexLaunches.get(agent.terminalId) : undefined
+          if (agent.terminalId && launch?.kind === 'tracked') {
+            const blank = emptySession(launch.at)
+            sections.push({
+              terminalId: agent.terminalId, sessionId: `codex-launch:${agent.terminalId}`,
+              title: agent.title ?? 'Codex', agent: 'codex', trustHook: true,
+              drawn: '', lastActivity: launch.at, plan: null, planError: null, tools: true,
+              ...labelledRows(blank, deps.clock.now()),
+            })
+          } else others.push({ key: agent.terminalId ?? `agent-${n}`, title: agent.title ?? 'Codex', agent: 'codex',
+            ...(launch?.kind === 'skipped' ? { reason: 'launch-skipped' as const }
+              : codexLaunchWithoutTerminal ? { reason: 'launch-unmatched' as const } : {}) })
+          continue
+        }
         untracked += 1
         continue
       }
-      // agents.list gives the combined state: `done` there means the main agent is done too.
-      if (!statuses.has(agent.terminalId) && STATES.includes(agent.state)) statuses.set(agent.terminalId, agent.state as TerminalStatus)
+      // Prefer the main agent's state when the host reports both.
+      const mainState = agent.mainAgent?.state ?? agent.state
+      if (!statuses.has(agent.terminalId) && STATES.includes(mainState)) statuses.set(agent.terminalId, mainState as TerminalStatus)
       unread += s.unread
       const { plan, error: planError } = plans.get(sessionId) ?? (await readPlan(sessionId)) ?? { plan: null, error: null }
       sections.push({
         terminalId: agent.terminalId,
         sessionId,
-        title: agent.title ?? 'Claude Code',
+        title: agent.title ?? (s.agent === 'codex' ? 'Codex' : 'Claude Code'),
+        ...(s.agent === 'codex' ? { agent: 'codex' as const, trustHook: !Object.values(state.panes).some(p => p.threadId === sessionId && p.promptHookSeen) } : {}),
         drawn: drawnToken(s),
         lastActivity: s.touchedAt,
         plan,
@@ -378,7 +474,7 @@ export default function activate(orca: OrcaWorkerApi): void {
   worker = createWorker(orca, {
     clock: realClock,
     home: homedir(),
-    model: (prompt, source) => runInboxModel(prompt, { source }),
+    model: (prompt, source, codexHome) => runInboxModel(prompt, { source, ...(codexHome === undefined ? {} : { codexHome }) }),
     readFile: readOrNull,
     listDirs,
     copy: copyToClipboard,

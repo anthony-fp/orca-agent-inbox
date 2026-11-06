@@ -48,6 +48,13 @@ export type SessionState = {
   transcript: string | null
   /** The session's folder, for its plan file: the first `cwd` in its transcript, or the prompt hook's `cwd`. */
   cwd: string | null
+  /** Codex identity stays with the session if /new reuses its pane for another thread. */
+  agent: 'claude' | 'codex'
+  codexHome: string | null
+  /** Paired completion signals stay durable until their rollout turn enters the queue. */
+  codexNotified: string[]
+  codexDones: number
+  codexLastDone: boolean
 }
 
 /**
@@ -74,19 +81,27 @@ export type PressLabel = {
   turnId?: string
 }
 
-export type State = {
-  version: 1
+type StateBody = {
   /** Each tracked terminal's session. A terminal goes when its session is pruned. */
   terminals: Record<string, { sessionId: string }>
   sessions: Record<string, SessionState>
 }
 
-export function emptySession(now = 0): SessionState {
-  return { offset: 0, queue: [], ledger: EMPTY, lastTurnId: null, unread: 0, presses: {}, touchedAt: now, activeTurn: 0, told: { inbox: null, closed: [] }, tools: true, transcript: null, cwd: null }
+export type CodexPane = { agent: 'codex'; threadId: string; codexHome: string; promptHookSeen: boolean }
+export type State = (StateBody & { version: 1 }) | CurrentState
+export type CurrentState = StateBody & {
+  version: 2
+  panes: Record<string, CodexPane>
+  /** Notify-only threads awaiting a rollout check before they may bind a pane. */
+  pendingCodex?: Record<string, { threadId: string; codexHome: string; turnId: string; done: boolean }[]>
 }
 
-export function emptyState(): State {
-  return { version: 1, terminals: {}, sessions: {} }
+export function emptySession(now = 0): SessionState {
+  return { offset: 0, queue: [], ledger: EMPTY, lastTurnId: null, unread: 0, presses: {}, touchedAt: now, activeTurn: 0, told: { inbox: null, closed: [] }, tools: true, transcript: null, cwd: null, agent: 'claude', codexHome: null, codexNotified: [], codexDones: 0, codexLastDone: false }
+}
+
+export function emptyState(): CurrentState {
+  return { version: 2, terminals: {}, sessions: {}, panes: {} }
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -135,6 +150,11 @@ function upgradeSession(raw: unknown, now: number): SessionState {
     // A session saved before these were kept finds its transcript again by its id.
     transcript: typeof raw.transcript === 'string' ? raw.transcript : null,
     cwd: typeof raw.cwd === 'string' ? raw.cwd : null,
+    agent: raw.agent === 'codex' ? 'codex' : 'claude',
+    codexHome: typeof raw.codexHome === 'string' ? raw.codexHome : null,
+    codexNotified: Array.isArray(raw.codexNotified) ? raw.codexNotified.filter((id): id is string => typeof id === 'string') : [],
+    codexDones: Math.max(0, Number(raw.codexDones) || 0),
+    codexLastDone: raw.codexLastDone === true,
   }
 }
 
@@ -151,7 +171,7 @@ function upgradeTold(raw: unknown): Told {
  * Reads any saved value into the current state shape. A missing or unreadable value is the empty state.
  * `now` is the touch time for a session saved before sessions kept one.
  */
-export function upgradeState(raw: unknown, now = 0): State {
+export function upgradeState(raw: unknown, now = 0): CurrentState {
   if (!isObject(raw)) return emptyState()
   const terminals: State['terminals'] = {}
   for (const [id, t] of Object.entries(isObject(raw.terminals) ? raw.terminals : {})) {
@@ -160,5 +180,22 @@ export function upgradeState(raw: unknown, now = 0): State {
   }
   const sessions: State['sessions'] = {}
   for (const [id, s] of Object.entries(isObject(raw.sessions) ? raw.sessions : {})) sessions[id] = upgradeSession(s, now)
-  return { version: 1, terminals, sessions }
+  const panes: CurrentState['panes'] = {}
+  for (const [key, pane] of Object.entries(isObject(raw.panes) ? raw.panes : {})) {
+    if (isObject(pane) && pane.agent === 'codex' && typeof pane.threadId === 'string' && typeof pane.codexHome === 'string')
+      panes[key] = { agent: 'codex', threadId: pane.threadId, codexHome: pane.codexHome, promptHookSeen: pane.promptHookSeen === true }
+  }
+  for (const pane of Object.values(panes)) {
+    const session = sessions[pane.threadId]
+    if (session) sessions[pane.threadId] = { ...session, agent: 'codex', codexHome: pane.codexHome || session.codexHome }
+  }
+  const pendingCodex: NonNullable<CurrentState['pendingCodex']> = {}
+  for (const [key, entries] of Object.entries(isObject(raw.pendingCodex) ? raw.pendingCodex : {})) {
+    if (!Array.isArray(entries)) continue
+    const kept = entries.filter((entry): entry is { threadId: string; codexHome: string; turnId: string; done: boolean } =>
+      isObject(entry) && typeof entry.threadId === 'string' && typeof entry.codexHome === 'string' && typeof entry.turnId === 'string')
+      .map(entry => ({ ...entry, done: entry.done === true }))
+    if (kept.length > 0) pendingCodex[key] = kept
+  }
+  return Object.keys(pendingCodex).length > 0 ? { version: 2, terminals, sessions, panes, pendingCodex } : { version: 2, terminals, sessions, panes }
 }

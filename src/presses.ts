@@ -12,6 +12,7 @@ import { closeFinding, closeItem } from './core/ledger'
 import { findingRows, fixLabel, nowRows, stepsOf, type FindingGroups, type FindingRow, type NowGroups, type NowRow } from './core/now'
 import type { Finding, Item, Ledger } from './core/types'
 import type { PressLabel, SessionState, State } from './state'
+import { codexPromptAfter } from './core/codex-transcript'
 import { promptAfter } from './transcript'
 import type { Clock } from './turns'
 
@@ -234,7 +235,9 @@ export function createPresses(deps: PressDeps) {
     const deadline = clock.now() + CONFIRM_MS
     for (;;) {
       const bytes = await deps.read(sessionId)
-      const prompt = bytes ? promptAfter(bytes, label.from ?? 0) : null
+      const prompt = bytes ? deps.state().sessions[sessionId]?.agent === 'codex'
+        ? codexPromptAfter(bytes, label.from ?? 0)
+        : promptAfter(bytes, label.from ?? 0) : null
       if (prompt) {
         // Another prompt first means this answer's fate is not known.
         const ours = prompt.text.replace(/\s+/g, ' ').includes(label.text)

@@ -377,7 +377,7 @@ function Task({ section, row }: { section: InboxSection; row: LabelledRow }) {
         </Button>
       </Row>
       {read(replying)[key] === true && (
-        <ReplyField section={section} row={row} hint="Your reply to Claude" busy={busy} />
+        <ReplyField section={section} row={row} hint={`Your reply to ${section.agent === 'codex' ? 'Codex' : 'Claude'}`} busy={busy} />
       )}
       <Labels rowKey={key} label={label} />
     </Stack>
@@ -460,7 +460,7 @@ function Finding({ section, row }: { section: InboxSection; row: LabelledFinding
           Dismiss
         </Button>
       </Row>
-      {read(replying)[key] === true && <ReplyField section={section} row={row} hint="Your reply to Claude" busy={busy} />}
+      {read(replying)[key] === true && <ReplyField section={section} row={row} hint={`Your reply to ${section.agent === 'codex' ? 'Codex' : 'Claude'}`} busy={busy} />}
       <Labels rowKey={key} label={label} />
     </Stack>
   )
@@ -559,7 +559,7 @@ const hasFindings = ({ findings: f }: InboxSection) =>
 /** True when the section has nothing to draw beyond its title. */
 function isEmpty(s: InboxSection): boolean {
   const { questions, tasks, closed } = s
-  return questions.length + tasks.length + closed.questions.total + closed.tasks.total === 0 && !hasFindings(s) && s.plan === null && s.planError === null && s.tools
+  return questions.length + tasks.length + closed.questions.total + closed.tasks.total === 0 && !hasFindings(s) && s.plan === null && s.planError === null && s.tools && !s.trustHook
 }
 
 function Section({ section }: { section: InboxSection }) {
@@ -567,6 +567,7 @@ function Section({ section }: { section: InboxSection }) {
   return (
     <Stack gap="sm">
       <Heading level={3}>{section.title}</Heading>
+      {section.trustHook && <Text muted size="sm">Trust the Agent Inbox hook in Codex</Text>}
       {!section.tools && (
         <Text muted size="sm">
           No tools: this launch set its own MCP, system prompt or settings flags, so Claude cannot record items itself.
@@ -608,14 +609,19 @@ function Section({ section }: { section: InboxSection }) {
   )
 }
 
-/** An agent that is not Claude Code (spec step 5): its title and the Claude-only note. */
+/** An agent the plugin has no tracked section for. */
+function otherNote(agent: OtherAgent): string {
+  if (agent.agent !== 'codex') return 'Agent Inbox does not track this agent.'
+  if (agent.reason === 'launch-skipped') return 'Agent Inbox did not track this Codex launch.'
+  if (agent.reason === 'launch-unmatched') return 'A Codex launch had no terminal ID; this pane may be untracked.'
+  return 'Started before Agent Inbox; not tracked.'
+}
+
 function Other({ agent }: { agent: OtherAgent }) {
   return (
     <Stack gap="sm">
       <Heading level={3}>{agent.title}</Heading>
-      <Text muted size="sm">
-        Agent Inbox supports Claude Code only for now. Codex support is coming soon.
-      </Text>
+      <Text muted size="sm">{otherNote(agent)}</Text>
     </Stack>
   )
 }
@@ -645,10 +651,10 @@ function Footer({ view }: { view: InboxView }) {
   )
 }
 
-/** The Claude sections, or the empty state that stands for them, then a section per other agent. */
+/** The tracked sections, or their empty state, then agents without a tracked section. */
 function Body({ view }: { view: InboxView }) {
   const others = view.others.map(agent => ({ key: `other:${agent.key}`, draw: <Other agent={agent} /> }))
-  const claude =
+  const sections =
     view.sections.length === 0
       ? []
       : view.sections.every(isEmpty)
@@ -665,13 +671,13 @@ function Body({ view }: { view: InboxView }) {
             },
           ]
         : view.sections.map(section => ({ key: section.sessionId, draw: <Section section={section} /> }))
-  // A workspace with only agents that are not Claude Code shows only their sections.
-  const blocks = [...claude, ...others]
+  // A workspace with only agents without tracked sections shows their notes.
+  const blocks = [...sections, ...others]
   if (blocks.length === 0)
     return (
       <EmptyState
         title={view.untracked > 0 ? 'No tracked agents in this workspace' : 'No agents in this workspace'}
-        description="Start Claude Code from Orca, and its questions and tasks show here."
+        description="Start Claude Code or Codex from Orca, and its questions and tasks show here."
         icon="bell"
       />
     )

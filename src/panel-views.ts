@@ -10,7 +10,7 @@ const NO_FINDINGS: LabelledFindings = { issues: [], opportunities: [], closed: {
 
 export function section(
   n: number,
-  rows: Partial<Pick<InboxSection, 'questions' | 'tasks' | 'closed' | 'findings' | 'plan' | 'planError' | 'tools'>> = {},
+  rows: Partial<Pick<InboxSection, 'questions' | 'tasks' | 'closed' | 'findings' | 'plan' | 'planError' | 'tools' | 'agent' | 'trustHook'>> = {},
 ): InboxSection {
   return {
     terminalId: `terminal-${n}`,
@@ -212,13 +212,13 @@ export const PLAN: InboxView = {
   unread: 0,
 }
 
-/** A Claude Code agent whose launch got no tools, beside a Codex agent. */
+/** A Claude Code agent whose launch got no tools, beside an untracked Codex agent. */
 export const MIXED: InboxView = {
   sections: [section(1, { tools: false, questions: [row('q1', 'Keep the cache?', { options: ['Yes', 'No'] })] })],
-  others: [{ key: 'terminal-9', title: 'Codex' }],
+  others: [{ key: 'terminal-9', title: 'Codex', agent: 'codex' }],
   untracked: 0,
   unread: 0,
 }
 
 /** A workspace with only a Codex agent. */
-export const CODEX_ONLY: InboxView = { sections: [], others: [{ key: 'terminal-9', title: 'Codex' }], untracked: 0, unread: 0 }
+export const CODEX_ONLY: InboxView = { sections: [], others: [{ key: 'terminal-9', title: 'Codex', agent: 'codex' }], untracked: 0, unread: 0 }

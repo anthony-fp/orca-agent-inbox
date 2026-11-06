@@ -11,6 +11,10 @@ import { fileURLToPath } from 'node:url'
 
 // @ts-expect-error: a plain Node script with no types
 import { ask } from '../bin/ask.mjs'
+// @ts-expect-error: a plain Node script with no types
+import { homeFromParent, homeFromRollout } from '../bin/codex-home.mjs'
+// @ts-expect-error: a plain Node script with no types
+import { main as runCodexNotify, notifyCommand, notifyRequest } from '../bin/codex-notify.mjs'
 import { parseReply } from './core/ledger'
 import { ORCA, inboxText } from './core/model-text'
 import { planNote } from './core/plan'
@@ -118,6 +122,93 @@ describe('tool calls on the session ledger', () => {
     assert.deepEqual(await t.send({ type: 'shout', sessionId: S }), { error: 'bad request' })
     assert.deepEqual(await t.send(null), { error: 'bad request' })
   })
+})
+
+test('a first-turn Codex record binds and saves the main thread before answering', async () => {
+  const storage = memoryStorage()
+  const time = fakeClock(1000)
+  const tracker = createTracker({ storage, clock: time.clock, read: async () => null, model: async () => ({ ok: false, reason: 'failed', detail: '', ms: 0 }) })
+  await tracker.start()
+  const answer = createAnswerer({
+    state: () => tracker.state(), edit: (id, change) => tracker.edit(id, change), now: time.now,
+    planNote: async () => null,
+    bindCodex: async (paneKey, threadId, codexHome) => {
+      await tracker.track(null, threadId, { pane: { key: paneKey, codexHome, promptHookSeen: false } })
+      await tracker.edit(threadId, s => ({ ...s, activeTurn: 1 }))
+    },
+  })
+  const result = await answer({ type: 'record', sessionId: 'thread-1', paneKey: 'pane-1', codexHome: '/codex', args: FINDING })
+  assert.match(text(result), /^Recorded\./)
+  assert.equal(tracker.state().panes['pane-1'].threadId, 'thread-1')
+  assert.equal(storage.saved().sessions['thread-1'].ledger.findings[0].title, FINDING.title)
+  assert.equal(storage.saved().sessions['thread-1'].activeTurn, 1)
+})
+
+test('Codex prompt and notify use one pane binding, and a later thread replaces it', async () => {
+  const storage = memoryStorage()
+  const time = fakeClock(1000)
+  const tracker = createTracker({ storage, clock: time.clock, read: async () => null, model: async () => ({ ok: false, reason: 'failed', detail: '', ms: 0 }) })
+  await tracker.start()
+  const answer = createAnswerer({
+    state: () => tracker.state(), edit: (id, change) => tracker.edit(id, change), now: time.now,
+    planNote: async () => null,
+    bindCodex: async (paneKey, threadId, codexHome, source) => tracker.track(null, threadId, { pane: { key: paneKey, codexHome, promptHookSeen: source === 'prompt' } }),
+  })
+  await answer({ type: 'prompt-start', sessionId: 'thread-1', paneKey: 'pane-1', codexHome: '/codex' })
+  assert.equal(tracker.state().panes['pane-1'].promptHookSeen, true)
+  await answer({ type: 'codex-turn', payload: { paneKey: 'pane-1', codexHome: '/codex', threadId: 'thread-2', turnId: 'turn-2', type: 'agent-turn-complete' } })
+  assert.equal(tracker.state().panes['pane-1'].threadId, 'thread-2')
+  assert.equal(tracker.state().panes['pane-1'].promptHookSeen, true)
+})
+
+test('notify reduction excludes a reply over one MiB and reads the top-level user command', () => {
+  const request = notifyRequest({ type: 'agent-turn-complete', 'thread-id': 'thread-1', 'turn-id': 'turn-1', 'last-assistant-message': 'x'.repeat(1 << 20) }, { ORCA_PANE_KEY: 'pane-1', CODEX_HOME: '/codex' })
+  assert.deepEqual(request, { type: 'codex-turn', payload: { paneKey: 'pane-1', codexHome: '/codex', threadId: 'thread-1', turnId: 'turn-1', type: 'agent-turn-complete' } })
+  assert.ok(Buffer.byteLength(JSON.stringify(request)) < 1024)
+  assert.deepEqual(notifyCommand('notify = ["echo", "hello"]\n[features]\nnotify = ["wrong"]\n'), ['echo', 'hello'])
+  assert.deepEqual(notifyCommand("notify = ['echo', 'hello']\n"), ['echo', 'hello'])
+  assert.equal(notifyCommand('[features]\nnotify = ["wrong"]\n'), null)
+  assert.equal(notifyRequest({ 'thread-id': 'thread-1' }, { ORCA_PANE_KEY: 'pane-1' }), null, 'no account home is guessed')
+})
+
+test('a missing CODEX_HOME uses only a matching open rollout, never another account', () => {
+  const path = '/accounts/one/sessions/2026/11/05/rollout-2026-11-05-thread-1.jsonl'
+  assert.equal(homeFromRollout(path, 'thread-1'), '/accounts/one')
+  assert.equal(homeFromRollout(path, 'thread-2'), '')
+  assert.equal(homeFromRollout('/accounts/two/sessions/latest/thread-1.jsonl', 'thread-1'), '')
+  const run = () => ({ status: 0, stdout: `p123\nn${path}\nn/accounts/two/sessions/2026/11/05/rollout-2026-11-05-thread-2.jsonl\n` })
+  assert.equal(homeFromParent('thread-1', run), '/accounts/one')
+  assert.equal(homeFromParent('thread-3', run), '')
+})
+
+test('a personal notify still runs when worker reporting has no pane key', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'inbox-codex-home-'))
+  const marker = join(home, 'payload.json')
+  const script = join(home, 'capture.mjs')
+  writeFileSync(script, "import { writeFileSync } from 'node:fs'; writeFileSync(process.argv[2], process.argv[3]);\n")
+  writeFileSync(join(home, 'config.toml'), `notify = [${[process.execPath, script, marker].map(x => JSON.stringify(x)).join(', ')}]\n`)
+  const payload = JSON.stringify({ type: 'agent-turn-complete', 'thread-id': 'thread-1' })
+  try {
+    await runCodexNotify('/nonexistent/w.sock', payload, { CODEX_HOME: home })
+    assert.equal(readFileSync(marker, 'utf8'), payload)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('a first tool call with no account home still saves its pane and finding', async () => {
+  const storage = memoryStorage()
+  const time = fakeClock(1000)
+  const tracker = createTracker({ storage, clock: time.clock, read: async () => null, model: async () => ({ ok: false, reason: 'failed', detail: '', ms: 0 }) })
+  await tracker.start()
+  const answer = createAnswerer({
+    state: () => tracker.state(), edit: (id, change) => tracker.edit(id, change), now: time.now, planNote: async () => null,
+    bindCodex: async (paneKey, threadId, codexHome) => tracker.track(null, threadId, { pane: { key: paneKey, codexHome, promptHookSeen: false } }),
+  })
+  const result = await answer({ type: 'record', paneKey: 'pane-1', sessionId: 'thread-1', codexHome: '', args: FINDING })
+  assert.match(text(result), /^Recorded\./)
+  assert.equal(tracker.state().panes['pane-1'].codexHome, '')
+  assert.equal(storage.saved().sessions['thread-1'].ledger.findings[0].title, FINDING.title)
 })
 
 describe('the turn stamp (spec step 4)', () => {
@@ -337,10 +428,10 @@ async function fakeSocket(reply: (request: Record<string, unknown>) => Answer | 
 }
 
 /** Runs a bin script with these lines on stdin, and gives what it printed once it exits. */
-function run(script: string, args: string[], input: string, opts: { keepOpen?: boolean; handle?: string } = {}) {
+function run(script: string, args: string[], input: string, opts: { keepOpen?: boolean; handle?: string; env?: Record<string, string> } = {}) {
   // A test run inside an Orca terminal inherits its handle: each run sets its own.
   const { ORCA_TERMINAL_HANDLE: _, ...env } = process.env
-  const child = spawn(process.execPath, [join(BIN, script), ...args], { stdio: ['pipe', 'pipe', 'pipe'], env: opts.handle ? { ...env, ORCA_TERMINAL_HANDLE: opts.handle } : env })
+  const child = spawn(process.execPath, [join(BIN, script), ...args], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...env, ...(opts.handle ? { ORCA_TERMINAL_HANDLE: opts.handle } : {}), ...opts.env } })
   let out = ''
   child.stdout.setEncoding('utf8').on('data', (d: string) => (out += d))
   child.stdin.write(input)
@@ -350,16 +441,38 @@ function run(script: string, args: string[], input: string, opts: { keepOpen?: b
 }
 
 /** Sends JSON-RPC lines to the MCP server and reads answers until `count` came back. */
-async function mcp(socket: string, messages: unknown[], count: number, timeout = 5000) {
-  const r = run('mcp-server.mjs', ['--socket', socket, '--session', S, '--timeout', String(timeout)], messages.map(m => `${JSON.stringify(m)}\n`).join(''), { keepOpen: true })
+async function mcp(socket: string, messages: unknown[], count: number, timeout = 5000, env?: Record<string, string>) {
+  const r = run('mcp-server.mjs', ['--socket', socket, ...(env ? [] : ['--session', S]), '--timeout', String(timeout)], messages.map(m => `${JSON.stringify(m)}\n`).join(''), { keepOpen: true, env })
   const deadline = Date.now() + 10_000
   while (r.out().split('\n').filter(Boolean).length < count && Date.now() < deadline) await new Promise(res => setTimeout(res, 20))
   r.child.stdin.end()
   await r.exited
-  return r.out().split('\n').filter(Boolean).map(line => JSON.parse(line))
+  return r.out().split('\n').filter(Boolean).map(line => JSON.parse(line)).sort((x, y) => x.id - y.id)
 }
 
 describe('bin/mcp-server.mjs', () => {
+  test('Codex binds only the main thread; sub-agent calls never reach the main ledger', async () => {
+    const sock = await fakeSocket(req => ({ text: `answer to ${req.type}` }))
+    try {
+      const env = { ORCA_PANE_KEY: 'pane-1', CODEX_HOME: '/codex' }
+      const meta = (source: string) => ({ threadId: source === 'user' ? 'thread-1' : 'sub-1', 'x-codex-turn-metadata': { thread_source: source } })
+      const answers = await mcp(sock.path, [
+        { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'record', arguments: FINDING, _meta: meta('user') } },
+        { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'record', arguments: FINDING, _meta: meta('subagent') } },
+        { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'close', arguments: { id: 'i1', reason: 'fixed' } } },
+      ], 3, 2000, env)
+      assert.equal(answers[0].result.isError, undefined)
+      assert.equal(answers[1].result.isError, true)
+      assert.equal(answers[2].result.isError, undefined, 'missing metadata still gets an answer')
+      assert.deepEqual(sock.requests, [
+        { type: 'record', paneKey: 'pane-1', codexHome: '/codex', codexTurnId: '', sessionId: 'thread-1', args: FINDING },
+        { type: 'close', paneKey: 'pane-1', codexHome: '/codex', codexTurnId: '', args: { id: 'i1', reason: 'fixed' } },
+      ])
+    } finally {
+      await sock.close()
+    }
+  })
+
   test('initialize, tools/list and tools/call over stdio', async () => {
     const sock = await fakeSocket(req => ({ text: `answer to ${req.type}` }))
     try {
@@ -414,6 +527,27 @@ describe('bin/mcp-server.mjs', () => {
 describe('bin/prompt-hook.mjs', () => {
   const hookInput = (over: Record<string, unknown> = {}) => JSON.stringify({ session_id: S, hook_event_name: 'UserPromptSubmit', prompt: 'carry on', cwd: '/work/app', ...over })
 
+  test('Codex stdin binds the pane before printing text, while agent_id is ignored', async () => {
+    const sock = await fakeSocket(req => (req.type === 'prompt-start' ? { text: '' } : { text: 'Open inbox items' }))
+    try {
+      const env = { ORCA_PANE_KEY: 'pane-1', CODEX_HOME: '' }
+      const transcript_path = `/codex/sessions/2026/11/05/rollout-2026-11-05-${S}.jsonl`
+      const input = hookInput({ transcript_path })
+      const { code, out } = await run('prompt-hook.mjs', ['--socket', sock.path], input, { env }).exited
+      assert.equal(code, 0)
+      assert.equal(out, 'Open inbox items\n')
+      assert.deepEqual(sock.requests, [
+        { type: 'prompt-start', sessionId: S, cwd: '/work/app', paneKey: 'pane-1', codexHome: '/codex', codexTurnId: '' },
+        { type: 'inbox-text', sessionId: S, prompt: 'carry on', cwd: '/work/app', paneKey: 'pane-1', codexHome: '/codex', codexTurnId: '' },
+      ])
+      await run('prompt-hook.mjs', ['--socket', sock.path], hookInput({ transcript_path, agent_id: 'sub-agent' }), { env }).exited
+      await run('prompt-hook.mjs', ['--socket', sock.path], hookInput({ transcript_path, agent_id: '' }), { env }).exited
+      assert.equal(sock.requests.length, 2)
+    } finally {
+      await sock.close()
+    }
+  })
+
   test('sends prompt-start, then inbox-text, and prints the text', async () => {
     const sock = await fakeSocket(req => (req.type === 'prompt-start' ? { text: '' } : { text: 'inbox: what waits on the user' }))
     try {
@@ -467,4 +601,26 @@ describe('bin/prompt-hook.mjs', () => {
       await sock.close()
     }
   })
+})
+
+test('Codex notify waits at most five seconds for the worker, then runs the user notify with the original payload', async () => {
+  const sock = await fakeSocket(() => undefined)
+  const home = mkdtempSync(join(tmpdir(), 'inbox-codex-home-'))
+  const marker = join(home, 'payload.json')
+  const script = join(home, 'capture.mjs')
+  writeFileSync(script, "import { writeFileSync } from 'node:fs'; writeFileSync(process.argv[2], process.argv[3]);\n")
+  writeFileSync(join(home, 'config.toml'), `notify = [${[process.execPath, script, marker].map(x => JSON.stringify(x)).join(', ')}]\n`)
+  const payload = JSON.stringify({ type: 'agent-turn-complete', 'thread-id': 'thread-1', 'turn-id': 'turn-1', 'last-assistant-message': 'private reply' })
+  try {
+    const start = Date.now()
+    const result = await run('codex-notify.mjs', [sock.path, payload], '', { env: { ORCA_PANE_KEY: 'pane-1', CODEX_HOME: home } }).exited
+    const elapsed = Date.now() - start
+    assert.equal(result.code, 0)
+    assert.ok(elapsed >= 4900 && elapsed < 9000, `notify waited ${elapsed}ms`)
+    assert.deepEqual(sock.requests, [{ type: 'codex-turn', payload: { paneKey: 'pane-1', codexHome: home, threadId: 'thread-1', turnId: 'turn-1', type: 'agent-turn-complete' } }])
+    assert.equal(readFileSync(marker, 'utf8'), payload)
+  } finally {
+    await sock.close()
+    rmSync(home, { recursive: true, force: true })
+  }
 })

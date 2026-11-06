@@ -1,14 +1,13 @@
-// Launch tagging (spec "How it works", step 1, and "The agent's tools", step 1). A pure function:
+// Launch tagging (spec "How it works", step 1, and "Codex (version 2)", step 1). A pure function:
 // the agent.launch.before hook calls it and passes its command on. It adds `--session-id <uuid>` to
-// a new Claude Code session and, when asked, the flags that give a tracked session the inbox tools.
+// a new Claude Code session or `-c` inbox flags to an interactive Codex launch.
 // It never changes any other part of any command.
 
-import { guidanceText, ORCA } from './core/model-text'
+import { dirname, join } from 'node:path'
 
-export interface LaunchSession {
-  id: string
-  kind: 'new' | 'resume'
-}
+import { guidanceText, ORCA, ORCA_CODEX } from './core/model-text'
+
+export type LaunchSession = { id: string; kind: 'new' | 'resume' } | { kind: 'codex'; id?: undefined }
 
 export interface TaggedLaunch {
   command: string
@@ -117,8 +116,43 @@ function toolFlags(id: string, t: LaunchTools): string {
   ].join(' ')
 }
 
+/** Each Codex -c value is TOML within one shell word. The prompt hook has no per-launch input. */
+function codexFlags(t: LaunchTools): string {
+  const notify = join(dirname(t.mcpServer), 'codex-notify.mjs')
+  const hook = ['node', t.promptHook, '--socket', t.socketPath].map(shellQuote).join(' ')
+  const values = [
+    `notify=${JSON.stringify(['node', notify, t.socketPath])}`,
+    `mcp_servers.orca-inbox.command=${JSON.stringify('node')}`,
+    `mcp_servers.orca-inbox.args=${JSON.stringify([t.mcpServer, '--socket', t.socketPath])}`,
+    `mcp_servers.orca-inbox.env_vars=${JSON.stringify(['ORCA_PANE_KEY'])}`,
+    `mcp_servers.orca-inbox.default_tools_approval_mode=${JSON.stringify('approve')}`,
+    `developer_instructions=${JSON.stringify(guidanceText(ORCA_CODEX))}`,
+    `hooks.UserPromptSubmit=[{hooks=[{type="command",command=${JSON.stringify(hook)}}]}]`,
+  ]
+  return values.map(value => `-c ${shellQuote(value)}`).join(' ')
+}
+
 function isClaude(word: string): boolean {
   return word.slice(word.lastIndexOf('/') + 1) === 'claude'
+}
+
+function isCodex(word: string): boolean {
+  return word.slice(word.lastIndexOf('/') + 1) === 'codex'
+}
+
+/** Codex config that would be overwritten by the plugin's flags. */
+function codexClash(args: string[]): boolean {
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--') break
+    const value = args[i] === '-c' || args[i] === '--config' ? args[++i] :
+      args[i].startsWith('--config=') ? args[i].slice('--config='.length) :
+      args[i].startsWith('-c=') ? args[i].slice(3) : null
+    if (value === undefined) return true
+    if (value === null) continue
+    const key = value.split('=', 1)[0]?.trim()
+    if (key === 'notify' || key === 'developer_instructions' || key === 'mcp_servers.orca-inbox' || key?.startsWith('mcp_servers.orca-inbox.')) return true
+  }
+  return false
 }
 
 /** Splits `--flag=value` into its flag and value. */
@@ -132,9 +166,10 @@ function splitInline(arg: string): [string, string | undefined] {
  * - New session: inserts ` --session-id <uuid>` right after the program word, so a trailing
  *   prompt argument stays last and still works. A launch that already sets `--session-id` keeps it.
  * - `--resume <uuid>` with no `--fork-session`: keeps that uuid.
- * - Every other resume form, any other agent, and any command this cannot parse: unchanged, null.
+ * - Every other Claude resume form, other agents, and commands this cannot parse: unchanged, null.
  * - With `tools`, a tracked launch also gets the flags from `toolFlags`, right after the program
  *   word, unless it already has a flag in `TOOL_FLAGS`.
+ * A Codex launch gets stable `-c` flags unless it is `exec` or sets a conflicting config value.
  */
 export function tagLaunch(
   agent: string,
@@ -143,13 +178,23 @@ export function tagLaunch(
   tools?: LaunchTools,
 ): TaggedLaunch {
   const untracked: TaggedLaunch = { command, session: null, tools: false }
-  if (agent !== 'claude') return untracked
+  if (agent !== 'claude' && agent !== 'codex') return untracked
   const tokens = tokenize(command)
   if (!tokens) return untracked
 
   let p = 0
   while (p < tokens.length && ENV_ASSIGNMENT.test(tokens[p].text)) p++
-  if (p >= tokens.length || !isClaude(tokens[p].text)) return untracked
+  if (p >= tokens.length) return untracked
+  if (agent === 'codex') {
+    if (!isCodex(tokens[p].text) || !tools) return untracked
+    const args = tokens.slice(p + 1).map(t => t.text)
+    const promptAt = args.indexOf('--')
+    const beforePrompt = promptAt < 0 ? args : args.slice(0, promptAt)
+    if (beforePrompt.includes('exec') || codexClash(args)) return untracked
+    const at = tokens[p].end
+    return { command: `${command.slice(0, at)} ${codexFlags(tools)}${command.slice(at)}`, session: { kind: 'codex' }, tools: true }
+  }
+  if (!isClaude(tokens[p].text)) return untracked
 
   let sessionId: string | null | undefined // undefined: absent; null: present but not a uuid
   let resume: string | null | undefined // undefined: absent; null: no value or not a uuid

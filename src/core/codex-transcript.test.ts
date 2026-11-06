@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { ORCA, ORCA_CODEX, systemText } from './model-text'
-import { readCodexTurn, readRollout, rolloutFor, turnIn } from './codex-transcript'
+import { codexResumeStart, codexToolTurn, readCodexTurn, readRollout, rolloutFor, turnIn } from './codex-transcript'
 
 const fixture = (name: string) => join(import.meta.dirname, 'fixtures', `codex-${name}.jsonl`)
 const temporary = () => mkdtempSync(join(tmpdir(), 'inbox-codex-test-'))
@@ -44,6 +44,17 @@ test('three completed turns catch up from the saved offset after a restart', () 
   ])
   assert.deepEqual(found[1].exchange.activity, ['ran: npm test'])
   assert.equal(found[2].nextOffset, readFileSync(file).length)
+})
+
+test('a newly tracked resume starts at its current turn and skips old history', () => {
+  const bytes = readFileSync(fixture('three'))
+  const start = codexResumeStart(bytes, 'turn-3')
+  assert.equal(start.turn, 2)
+  assert.equal(readCodexTurn(bytes, start.offset)?.turnId, 'turn-3')
+  assert.equal(codexResumeStart(bytes, 'not-yet-written').offset, bytes.length)
+  const first = readCodexTurn(bytes, 0)!
+  assert.equal(codexToolTurn(bytes, first.nextOffset, 'turn-2'), 2)
+  assert.equal(codexToolTurn(bytes, first.nextOffset, 'turn-3'), null)
 })
 
 test('a resumed Codex thread appends to the same rollout after the saved offset', () => {

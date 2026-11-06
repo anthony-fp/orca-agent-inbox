@@ -1,8 +1,10 @@
 // The turn tracker with a fake clock, a fake transcript, fake storage and a fake model (plan T4).
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { describe, test } from 'node:test'
 
 import { EMPTY, parseReply } from './core/ledger'
+import { readCodexTurn } from './core/codex-transcript'
 import type { ModelResult } from './model'
 import { STATE_KEY, emptySession, upgradeState, type State } from './state'
 import { LIMIT_MS, createTracker, screenFor, type Clock } from './turns'
@@ -82,7 +84,7 @@ function fakeStorage(initial?: unknown) {
   return store
 }
 
-type How = 'ok' | 'timeout' | 'hold' | 'hang'
+type How = 'ok' | 'failed' | 'timeout' | 'hold' | 'hang'
 
 /** A model that answers each run with the next ask. `script` sets each run's outcome; the rest are 'ok'. */
 function fakeModel(script: How[] = [], counter = { runs: 0 }) {
@@ -99,6 +101,7 @@ function fakeModel(script: How[] = [], counter = { runs: 0 }) {
     if (how === 'hold') await new Promise<void>(r => holds.push(r))
     if (how === 'hang') await new Promise(() => undefined)
     active -= 1
+    if (how === 'failed') return { ok: false, reason: 'failed', detail: 'model failed', ms: 1 }
     if (how === 'timeout') return { ok: false, reason: 'timeout', detail: 'no answer in 45000 ms', ms: 45_000 }
     const update = parseReply(`NEW: decide | 1 | ${ASKS[run]} | Yes / No | yes`)
     assert.ok(update)
@@ -353,9 +356,21 @@ describe('turn tracker', () => {
 })
 
 describe('upgradeState', () => {
+  test('upgrades version 1 and keeps only valid Codex pane records in version 2', () => {
+    const old = upgradeState({ version: 1, terminals: { t: { sessionId: 's' } }, sessions: { s: {} } })
+    assert.equal(old.version, 2)
+    assert.deepEqual(old.panes, {})
+    assert.ok(old.sessions.s)
+    const current = upgradeState({ ...old, panes: {
+      good: { agent: 'codex', threadId: 'thread-1', codexHome: '/codex', promptHookSeen: true },
+      bad: { agent: 'codex', threadId: 4, codexHome: '/codex' },
+    } })
+    assert.deepEqual(current.panes, { good: { agent: 'codex', threadId: 'thread-1', codexHome: '/codex', promptHookSeen: true } })
+  })
+
   test('a missing or unreadable value is the empty state', () => {
-    assert.deepEqual(upgradeState(null), { version: 1, terminals: {}, sessions: {} })
-    assert.deepEqual(upgradeState('x'), { version: 1, terminals: {}, sessions: {} })
+    assert.deepEqual(upgradeState(null), { version: 2, terminals: {}, sessions: {}, panes: {} })
+    assert.deepEqual(upgradeState('x'), { version: 2, terminals: {}, sessions: {}, panes: {} })
   })
 
   test('fills fields a session saved without', () => {
@@ -388,6 +403,180 @@ describe('upgradeState', () => {
       terminals: { t: { sessionId: 's' } },
       sessions: { s: { ...emptySession(), offset: 4, lastTurnId: 'p', unread: 2, transcript: '/h/.claude/projects/-w/s.jsonl', cwd: '/w' } },
     }
-    assert.deepEqual(upgradeState(JSON.parse(JSON.stringify(s))), s)
+    assert.deepEqual(upgradeState(JSON.parse(JSON.stringify(s))), { ...s, version: 2, panes: {} })
+  })
+})
+
+const codexOne = () => readFileSync(new URL('./core/fixtures/codex-one.jsonl', import.meta.url))
+const codexThree = () => readFileSync(new URL('./core/fixtures/codex-three.jsonl', import.meta.url))
+
+function codexSetup(initial: Buffer | null = codexOne(), script: How[] = [], storage = fakeStorage()) {
+  const time = fakeClock()
+  const model = fakeModel(script)
+  const file = { bytes: initial }
+  const tracker = createTracker({
+    storage, clock: time.clock,
+    read: async () => file.bytes,
+    codexTurn: async (_sessionId, offset) => file.bytes ? readCodexTurn(file.bytes, offset) : null,
+    model: model.model,
+  })
+  return { tracker, storage, time, model, file }
+}
+
+async function codexTrack(t: ReturnType<typeof codexSetup>, home = '/codex') {
+  await t.tracker.start()
+  await t.tracker.track(T, S, { pane: { key: 'pane-1', codexHome: home, promptHookSeen: false } })
+}
+
+describe('Codex turns use the durable queue', () => {
+  for (const order of ['notify first', 'done first'] as const) {
+    test(`a rollout turn waits for both signals: ${order}`, async () => {
+      const t = codexSetup()
+      await codexTrack(t)
+      if (order === 'notify first') await t.tracker.codexNotify(S, 'turn-1')
+      else await t.tracker.codexStatus(S, true)
+      await t.time.run()
+      assert.equal(t.model.calls.length, 0)
+      if (order === 'notify first') await t.tracker.codexStatus(S, true)
+      else await t.tracker.codexNotify(S, 'turn-1')
+      await t.time.run()
+      assert.equal(t.model.calls.length, 1)
+      assert.equal(t.storage.saved().sessions[S].lastTurnId, 'turn-1')
+      assert.deepEqual(t.storage.saved().sessions[S].queue, [])
+    })
+  }
+
+  test('a restart between notify and done keeps the signal', async () => {
+    const storage = fakeStorage()
+    const first = codexSetup(codexOne(), [], storage)
+    await codexTrack(first)
+    await first.tracker.codexNotify(S, 'turn-1')
+    assert.deepEqual(storage.saved().sessions[S].codexNotified, ['turn-1'])
+    const resumed = codexSetup(codexOne(), [], storage)
+    await resumed.tracker.start()
+    await resumed.tracker.codexStatus(S, true)
+    await resumed.time.run()
+    assert.equal(resumed.model.calls.length, 1)
+    assert.equal(storage.saved().sessions[S].lastTurnId, 'turn-1')
+  })
+
+  test('duplicate done statuses count once, and an unverified notify survives restart', async () => {
+    const storage = fakeStorage()
+    const first = codexSetup(null, [], storage)
+    await codexTrack(first)
+    await first.tracker.codexStatus(S, true)
+    await first.tracker.codexStatus(S, true)
+    assert.equal(storage.saved().sessions[S].codexDones, 1)
+    await first.tracker.stageCodex('pane-other', 'thread-other', '/codex', 'turn-other', true)
+    const restarted = codexSetup(null, [], storage)
+    await restarted.tracker.start()
+    assert.equal(restarted.tracker.state().pendingCodex?.['pane-other']?.[0].turnId, 'turn-other')
+    assert.equal(restarted.tracker.state().pendingCodex?.['pane-other']?.[0].done, true)
+    await restarted.tracker.clearStagedCodex('pane-other', 'thread-other', 'turn-other')
+    assert.equal(upgradeState(storage.saved()).pendingCodex, undefined)
+  })
+
+  test('a paired signal remains saved while its rollout is missing, then retries', async () => {
+    const t = codexSetup(null)
+    await codexTrack(t)
+    await t.tracker.codexNotify(S, 'turn-1')
+    await t.tracker.codexStatus(S, true)
+    await t.time.run()
+    assert.deepEqual(t.storage.saved().sessions[S].codexNotified, ['turn-1'])
+    t.file.bytes = codexOne()
+    t.tracker.retryCodex(S)
+    await t.time.run()
+    assert.equal(t.storage.saved().sessions[S].lastTurnId, 'turn-1')
+  })
+
+  test('a late resume rollout skips older turns when the notified turn appears', async () => {
+    const t = codexSetup(null)
+    await codexTrack(t)
+    await t.tracker.codexNotify(S, 'turn-3')
+    await t.tracker.codexStatus(S, true)
+    await t.time.run()
+    t.file.bytes = codexThree()
+    t.tracker.retryCodex(S)
+    await t.time.run()
+    assert.equal(t.model.calls.length, 1)
+    assert.match(t.model.calls[0].prompt, /You are welcome/)
+    assert.equal(t.storage.saved().sessions[S].lastTurnId, 'turn-3')
+    assert.equal(t.storage.saved().sessions[S].ledger.turn, 3)
+  })
+
+  test('one paired turn cannot enqueue the next complete rollout turn', async () => {
+    const t = codexSetup(codexThree(), ['hold'])
+    await codexTrack(t)
+    await t.tracker.codexNotify(S, 'turn-1')
+    await t.tracker.codexStatus(S, true)
+    await t.time.run()
+    assert.deepEqual(t.storage.saved().sessions[S].queue.map(q => q.turnId), ['turn-1'])
+    assert.equal(t.model.calls.length, 1)
+    await t.tracker.codexStatus(S, false)
+    await t.tracker.codexNotify(S, 'turn-2')
+    await t.tracker.codexStatus(S, true)
+    await t.time.run()
+    assert.deepEqual(t.storage.saved().sessions[S].queue.map(q => q.turnId), ['turn-1', 'turn-2'])
+    t.model.release()
+    await t.time.run()
+    assert.equal(t.model.calls.length, 2)
+    assert.equal(t.storage.saved().sessions[S].lastTurnId, 'turn-2')
+  })
+
+  test('four Codex model timeouts keep the same queued turn and do not count as failures', async () => {
+    const t = codexSetup(codexOne(), ['timeout', 'timeout', 'timeout', 'timeout'])
+    await codexTrack(t)
+    await t.tracker.codexNotify(S, 'turn-1')
+    await t.tracker.codexStatus(S, true)
+    await t.time.run()
+    for (let run = 1; run < 5; run++) {
+      assert.equal(t.model.calls.length, run)
+      assert.deepEqual(t.storage.saved().sessions[S].queue.map(q => [q.turnId, q.failures]), [['turn-1', 0]])
+      assert.equal(t.storage.saved().sessions[S].unread, 0)
+      t.tracker.retryCodex(S)
+      await t.time.run()
+    }
+    assert.equal(t.model.calls.length, 5)
+    assert.equal(t.storage.saved().sessions[S].lastTurnId, 'turn-1')
+  })
+
+  test('three Codex model failures settle the turn with one unread notice', async () => {
+    const storage = fakeStorage()
+    const first = codexSetup(codexOne(), ['failed'], storage)
+    await codexTrack(first)
+    await first.tracker.codexNotify(S, 'turn-1')
+    await first.tracker.codexStatus(S, true)
+    await first.time.run()
+    for (let failures = 1; failures < 3; failures++) {
+      assert.deepEqual(storage.saved().sessions[S].queue.map(q => q.failures), [failures])
+      const restarted = codexSetup(codexOne(), ['failed'], storage)
+      await restarted.tracker.start()
+      await restarted.time.run()
+    }
+    assert.equal(storage.saved().sessions[S].lastTurnId, 'turn-1')
+    assert.equal(storage.saved().sessions[S].unread, 1)
+    assert.deepEqual(storage.saved().sessions[S].queue, [])
+  })
+
+  test('an old queued thread keeps its Codex provider and account after /new', async () => {
+    const t = codexSetup(codexOne(), ['timeout'])
+    const homes: (string | undefined)[] = []
+    const original = t.model.model
+    const tracker = createTracker({
+      storage: t.storage, clock: t.time.clock, read: async () => t.file.bytes,
+      codexTurn: async (_id, offset) => t.file.bytes ? readCodexTurn(t.file.bytes, offset) : null,
+      model: (prompt, source, home) => { homes.push(home); return original(prompt, source) },
+    })
+    await tracker.start()
+    await tracker.track(T, S, { pane: { key: 'pane-1', codexHome: '/old-account', promptHookSeen: false } })
+    await tracker.codexNotify(S, 'turn-1')
+    await tracker.codexStatus(S, true)
+    await t.time.run()
+    assert.equal(t.storage.saved().sessions[S].queue.length, 1)
+    await tracker.track(T, 'thread-new', { pane: { key: 'pane-1', codexHome: '/new-account', promptHookSeen: true } })
+    tracker.retryCodex(S)
+    await t.time.run()
+    assert.deepEqual(homes, ['/old-account', '/old-account'])
+    assert.equal(t.storage.saved().sessions[S].lastTurnId, 'turn-1')
   })
 })

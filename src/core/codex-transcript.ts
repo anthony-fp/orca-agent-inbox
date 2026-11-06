@@ -461,8 +461,8 @@ const isStart = (row: RolloutRow): boolean => row.type === 'event_msg' && record
 const isComplete = (row: RolloutRow): boolean => row.type === 'event_msg' && record(row.payload).type === 'task_complete'
 
 /** The next Codex turn at a byte offset, with the same durable queue contract as readTurn. */
-export function readCodexTurn(file: string, offset: number): CodexTurnRead | null {
-  const bytes = readFileSync(file)
+export function readCodexTurn(file: string | Buffer, offset: number): CodexTurnRead | null {
+  const bytes = typeof file === 'string' ? readFileSync(file) : file
   const rows = wholeRows(bytes)
   const start = rows.findIndex(({ at, row }) => at >= offset && isStart(row))
   if (start === -1) return null
@@ -496,4 +496,36 @@ export function readCodexTurn(file: string, offset: number): CodexTurnRead | nul
   const nextOffset = status === 'pending' ? offset : next === -1 ? (rows.at(-1)?.end ?? offset) : rows[next].at
 
   return { status, turnId, exchange, nextOffset }
+}
+
+/** A newly bound resume starts at its current turn, leaving older rollout turns untouched. */
+export function codexResumeStart(bytes: Buffer, currentTurnId: string | undefined): { offset: number; turn: number } {
+  let offset = 0
+  let turn = 0
+  for (;;) {
+    const read = readCodexTurn(bytes, offset)
+    if (!read) break
+    if (read.turnId === currentTurnId) return { offset, turn: Math.max(0, read.exchange.turn - 1) }
+    turn = read.exchange.turn
+    if (read.nextOffset <= offset) break
+    offset = read.nextOffset
+  }
+  return { offset: bytes.lastIndexOf(10) + 1, turn }
+}
+
+/** The current rollout turn number, for a tool call when the prompt hook has not run. */
+export function codexToolTurn(bytes: Buffer, offset: number, turnId: string | undefined): number | null {
+  const read = readCodexTurn(bytes, offset)
+  return read && (!turnId || read.turnId === turnId) ? read.exchange.turn : null
+}
+
+/** The first new person's prompt, for confirming a press sent to a Codex terminal. */
+export function codexPromptAfter(bytes: Buffer, offset: number): { uuid: string; text: string } | null {
+  for (let at = offset;;) {
+    const turn = readCodexTurn(bytes, at)
+    if (!turn) return null
+    if (turn.exchange.person !== null) return { uuid: turn.turnId, text: turn.exchange.person }
+    if (turn.status === 'pending' || turn.nextOffset <= at) return null
+    at = turn.nextOffset
+  }
 }

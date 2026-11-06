@@ -6,6 +6,7 @@
 //
 // Args: --socket <path> --session <id> [--timeout <ms>]
 import { ask, readArgs } from './ask.mjs'
+import { homeFromRollout } from './codex-home.mjs'
 
 const { socket, session, timeout } = readArgs(process.argv.slice(2))
 const deadline = Date.now() + timeout
@@ -32,18 +33,28 @@ function readInput() {
 
 async function main() {
   const input = await readInput()
-  // After /clear the terminal runs a new session the plugin does not track: its prompts are not this session's.
-  if (!input || (typeof input.session_id === 'string' && input.session_id !== session)) return
+  if (!input || typeof input !== 'object') return
+  // Claude passes --session. Codex passes its thread id on stdin and the pane key in the environment.
+  const codex = session === ''
+  if (codex && (typeof input.session_id !== 'string' || !input.session_id || Object.hasOwn(input, 'agent_id') || !process.env.ORCA_PANE_KEY)) return
+  // After Claude /clear the terminal runs a new session the plugin does not track.
+  if (!codex && typeof input.session_id === 'string' && input.session_id !== session) return
+  const id = codex ? input.session_id : session
+  const identity = codex ? {
+    paneKey: process.env.ORCA_PANE_KEY,
+    codexHome: process.env.CODEX_HOME || homeFromRollout(input.transcript_path, id),
+    codexTurnId: typeof input.turn_id === 'string' ? input.turn_id : '',
+  } : {}
   // The session's folder, for its plan file: the worker has no transcript to read it from at the first prompt.
   const cwd = typeof input.cwd === 'string' ? { cwd: input.cwd } : {}
   // Orca's handle for this terminal, which the agent's process got and this hook inherits. The worker binds a launch
   // Orca gave no terminal id with it.
   const handle = process.env.ORCA_TERMINAL_HANDLE
   const terminal = typeof handle === 'string' && handle !== '' ? { terminalId: handle } : {}
-  const started = await ask(socket, { type: 'prompt-start', sessionId: session, ...cwd, ...terminal }, left())
+  const started = await ask(socket, { type: 'prompt-start', sessionId: id, ...cwd, ...terminal, ...identity }, left())
   if (typeof started?.text !== 'string') return
   const prompt = typeof input.prompt === 'string' ? input.prompt : ''
-  const answer = await ask(socket, { type: 'inbox-text', sessionId: session, prompt, ...cwd }, left())
+  const answer = await ask(socket, { type: 'inbox-text', sessionId: id, prompt, ...cwd, ...identity }, left())
   if (typeof answer?.text === 'string' && answer.text !== '') process.stdout.write(`${answer.text}\n`)
 }
 

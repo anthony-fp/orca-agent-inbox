@@ -14,7 +14,7 @@ async function open(view: InboxView, press?: (input: PressInput) => PressOutcome
 }
 
 const NO_TOOLS = /^No tools: /
-const CLAUDE_ONLY = 'Agent Inbox supports Claude Code only for now. Codex support is coming soon.'
+const UNTRACKED_CODEX = 'Started before Agent Inbox; not tracked.'
 
 async function clean(view: Awaited<ReturnType<typeof mount>>) {
   assert.deepEqual(view.errors, [])
@@ -410,22 +410,39 @@ test('plan: a press toggles a task, and the choice stays across a new view', asy
   await clean(view)
 })
 
-test('a launch with no tools says so on its section; a Codex agent gets its title and the Claude-only note', async () => {
+test('a launch with no tools says so; an untracked Codex agent gets its own note', async () => {
   const view = await open(MIXED)
   assert.deepEqual(texts(view, 'Heading'), ['Agent 1', 'Codex'])
   assert.ok(view.find({ text: NO_TOOLS }))
-  assert.ok(view.find({ text: CLAUDE_ONLY }))
-  assert.equal(view.find({ text: /not tracked/ }), null)
+  assert.ok(view.find({ text: UNTRACKED_CODEX }))
   await clean(view)
 })
 
-test('a workspace with only a Codex agent shows only its section', async () => {
+test('an untracked Codex agent has its title and the untracked note', async () => {
   const view = await open(CODEX_ONLY)
   assert.deepEqual(texts(view, 'Heading'), ['Codex'])
-  assert.ok(view.find({ text: CLAUDE_ONLY }))
+  assert.ok(view.find({ text: UNTRACKED_CODEX }))
   assert.equal(view.find({ type: 'EmptyState' }), null)
   assert.equal(view.find({ text: NO_TOOLS }), null)
-  assert.equal(view.find({ text: /not tracked/ }), null)
+  await clean(view)
+})
+
+test('a tracked Codex agent uses the same rows and buttons as Claude', async () => {
+  const codex = { ...ONE_AGENT, sections: ONE_AGENT.sections.map(s => ({ ...s, agent: 'codex' as const, title: 'Codex' })) }
+  const view = await open(codex)
+  assert.deepEqual(texts(view, 'Heading'), ['Codex'])
+  assert.ok(view.find({ text: '1) Rename the folder to tools?' }))
+  assert.ok(view.find({ text: 'Run the migration on staging' }))
+  assert.deepEqual(texts(view, 'Button'), ['Yes', 'No', 'Reply', 'Dismiss', 'Done', 'Reply'])
+  assert.equal(view.find({ text: UNTRACKED_CODEX }), null)
+  await clean(view)
+})
+
+test('an untrusted tracked Codex launch shows the hook instruction in its section', async () => {
+  const section = { ...ONE_AGENT.sections[0], title: 'Codex', agent: 'codex' as const, trustHook: true, questions: [], tasks: [] }
+  const view = await open({ sections: [section], others: [], untracked: 0, unread: 0 })
+  assert.ok(view.find({ text: 'Trust the Agent Inbox hook in Codex' }))
+  assert.deepEqual(texts(view, 'Heading'), ['Codex'])
   await clean(view)
 })
 

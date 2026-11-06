@@ -11,11 +11,12 @@
 //      and counted in `unread`.
 // The whole state is one storage value, so step 3 is one write and a crash leaves it all or nothing.
 import { EMPTY, applyExchangeUpdate, closeItem } from './core/ledger'
+import { codexResumeStart, type CodexTurnRead } from './core/codex-transcript'
 import { ORCA, buildPrompt, screenText } from './core/model-text'
 import { nowRows } from './core/now'
 import type { Exchange, Ledger, Press } from './core/types'
 import type { ModelResult } from './model'
-import { STATE_KEY, emptySession, emptyState, upgradeState, type PressLabel, type SessionState, type State, type Turn } from './state'
+import { STATE_KEY, emptySession, emptyState, upgradeState, type CurrentState, type PressLabel, type SessionState, type Turn } from './state'
 import { readTurn, type TurnRead } from './transcript'
 
 /** The part of `orca.storage` the tracker uses. */
@@ -35,7 +36,9 @@ export type TrackerDeps = {
   /** The session's whole transcript, or null when the file does not exist yet. */
   read(sessionId: string): Promise<Buffer | null>
   /** Runs the inbox model. `source` is what parseReply checks HELP values against. */
-  model(prompt: string, source: string): Promise<ModelResult>
+  model(prompt: string, source: string, codexHome?: string): Promise<ModelResult>
+  /** Reads one Codex rollout turn; Claude keeps using readTurn on the transcript bytes. */
+  codexTurn?(sessionId: string, offset: number): Promise<CodexTurnRead | null>
   log?(message: string): void
   /** Called after each saved change, so the worker can tell the panel. */
   changed?(): void
@@ -100,16 +103,18 @@ function promptsBefore(s: SessionState): number | undefined {
 
 export function createTracker(deps: TrackerDeps) {
   const { storage, clock } = deps
-  let state: State = emptyState()
+  let state: CurrentState = emptyState()
   let writes: Promise<void> = Promise.resolve()
   /** Each session's poll deadline, while a poll runs. */
   const deadlines = new Map<string, number>()
   /** Sessions whose model loop runs. */
   const running = new Set<string>()
 
+  const isCodex = (sessionId: string) => state.sessions[sessionId]?.agent === 'codex'
+
   /** Saves a copy of the whole state. Writes land in the order they were made. */
   function save(): Promise<void> {
-    const copy = JSON.parse(JSON.stringify(state)) as State
+    const copy = JSON.parse(JSON.stringify(state)) as CurrentState
     writes = writes.catch(() => undefined).then(() => storage.set(STATE_KEY, copy))
     void writes.then(() => deps.changed?.(), () => undefined)
     return writes
@@ -159,7 +164,7 @@ export function createTracker(deps: TrackerDeps) {
         }
         const ledgerNow = state.sessions[sessionId].ledger
         const promptAt = clock.now()
-        const result = await deps.model(buildPrompt(atTurn(ledgerNow, exchange.turn), exchange), sourceOf(exchange))
+        const result = await deps.model(buildPrompt(atTurn(ledgerNow, exchange.turn), exchange), sourceOf(exchange), s.agent === 'codex' ? s.codexHome ?? '' : undefined)
         if (result.ok) {
           // Apply to the ledger as it is now: a press may have closed a row while the model ran.
           update(sessionId, cur =>
@@ -169,6 +174,7 @@ export function createTracker(deps: TrackerDeps) {
           continue
         }
         deps.log?.(`turns: model ${result.reason} for ${turn.turnId}: ${result.detail}`)
+        if ((result.reason === 'timeout' || result.reason === 'unavailable') && s.agent === 'codex') return
         const failures = turn.failures + 1
         if (failures >= MAX_FAILURES) {
           update(sessionId, cur => settle(cur, turn, cur.ledger, 1))
@@ -194,7 +200,12 @@ export function createTracker(deps: TrackerDeps) {
       nextOffset: read.nextOffset,
       failures: 0,
     }
-    update(sessionId, cur => ({ ...cur, queue: [...cur.queue, turn] }))
+    update(sessionId, cur => ({
+      ...cur,
+      queue: [...cur.queue, turn],
+      ...(cur.agent === 'codex' && cur.codexDones > 0 && cur.codexNotified[0] === read.turnId
+        ? { codexDones: cur.codexDones - 1, codexNotified: cur.codexNotified.slice(1) } : {}),
+    }))
     await save()
     background(drain(sessionId, false))
     return true
@@ -219,7 +230,18 @@ export function createTracker(deps: TrackerDeps) {
           size = bytes.length
           grewAt = clock.now()
         }
-        const read = bytes ? readTurn(bytes, readFrom(s), promptsBefore(s)) : null
+        if (bytes && s.agent === 'codex' && s.offset === 0 && s.lastTurnId === null && s.queue.length === 0 && s.codexNotified.length > 0) {
+          const start = codexResumeStart(bytes, s.codexNotified[0])
+          if (start.offset > 0 || start.turn > 0) {
+            update(sessionId, cur => ({ ...cur, offset: start.offset, ledger: { ...cur.ledger, turn: Math.max(cur.ledger.turn, start.turn) }, activeTurn: Math.max(cur.activeTurn, start.turn + 1) }))
+            await save()
+            continue
+          }
+        }
+        const read = bytes
+          ? s.agent === 'codex' ? await deps.codexTurn?.(sessionId, readFrom(s)) ?? null : readTurn(bytes, readFrom(s), promptsBefore(s))
+          : null
+        if (s.agent === 'codex' && read && (s.codexDones === 0 || s.codexNotified[0] !== read.turnId)) return
         // An incomplete turn is final: a later prompt follows it. A complete one may still grow.
         const isDone = read?.status === 'incomplete' || (read?.status === 'complete' && clock.now() - grewAt >= QUIET_MS)
         if (read && isDone && (await enqueue(sessionId, read))) continue
@@ -231,12 +253,27 @@ export function createTracker(deps: TrackerDeps) {
     }
   }
 
+  async function codexStatus(sessionId: string, done: boolean): Promise<void> {
+    const s = state.sessions[sessionId]
+    if (!s || s.agent !== 'codex') return
+    if (s.codexLastDone === done) {
+      if (done && s.codexDones > 0 && s.codexNotified.length > 0) background(poll(sessionId))
+      return
+    }
+    update(sessionId, cur => ({ ...cur, codexLastDone: done, codexDones: cur.codexDones + (done ? 1 : 0) }))
+    await save()
+    if (done && s.queue[0]?.failures) background(drain(sessionId, true))
+    if (done && s.codexNotified.length > 0) background(poll(sessionId))
+  }
+
   return {
     /** Loads the saved state, runs every queued turn and reads each tracked session again. */
     async start(): Promise<void> {
       state = upgradeState(await storage.get(STATE_KEY), clock.now())
       for (const [id, s] of Object.entries(state.sessions)) if (s.queue.length > 0) background(drain(id, true))
-      for (const { sessionId } of Object.values(state.terminals)) background(poll(sessionId))
+      for (const { sessionId } of Object.values(state.terminals)) if (!isCodex(sessionId)) background(poll(sessionId))
+      for (const [sessionId, s] of Object.entries(state.sessions))
+        if (s.agent === 'codex' && s.codexDones > 0 && s.codexNotified.length > 0) background(poll(sessionId))
     },
 
     /**
@@ -250,18 +287,27 @@ export function createTracker(deps: TrackerDeps) {
     async track(
       terminalId: string | null,
       sessionId: string,
-      opts: { offset?: number; turn?: number; tools?: boolean } = {},
+      opts: { offset?: number; turn?: number; tools?: boolean; pane?: { key: string; codexHome: string; promptHookSeen: boolean } } = {},
     ): Promise<void> {
       const terminals = terminalId === null ? state.terminals : Object.fromEntries(Object.entries(state.terminals).filter(([, t]) => t.sessionId !== sessionId))
       const known = state.sessions[sessionId]
       state = {
         ...state,
         terminals: terminalId === null ? terminals : { ...terminals, [terminalId]: { sessionId } },
+        panes: opts.pane ? {
+          ...state.panes,
+          [opts.pane.key]: {
+            agent: 'codex', threadId: sessionId, codexHome: opts.pane.codexHome,
+            promptHookSeen: opts.pane.promptHookSeen || state.panes[opts.pane.key]?.promptHookSeen === true,
+          },
+        } : state.panes,
         sessions: {
           ...state.sessions,
           [sessionId]: known
-            ? { ...known, touchedAt: clock.now(), tools: opts.tools ?? known.tools }
-            : { ...emptySession(clock.now()), offset: opts.offset ?? 0, ledger: { ...EMPTY, turn: opts.turn ?? 0 }, tools: opts.tools ?? true },
+            ? { ...known, touchedAt: clock.now(), tools: opts.tools ?? known.tools,
+                ...(opts.pane ? { agent: 'codex' as const, codexHome: opts.pane.codexHome || known.codexHome } : {}) }
+            : { ...emptySession(clock.now()), offset: opts.offset ?? 0, ledger: { ...EMPTY, turn: opts.turn ?? 0 }, tools: opts.tools ?? true,
+                ...(opts.pane ? { agent: 'codex' as const, codexHome: opts.pane.codexHome || null } : {}) },
         },
       }
       await save()
@@ -289,12 +335,13 @@ export function createTracker(deps: TrackerDeps) {
     async prune(): Promise<void> {
       const now = clock.now()
       const sessions = Object.fromEntries(
-        Object.entries(state.sessions).filter(([, s]) => s.ledger.items.length > 0 || s.queue.length > 0 || now - s.touchedAt < PRUNE_MS),
+        Object.entries(state.sessions).filter(([, s]) => s.ledger.items.length > 0 || s.queue.length > 0 || s.codexNotified.length > 0 || now - s.touchedAt < PRUNE_MS),
       )
       const terminals = Object.fromEntries(Object.entries(state.terminals).filter(([, t]) => sessions[t.sessionId]))
-      const same = Object.keys(sessions).length === Object.keys(state.sessions).length && Object.keys(terminals).length === Object.keys(state.terminals).length
+      const panes = Object.fromEntries(Object.entries(state.panes).filter(([, p]) => sessions[p.threadId]))
+      const same = Object.keys(sessions).length === Object.keys(state.sessions).length && Object.keys(terminals).length === Object.keys(state.terminals).length && Object.keys(panes).length === Object.keys(state.panes).length
       if (same) return
-      state = { ...state, terminals, sessions }
+      state = { ...state, terminals, sessions, panes }
       await save()
     },
 
@@ -302,12 +349,59 @@ export function createTracker(deps: TrackerDeps) {
     async done(terminalId: string): Promise<void> {
       const sessionId = state.terminals[terminalId]?.sessionId
       if (!sessionId || !state.sessions[sessionId]) return
+      if (isCodex(sessionId)) return codexStatus(sessionId, true)
       update(sessionId, s => ({ ...s, touchedAt: clock.now() }))
       background(drain(sessionId, true))
       await poll(sessionId)
     },
 
-    state(): State {
+    /** Main-agent status transitions supply the other half of each Codex turn boundary. */
+    codexStatus,
+
+    /** A notify id is saved before the socket answers, even if its rollout is not readable yet. */
+    async codexNotify(sessionId: string, turnId: string, alreadyDone = false): Promise<void> {
+      const s = state.sessions[sessionId]
+      if (!s || s.agent !== 'codex' || !turnId) return
+      if (s?.lastTurnId === turnId || s?.queue.some(t => t.turnId === turnId)) return
+      const notified = s.codexNotified.includes(turnId) ? s.codexNotified : [...s.codexNotified, turnId]
+      const dones = s.codexDones + (alreadyDone && !s.codexLastDone ? 1 : 0)
+      update(sessionId, cur => ({ ...cur, codexNotified: notified, codexDones: dones, codexLastDone: cur.codexLastDone || alreadyDone }))
+      await save()
+      if (dones > 0) background(poll(sessionId))
+    },
+
+    /** A later binding or status can retry paired signals after the rollout appears. */
+    retryCodex(sessionId: string): void {
+      const s = state.sessions[sessionId]
+      if (s?.agent === 'codex' && s.queue[0]?.failures === 0) background(drain(sessionId, true))
+      if (s?.agent === 'codex' && s.codexDones > 0 && s.codexNotified.length > 0) background(poll(sessionId))
+    },
+
+    /** Retains a notify-only thread until its rollout proves it is the pane's main chat. */
+    async stageCodex(paneKey: string, threadId: string, codexHome: string, turnId: string, done = false): Promise<void> {
+      if (!turnId) return
+      const old = state.pendingCodex?.[paneKey] ?? []
+      const found = old.find(entry => entry.threadId === threadId && entry.turnId === turnId)
+      if (found && (found.done || !done)) return
+      const entries = found
+        ? old.map(entry => entry === found ? { ...entry, done: true } : entry)
+        : [...old, { threadId, codexHome, turnId, done }]
+      state = { ...state, pendingCodex: { ...state.pendingCodex, [paneKey]: entries } }
+      await save()
+    },
+
+    async clearStagedCodex(paneKey: string, threadId: string, turnId: string): Promise<void> {
+      const old = state.pendingCodex?.[paneKey] ?? []
+      if (!old.some(entry => entry.threadId === threadId && entry.turnId === turnId)) return
+      const pendingCodex = { ...state.pendingCodex }
+      const left = old.filter(entry => entry.threadId !== threadId || entry.turnId !== turnId)
+      if (left.length > 0) pendingCodex[paneKey] = left
+      else delete pendingCodex[paneKey]
+      state = { ...state, ...(Object.keys(pendingCodex).length > 0 ? { pendingCodex } : { pendingCodex: undefined }) }
+      await save()
+    },
+
+    state(): CurrentState {
       return state
     },
   }

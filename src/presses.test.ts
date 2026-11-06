@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
 import { EMPTY, applyUpdate, parseReply } from './core/ledger'
+import { readFileSync } from 'node:fs'
 import type { ModelResult } from './model'
 import { CONFIRM_MS, answerText, createPresses, findingText, runText, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
 import type { Finding, Help } from './core/types'
@@ -19,6 +20,9 @@ const prompt = (uuid: string, text: string) =>
   JSON.stringify({ type: 'user', uuid, isSidechain: false, origin: { kind: 'human' }, turnPosition: { promptIndex: 1, turnIndex: 1 }, message: { role: 'user', content: text } }) + '\n'
 const reply = (uuid: string, text: string) =>
   JSON.stringify({ type: 'assistant', uuid, isSidechain: false, message: { role: 'assistant', content: [{ type: 'text', text }], stop_reason: 'end_turn' } }) + '\n'
+const codexPrompt = (id: string, text: string) =>
+  JSON.stringify({ type: 'event_msg', payload: { type: 'task_started', turn_id: id } }) + '\n' +
+  JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } }) + '\n'
 
 const okModel = (calls: string[]) => async (p: string): Promise<ModelResult> => {
   calls.push(p)
@@ -27,11 +31,13 @@ const okModel = (calls: string[]) => async (p: string): Promise<ModelResult> => 
   return { ok: true, update, text: '', ms: 1 }
 }
 
-async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?: Help[]; findings?: Finding[] } = {}) {
+async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?: Help[]; findings?: Finding[]; codex?: boolean } = {}) {
   const time = fakeClock(1000)
   const saved = new Map<string, unknown>()
   const storage = { get: async (k: string) => saved.get(k) ?? null, set: async (k: string, v: unknown) => void saved.set(k, structuredClone(v)) }
-  const file = { text: prompt('p-1', 'Prompt 1') + reply('a-1', 'Ship it?') }
+  const file = { text: opts.codex
+    ? readFileSync(new URL('./core/fixtures/codex-one.jsonl', import.meta.url), 'utf8')
+    : prompt('p-1', 'Prompt 1') + reply('a-1', 'Ship it?') }
   const modelCalls: string[] = []
   let onRead: (() => void) | null = null
   const read = async () => {
@@ -40,12 +46,12 @@ async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?:
     return Buffer.from(file.text)
   }
   const tracker = createTracker({ storage, clock: time.clock, read, model: okModel(modelCalls) })
-  await tracker.track(T, S)
+  await tracker.track(T, S, opts.codex ? { pane: { key: 'pane-1', codexHome: '/codex', promptHookSeen: true } } : {})
   const update = parseReply(opts.kind === 'do' ? `NEW: do | - | ${TASK} | - | -` : `NEW: decide | 1 | ${ASK} | Yes / No | yes`)
   assert.ok(update)
   const ledger = applyUpdate(EMPTY, update, 0, 1)
   const withHelps = { ...(opts.helps ? { ...ledger, items: ledger.items.map(i => ({ ...i, helps: opts.helps! })) } : ledger), findings: opts.findings ?? [] }
-  await tracker.edit(S, s => ({ ...s, offset: file.text.length, lastTurnId: 'p-1', ledger: withHelps }))
+  await tracker.edit(S, s => ({ ...s, offset: file.text.length, lastTurnId: opts.codex ? 'turn-1' : 'p-1', ledger: withHelps }))
 
   const status = new Map<string, TerminalStatus>([[T, 'done']])
   const sent: { terminalId: string; text: string }[] = []
@@ -72,6 +78,27 @@ async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?:
 }
 
 describe('presses', () => {
+  test('a Codex option confirms from the rollout next prompt and keeps its turn id', async () => {
+    const t = await setup({ codex: true })
+    const out = await t.presses.press(t.input())
+    assert.equal(out.ok && out.label?.text, 'Sending…')
+    assert.deepEqual(t.sent, [{ terminalId: T, text: `Re "${ASK}": Yes` }])
+    t.file.text += codexPrompt('turn-2', `Re "${ASK}": Yes`)
+    await t.time.run(t.time.now() + 2000)
+    assert.deepEqual(t.label(), { text: '✓ Yes', tone: 'success', copy: null })
+    assert.equal(t.s().presses[t.item.id].turnId, 'turn-2')
+  })
+
+  for (const state of ['working', 'blocked', 'waiting', 'done'] as const) {
+    test(`Codex main agent ${state}: ${state === 'done' ? 'sends' : 'holds'} the option`, async () => {
+      const t = await setup({ codex: true })
+      t.status.set(T, state)
+      const out = await t.presses.press(t.input())
+      assert.equal(out.ok && out.label?.text, state === 'done' ? 'Sending…' : 'Waits for the agent')
+      assert.equal(t.sent.length, state === 'done' ? 1 : 0)
+    })
+  }
+
   test('done: sends the option, reads "Sending…", then "✓ <option>" once the prompt shows, as the inbox does', async () => {
     const t = await setup()
     const out = await t.presses.press(t.input())

@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 
 import { ask, readArgs } from './ask.mjs'
+import { homeFromParent } from './codex-home.mjs'
 
 const { socket, session, timeout } = readArgs(process.argv.slice(2))
 const tools = JSON.parse(readFileSync(new URL('./tools.json', import.meta.url), 'utf8'))
@@ -37,7 +38,18 @@ async function result(method, params) {
       const name = params?.name
       if (!names.has(name)) return { content: [{ type: 'text', text: `Unknown tool: ${name}` }], isError: true }
       const args = typeof params.arguments === 'object' && params.arguments !== null ? params.arguments : {}
-      const answer = await ask(socket, { type: name, sessionId: session, args }, timeout)
+      const meta = params?._meta
+      const turn = meta?.['x-codex-turn-metadata']
+      if (!session && turn?.thread_source && turn.thread_source !== 'user')
+        return { content: [{ type: 'text', text: NOT_AVAILABLE }], isError: true }
+      const paneKey = !session ? process.env.ORCA_PANE_KEY : undefined
+      const threadId = !session && turn?.thread_source === 'user' && typeof meta?.threadId === 'string' ? meta.threadId : undefined
+      const identity = paneKey ? {
+        paneKey, codexHome: process.env.CODEX_HOME || homeFromParent(threadId),
+        codexTurnId: typeof turn?.turn_id === 'string' ? turn.turn_id : '',
+        ...(threadId ? { sessionId: threadId } : {}),
+      } : { sessionId: session }
+      const answer = await ask(socket, { type: name, ...identity, args }, timeout)
       return typeof answer?.text === 'string'
         ? { content: [{ type: 'text', text: answer.text }] }
         : { content: [{ type: 'text', text: NOT_AVAILABLE }], isError: true }

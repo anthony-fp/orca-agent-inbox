@@ -8,6 +8,10 @@ export type InboxSection = {
   terminalId: string
   sessionId: string
   title: string
+  /** Codex shares the rows and presses; an absent value is Claude Code. */
+  agent?: 'codex'
+  /** A Codex launch has not yet delivered a trusted prompt hook. */
+  trustHook?: boolean
   /** Pass back with each press: the press is held when a turn ended since. */
   drawn: string
   /** The last launch, `done` or press, in ms. Sections come newest first. */
@@ -26,15 +30,15 @@ export type InboxSection = {
   planError: string | null
 }
 
-/** An agent in the focused workspace that is not Claude Code, such as Codex: version 1 does not track it. */
-export type OtherAgent = { key: string; title: string }
+/** An agent without a tracked section. */
+export type OtherAgent = { key: string; title: string; agent?: string; reason?: 'launch-skipped' | 'launch-unmatched' }
 
 /** What a Copy did: the worker wrote the clipboard, or why it could not, so the panel shows the text to select. */
 export type CopyOutcome = { ok: true } | { ok: false; error: string }
 
 export type InboxView = {
   sections: InboxSection[]
-  /** Agents that are not Claude Code, each drawn with the Claude-only note. They count in no other field. */
+  /** Agents without a tracked section, drawn under their own titles. They count in no other field. */
   others: OtherAgent[]
   /** Claude Code agents in the focused workspace the plugin did not see launch. */
   untracked: number

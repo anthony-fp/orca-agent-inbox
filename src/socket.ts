@@ -11,7 +11,7 @@ import { tmpdir, userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { ORCA, promptNotes } from './core/model-text'
+import { ORCA, ORCA_CODEX, promptNotes } from './core/model-text'
 import { recordClose, recordItem } from './core/tools'
 import type { SessionState, State } from './state'
 
@@ -39,6 +39,7 @@ export type Request =
   | { type: 'prompt-start'; sessionId: string; cwd?: string; terminalId?: string }
   | { type: 'inbox-text'; sessionId: string; prompt?: string; cwd?: string }
   | { type: 'record' | 'close'; sessionId: string; args: Record<string, unknown> }
+  | { type: 'codex-turn'; payload: { paneKey: string; codexHome: string; threadId: string; turnId: string; type: string } }
 
 /** `text` is the answer the client prints or returns; `error` means it gives up as on a timeout. */
 export type Answer = { text: string } | { error: string }
@@ -51,6 +52,10 @@ export type AnswerDeps = {
   planNote(sessionId: string): Promise<string | null>
   /** Maps the prompt hook's terminal to a session that has none yet. */
   bind?(terminalId: string, sessionId: string): Promise<void>
+  /** Saves a main Codex pane before its prompt or tool call receives an answer. */
+  bindCodex?(paneKey: string, threadId: string, codexHome: string, source: 'prompt' | 'tool' | 'notify', turnId?: string): Promise<void>
+  /** The notify id is saved after main-thread verification, before the socket replies. */
+  notifyCodex?(paneKey: string, threadId: string, turnId: string): Promise<void>
 }
 
 /** Orca's terminal handle, `term_` and an id, as Orca sets ORCA_TERMINAL_HANDLE. Any other value is ignored. */
@@ -65,7 +70,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-const TYPES = ['prompt-start', 'inbox-text', 'record', 'close']
+const TYPES = ['prompt-start', 'inbox-text', 'record', 'close', 'codex-turn']
 
 /** Answers one request. */
 export function createAnswerer(deps: AnswerDeps): (request: unknown) => Promise<Answer> {
@@ -81,11 +86,29 @@ export function createAnswerer(deps: AnswerDeps): (request: unknown) => Promise<
   }
 
   return async request => {
-    if (!isObject(request) || !TYPES.includes(request.type as string) || typeof request.sessionId !== 'string')
+    if (!isObject(request) || !TYPES.includes(request.type as string))
       return { error: 'bad request' }
-    const { sessionId } = request
+    const paneKey = typeof request.paneKey === 'string' ? request.paneKey : ''
+    const codexHome = typeof request.codexHome === 'string' ? request.codexHome : ''
+    if (request.type === 'codex-turn') {
+      const payload = isObject(request.payload) ? request.payload : {}
+      if (typeof payload.paneKey !== 'string' || !payload.paneKey || typeof payload.codexHome !== 'string' || !payload.codexHome || typeof payload.threadId !== 'string' || !payload.threadId)
+        return { error: 'bad request' }
+      await deps.bindCodex?.(payload.paneKey, payload.threadId, payload.codexHome, 'notify', typeof payload.turnId === 'string' ? payload.turnId : undefined)
+      const state = deps.state()
+      if (state.version === 2 && state.panes[payload.paneKey]?.threadId === payload.threadId)
+        await deps.notifyCodex?.(payload.paneKey, payload.threadId, typeof payload.turnId === 'string' ? payload.turnId : '')
+      return { text: '' }
+    }
+    const current = deps.state()
+    const savedThread = paneKey && current.version === 2 ? current.panes[paneKey]?.threadId : undefined
+    const sessionId = typeof request.sessionId === 'string' ? request.sessionId : savedThread
+    if (!sessionId) return { error: 'bad request' }
+    if (paneKey && typeof request.sessionId === 'string')
+      await deps.bindCodex?.(paneKey, sessionId, codexHome, request.type === 'prompt-start' ? 'prompt' : 'tool', typeof request.codexTurnId === 'string' ? request.codexTurnId : undefined)
     const s0 = deps.state().sessions[sessionId]
     if (!s0) return { error: 'unknown session' }
+    const host = paneKey ? ORCA_CODEX : ORCA
     // The prompt hook's `cwd` gives the session's folder before its transcript exists, at the first prompt.
     const cwd = typeof request.cwd === 'string' && request.cwd !== '' ? request.cwd : null
     const withCwd = (s: SessionState): SessionState => (s.cwd || !cwd ? s : { ...s, cwd })
@@ -103,7 +126,7 @@ export function createAnswerer(deps: AnswerDeps): (request: unknown) => Promise<
       const args = isObject(request.args) ? request.args : {}
       const result = await apply(sessionId, s => {
         // The tool stamps with ledger.turn, so it reads the active turn; the ledger keeps the transcript's count.
-        const r = run(ORCA, { ...s.ledger, turn: activeTurn(s) }, args, deps.now())
+        const r = run(host, { ...s.ledger, turn: activeTurn(s) }, args, deps.now())
         return { session: { ...s, ledger: { ...r.ledger, turn: s.ledger.turn } }, out: r.result }
       })
       return result === null ? { error: 'unknown session' } : { text: result }
@@ -118,7 +141,7 @@ export function createAnswerer(deps: AnswerDeps): (request: unknown) => Promise<
     const notes = await apply(sessionId, s => {
       // A prompt the panel typed for a press is no answer to number: the skill passes isPress for its own sends.
       const isPress = prompt !== '' && Object.values(s.presses).some(l => l.state === 'sending' && l.text === prompt)
-      const r = promptNotes(ORCA, { ...s.ledger, turn: activeTurn(s) }, { text: prompt, isPress, isOpen: false }, s.told)
+      const r = promptNotes(host, { ...s.ledger, turn: activeTurn(s) }, { text: prompt, isPress, isOpen: false }, s.told)
       return { session: { ...s, told: r.told }, out: r.notes }
     })
     if (notes === null) return { error: 'unknown session' }

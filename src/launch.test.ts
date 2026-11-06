@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, test } from 'node:test'
 
-import { guidanceText, ORCA } from './core/model-text'
+import { guidanceText, ORCA, ORCA_CODEX } from './core/model-text'
 import { tagLaunch, tokenize } from './launch'
 
 const NEW_ID = '11111111-2222-4333-8444-555555555555'
@@ -96,7 +100,7 @@ describe('tagLaunch: resumed sessions', () => {
 })
 
 describe('tagLaunch: launches it leaves alone', () => {
-  test('codex is untracked', () => {
+  test('codex without inbox tools is untracked', () => {
     assertUntouched('codex')
     assertUntouched("codex 'fix it'", 'codex')
   })
@@ -242,8 +246,6 @@ describe('tagLaunch: the inbox tools', () => {
 
   test('untracked launches stay unchanged with tools given', () => {
     for (const [command, agent] of [
-      ['codex', 'codex'],
-      ["codex 'fix it'", 'codex'],
       ['claude', 'codex'],
       ['claude --continue', 'claude'],
       ['claude && echo done', 'claude'],
@@ -256,5 +258,99 @@ describe('tagLaunch: the inbox tools', () => {
     const added = withTools('claude').command.length - 'claude'.length
     console.log(`tool flags add ${added} characters`)
     assert.ok(added < 32_000)
+  })
+})
+
+function codexValues(command: string): Map<string, string> {
+  const w = words(command)
+  const values = new Map<string, string>()
+  for (let i = 1; i < w.length; i += 2) {
+    if (w[i] !== '-c') break
+    const value = w[i + 1]
+    const eq = value.indexOf('=')
+    assert.ok(eq > 0)
+    values.set(value.slice(0, eq), value.slice(eq + 1))
+  }
+  return values
+}
+
+describe('tagLaunch: Codex', () => {
+  test('plain codex gets the seven TOML config values', () => {
+    const r = withTools('codex', 'codex')
+    assert.deepEqual(r.session, { kind: 'codex' })
+    assert.equal(r.tools, true)
+    const values = codexValues(r.command)
+    assert.deepEqual([...values.keys()], [
+      'notify', 'mcp_servers.orca-inbox.command', 'mcp_servers.orca-inbox.args',
+      'mcp_servers.orca-inbox.env_vars', 'mcp_servers.orca-inbox.default_tools_approval_mode',
+      'developer_instructions', 'hooks.UserPromptSubmit',
+    ])
+    assert.deepEqual(JSON.parse(values.get('notify')!), ['node', '/plugins/agent inbox/bin/codex-notify.mjs', TOOLS.socketPath])
+    assert.equal(JSON.parse(values.get('mcp_servers.orca-inbox.command')!), 'node')
+    assert.deepEqual(JSON.parse(values.get('mcp_servers.orca-inbox.args')!), [TOOLS.mcpServer, '--socket', TOOLS.socketPath])
+    assert.deepEqual(JSON.parse(values.get('mcp_servers.orca-inbox.env_vars')!), ['ORCA_PANE_KEY'])
+    assert.equal(JSON.parse(values.get('mcp_servers.orca-inbox.default_tools_approval_mode')!), 'approve')
+    assert.equal(JSON.parse(values.get('developer_instructions')!), guidanceText(ORCA_CODEX))
+    const hook = /^\[\{hooks=\[\{type="command",command=("(?:[^"\\]|\\.)*")\}\]\}\]$/.exec(values.get('hooks.UserPromptSubmit') ?? '')
+    assert.ok(hook, 'a TOML inline table with one command hook')
+    assert.deepEqual(words(JSON.parse(hook[1])), ['node', TOOLS.promptHook, '--socket', TOOLS.socketPath])
+  })
+
+  test('Codex parses the generated TOML values when installed', t => {
+    const args = words(withTools('codex', 'codex').command).slice(1)
+    const home = mkdtempSync(join(tmpdir(), 'inbox-codex-config-'))
+    try {
+      const parsed = spawnSync('codex', [...args, 'features', 'list'], {
+        encoding: 'utf8', timeout: 5000, env: { ...process.env, CODEX_HOME: home },
+      })
+      if ((parsed.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return t.skip('Codex is not installed')
+      assert.equal(parsed.status, 0, parsed.stderr || parsed.error?.message || 'Codex rejected the config')
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test('prompt and resume arguments stay last; the hook command is identical across launches', () => {
+    const plain = withTools('codex', 'codex')
+    const prompt = withTools("codex --model gpt-6 'fix the parser'", 'codex')
+    const resume = withTools('codex resume thread-1', 'codex')
+    assert.ok(prompt.command.endsWith(" --model gpt-6 'fix the parser'"))
+    assert.ok(resume.command.endsWith(' resume thread-1'))
+    for (const r of [prompt, resume]) {
+      assert.deepEqual(r.session, { kind: 'codex' })
+      assert.equal(codexValues(r.command).get('hooks.UserPromptSubmit'), codexValues(plain.command).get('hooks.UserPromptSubmit'))
+    }
+  })
+
+  test('an unrelated user config stays after the added flags', () => {
+    const command = `codex -c 'model="gpt-6"' 'fix it'`
+    const r = withTools(command, 'codex')
+    assert.equal(r.session?.kind, 'codex')
+    assert.ok(r.command.endsWith(` -c 'model="gpt-6"' 'fix it'`))
+    assert.equal(codexValues(r.command).get('model'), '"gpt-6"')
+  })
+
+  test('exec, a different command, and an unparseable command are untracked', () => {
+    for (const command of ['codex exec', 'codex --model gpt-6 exec', 'claude', 'codex && echo done'])
+      assert.deepEqual(withTools(command, 'codex'), { command, session: null, tools: false })
+  })
+
+  test('a prompt after -- can contain the word exec', () => {
+    assert.deepEqual(withTools("codex -- 'exec'", 'codex').session, { kind: 'codex' })
+  })
+
+  for (const config of [
+    'notify=[]', 'mcp_servers.orca-inbox.command="other"', 'mcp_servers.orca-inbox={command="other"}',
+    'developer_instructions="other"',
+  ]) {
+    test(`existing ${config.split('=')[0]} leaves the launch alone`, () => {
+      const command = `codex -c '${config}' 'hello'`
+      assert.deepEqual(withTools(command, 'codex'), { command, session: null, tools: false })
+    })
+  }
+
+  test('an inline --config clash leaves the launch alone', () => {
+    const command = `codex --config='notify=[]' 'hello'`
+    assert.deepEqual(withTools(command, 'codex'), { command, session: null, tools: false })
   })
 })

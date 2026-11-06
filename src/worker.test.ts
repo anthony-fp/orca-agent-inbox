@@ -3,13 +3,14 @@ import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import { EMPTY, applyUpdate, parseReply } from './core/ledger'
 import type { ModelResult } from './model'
 import { planPath } from './core/plan'
-import { emptySession, type State } from './state'
+import { drawnToken } from './presses'
+import { emptySession, type CurrentState, type State } from './state'
 import { fakeClock } from './test-clock'
 import { PRUNE_MS } from './turns'
 import { createWorker, liveTools } from './worker'
 // @ts-expect-error: a plain Node script with no types
 import { ask } from '../bin/ask.mjs'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { binPaths } from './socket'
@@ -36,7 +37,7 @@ const openLedger = () => {
   return applyUpdate(EMPTY, u, 0, 1)
 }
 
-async function setup(opts: { state?: State; files?: Record<string, string>; unreadable?: string[]; agents?: unknown[]; copyFails?: boolean; list?: unknown[]; socket?: string } = {}) {
+async function setup(opts: { state?: State; files?: Record<string, string>; unreadable?: string[]; agents?: unknown[]; copyFails?: boolean; list?: unknown[]; socket?: string; codexRollout?: (home: string, threadId: string) => Promise<{ path: string; cwd: string } | null> } = {}) {
   const time = fakeClock(100 * DAY)
   const files = new Map(Object.entries(opts.files ?? {}))
   const reads: string[] = []
@@ -66,6 +67,7 @@ async function setup(opts: { state?: State; files?: Record<string, string>; unre
     },
     listDirs: async (path: string) =>
       [...new Set([...files.keys()].filter(f => f.startsWith(`${path}/`)).map(f => f.slice(path.length + 1).split('/')[0]))],
+    codexRollout: opts.codexRollout,
     readFile: async (path: string) => {
       reads.push(path)
       if (opts.unreadable?.includes(path)) throw new Error('EACCES: permission denied')
@@ -76,7 +78,7 @@ async function setup(opts: { state?: State; files?: Record<string, string>; unre
   let made: ReturnType<typeof createWorker> | null = null
   const worker = await mountWorker({ default: (orca: Parameters<typeof createWorker>[0]) => (made = createWorker(orca, deps)) }, { host })
   await time.run()
-  const saved = () => (host.data() as { storage: Record<string, State> }).storage.state
+  const saved = () => (host.data() as { storage: Record<string, CurrentState> }).storage.state
   return { worker, host, time, files, reads, models, saved, copied, close: () => made?.close() }
 }
 
@@ -128,6 +130,71 @@ test('the launch hook tags a new claude session and tracks its terminal', async 
   assert.deepEqual(t.saved().terminals, { 'term-1': { sessionId: id} })
   assert.equal(t.saved().sessions[id].offset, 0)
   await t.worker.deactivate()
+})
+
+test('a first-turn Codex tool saves before notify; status ties its pane to the terminal', async () => {
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  const t = await setup({ socket, codexRollout: async (home, threadId) => {
+    assert.equal(home, '/codex', 'no other account home is guessed before notify')
+    return { path: `/codex/sessions/2026/11/05/rollout-${threadId}.jsonl`, cwd: WS.path }
+  } })
+  try {
+    const answer = await ask(socket, { type: 'record', paneKey: 'pane-1', codexHome: '', sessionId: 'thread-1', args: { kind: 'finding', finding_kind: 'issue', title: 'Retry loop', detail: 'It never stops.' } }, 2000)
+    assert.match(answer?.text ?? '', /^Recorded\./)
+    assert.equal(t.saved().panes['pane-1'].threadId, 'thread-1')
+    assert.equal(t.saved().panes['pane-1'].codexHome, '')
+    assert.equal(t.saved().sessions['thread-1'].ledger.findings[0].title, 'Retry loop')
+    assert.equal(t.saved().sessions['thread-1'].activeTurn, 1)
+    await t.worker.emit('agent.status.changed', status('working', { paneKey: 'pane-1' }))
+    assert.deepEqual(t.saved().terminals, { 'term-1': { sessionId: 'thread-1' } })
+    assert.deepEqual(await ask(socket, { type: 'codex-turn', payload: { paneKey: 'pane-1', codexHome: '/codex', threadId: 'thread-1', turnId: 'turn-1', type: 'agent-turn-complete' } }, 2000), { text: '' })
+    assert.equal(t.saved().panes['pane-1'].codexHome, '/codex')
+  } finally {
+    await t.close()
+    await t.worker.deactivate()
+  }
+})
+
+test('notify replaces a pane thread and ignores a sub-agent rollout', async () => {
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  const t = await setup({ socket, codexRollout: async (_home, threadId) => threadId.startsWith('sub') ? null : ({ path: `/codex/sessions/2026/11/05/rollout-${threadId}.jsonl`, cwd: WS.path }) })
+  const notify = async (threadId: string) => ask(socket, { type: 'codex-turn', payload: { paneKey: 'pane-1', codexHome: '/codex', threadId, turnId: `turn-${threadId}`, type: 'agent-turn-complete' } }, 2000)
+  try {
+    assert.deepEqual(await notify('thread-1'), { text: '' })
+    assert.equal(t.saved().panes['pane-1'].threadId, 'thread-1')
+    assert.deepEqual(await notify('sub-1'), { text: '' })
+    assert.equal(t.saved().panes['pane-1'].threadId, 'thread-1')
+    assert.deepEqual(await notify('thread-2'), { text: '' })
+    assert.equal(t.saved().panes['pane-1'].threadId, 'thread-2')
+  } finally {
+    await t.close()
+    await t.worker.deactivate()
+  }
+})
+
+test('a notify with a missing rollout is kept until a later status can verify it', async () => {
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  const path = '/codex/sessions/2026/11/05/rollout-chat-1.jsonl'
+  let available = false
+  const rollout = readFileSync(new URL('./core/fixtures/codex-one.jsonl', import.meta.url)).toString('utf8')
+  const t = await setup({ socket, files: { [path]: rollout }, codexRollout: async () => available ? { path, cwd: WS.path } : null })
+  try {
+    const request = { type: 'codex-turn', payload: { paneKey: 'pane-1', codexHome: '/codex', threadId: 'chat-1', turnId: 'turn-1', type: 'agent-turn-complete' } }
+    assert.deepEqual(await ask(socket, request, 2000), { text: '' })
+    assert.equal(t.saved().panes['pane-1'], undefined, 'an unverified thread does not bind')
+    assert.equal(t.saved().pendingCodex?.['pane-1']?.[0].turnId, 'turn-1')
+    available = true
+    await t.worker.emit('agent.status.changed', status('working', { paneKey: 'pane-1' }))
+    assert.equal(t.saved().panes['pane-1'].threadId, 'chat-1')
+    assert.equal(t.saved().pendingCodex, undefined)
+    assert.deepEqual(t.saved().sessions['chat-1'].codexNotified, ['turn-1'])
+    await t.worker.emit('agent.status.changed', status('done', { paneKey: 'pane-1' }))
+    await t.time.run()
+    assert.equal(t.models.length, 1)
+  } finally {
+    await t.close()
+    await t.worker.deactivate()
+  }
 })
 
 test('a launch that is not tracked passes through unchanged', async () => {
@@ -299,8 +366,8 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
         tools: true,
       },
     ],
-    // The Codex agent gets the Claude-only note and leaves the "not tracked" count, which keeps only Claude agents.
-    others: [{ key: 'agent-3', title: 'Codex' }],
+    // The Codex agent gets its untracked note; the count covers only Claude agents.
+    others: [{ key: 'agent-3', title: 'Codex', agent: 'codex' }],
     untracked: 1,
     unread: 1,
   })
@@ -368,7 +435,7 @@ test("inbox.view: a plan file that cannot be read, or has text but no step, give
   assert.deepEqual(await planOf({}), { plan: null, planError: null })
 })
 
-test('inbox.view: agents that are not Claude get the Claude-only list, by title, and count as nothing else', async () => {
+test('inbox.view: Codex agents without a seen launch get the untracked section', async () => {
   const agents = [
     { terminalId: 'term-5', title: 'Codex: review', agent: 'codex', state: 'working', stateStartedAt: 1 },
     { terminalId: 'term-6', title: null, agent: 'codex', state: 'done', stateStartedAt: 1 },
@@ -378,14 +445,72 @@ test('inbox.view: agents that are not Claude get the Claude-only list, by title,
   assert.deepEqual(view, {
     sections: [],
     others: [
-      { key: 'term-5', title: 'Codex: review' },
-      { key: 'term-6', title: 'Codex' },
+      { key: 'term-5', title: 'Codex: review', agent: 'codex' },
+      { key: 'term-6', title: 'Codex', agent: 'codex' },
     ],
     untracked: 0,
     unread: 0,
   })
   await t.worker.deactivate()
 })
+
+test('inbox.view: a Codex launch has a hook-trust section before its first thread signal', async () => {
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  const t = await setup({ socket, agents: [{ terminalId: 'term-1', title: 'Codex', agent: 'codex', state: 'working', stateStartedAt: 1 }] })
+  const out = await t.worker.hooks.fire('agent.launch.before', launch('codex', { agent: 'codex' }))
+  assert.equal(out.kind, 'continue')
+  const view = await t.worker.request('inbox.view', undefined)
+  assert.equal(view.sections.length, 1)
+  assert.equal(view.sections[0].trustHook, true)
+  assert.equal(view.sections[0].agent, 'codex')
+  assert.deepEqual(view.others, [])
+  assert.deepEqual(await t.worker.request('inbox.press', { terminalId: 'term-1', sessionId: view.sections[0].sessionId,
+    drawn: '', id: 'i1', action: 'answer', answer: 'Yes' }), { ok: false, refused: 'invalid' })
+  await t.close()
+  await t.worker.deactivate()
+})
+
+test('a Codex launch without terminal identity gets an uncertain note until a thread binds', async () => {
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  const t = await setup({ socket, agents: [{ terminalId: 'term-1', title: 'Codex', agent: 'codex', state: 'working', stateStartedAt: 1 }] })
+  await t.worker.hooks.fire('agent.launch.before', launch('codex', { agent: 'codex', terminalId: undefined }))
+  const view = await t.worker.request('inbox.view', undefined)
+  assert.deepEqual(view.sections, [])
+  assert.deepEqual(view.others, [{ key: 'term-1', title: 'Codex', agent: 'codex', reason: 'launch-unmatched' }])
+  await t.close()
+  await t.worker.deactivate()
+})
+
+test('inbox.view: a tracked Codex thread has Claude-shaped rows and clears hook-trust after a prompt', async () => {
+  const ledger = openLedger()
+  const session = { ...emptySession(100 * DAY), agent: 'codex' as const, codexHome: '/codex', ledger }
+  const state: CurrentState = { version: 2, terminals: { 'term-1': { sessionId: S } },
+    sessions: { [S]: session }, panes: { 'pane-1': { agent: 'codex', threadId: S, codexHome: '/codex', promptHookSeen: true } } }
+  const t = await setup({ state, agents: [{ terminalId: 'term-1', title: 'Codex', agent: 'codex', state: 'done', stateStartedAt: 1 }] })
+  const view = await t.worker.request('inbox.view', undefined)
+  assert.equal(view.sections.length, 1)
+  assert.equal(view.sections[0].agent, 'codex')
+  assert.equal(view.sections[0].trustHook, false)
+  assert.equal(view.sections[0].questions[0].text, ledger.items[0].ask)
+  assert.deepEqual(view.others, [])
+  await t.worker.deactivate()
+})
+
+for (const main of ['working', 'blocked', 'waiting', 'done'] as const) {
+  test(`Codex mainAgent ${main} controls the press send despite combined done`, async () => {
+    const ledger = openLedger()
+    const session = { ...emptySession(100 * DAY), agent: 'codex' as const, codexHome: '/codex', ledger }
+    const state: CurrentState = { version: 2, terminals: { 'term-1': { sessionId: S } },
+      sessions: { [S]: session }, panes: { 'pane-1': { agent: 'codex', threadId: S, codexHome: '/codex', promptHookSeen: false } } }
+    const t = await setup({ state, agents: [{ terminalId: 'term-1', title: 'Codex', agent: 'codex', state: 'done', stateStartedAt: 1 }] })
+    await t.worker.emit('agent.status.changed', status('done', { mainAgent: { state: main, stateStartedAt: 1 } }))
+    const out = await t.worker.request('inbox.press', { terminalId: 'term-1', sessionId: S, drawn: drawnToken(session),
+      id: ledger.items[0].id, action: 'answer', answer: 'Yes' })
+    assert.equal(out.ok && out.label?.text, main === 'done' ? 'Sending…' : 'Waits for the agent')
+    assert.equal(t.host.callsOf('terminal.sendText').length, main === 'done' ? 1 : 0)
+    await t.worker.deactivate()
+  })
+}
 
 test('a launch that got no tools marks its session, and its section says so', async () => {
   const t = await setup({ agents: [{ terminalId: 'term-1', title: 'Fixer', agent: 'claude', state: 'done', stateStartedAt: 1 }] })

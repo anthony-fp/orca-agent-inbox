@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { test } from 'node:test'
-import { userInfo } from 'node:os'
+import { tmpdir, userInfo } from 'node:os'
+import { join } from 'node:path'
 
-import { modelArgs, runInboxModel, type ModelProcess, type Spawn } from './model'
+import { modelArgs, runCodexModel, runInboxModel, type ModelProcess, type Spawn } from './model'
+import { ORCA_CODEX, systemText } from './core/model-text'
 
 type Script = { stdout?: string; code?: number; hang?: boolean }
 
@@ -98,4 +101,82 @@ test('a run past the timeout is killed', async () => {
   assert.ok(!r.ok)
   assert.equal(r.reason, 'timeout')
   assert.equal(s.killed(), true)
+})
+
+function codexStub(script: { answer?: string; code?: number; hang?: boolean; stderr?: string }) {
+  const calls: { command: string; args: string[]; env: NodeJS.ProcessEnv; cwd: string; system: string; auth: string | null }[] = []
+  let killed = false
+  const spawn: Spawn = (command, args, options) => {
+    const proc = new EventEmitter()
+    const stdout = new EventEmitter()
+    const stderr = new EventEmitter()
+    const config = args.find(a => a.startsWith('model_instructions_file=')) ?? ''
+    const actualSystem = JSON.parse(config.slice('model_instructions_file='.length)) as string
+    const home = options.env.CODEX_HOME ?? ''
+    calls.push({ command, args, env: options.env, cwd: options.cwd, system: readFileSync(actualSystem, 'utf8'), auth: existsSync(join(home, 'auth.json')) ? readFileSync(join(home, 'auth.json'), 'utf8') : null })
+    const child = {
+      stdin: { end(_text: string) {
+        if (script.hang) return
+        setImmediate(() => {
+          if (script.stderr) stderr.emit('data', script.stderr)
+          if (script.answer !== undefined) writeFileSync(args[args.indexOf('-o') + 1], script.answer)
+          proc.emit('close', script.code ?? 0)
+        })
+      } },
+      stdout, stderr,
+      on: (event: string, fn: (...a: any[]) => void) => proc.on(event, fn),
+      kill: () => { killed = true; proc.emit('close', null) },
+    }
+    return child as unknown as ModelProcess
+  }
+  return { spawn, calls, killed: () => killed }
+}
+
+test('Codex exec uses the pane account, isolated instructions, source flags and a parsed answer', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'inbox-codex-account-'))
+  writeFileSync(join(home, 'auth.json'), 'hand-written-auth')
+  const stub = codexStub({ answer: GOOD })
+  const result = await runInboxModel('prompt', { codexHome: home, spawn: stub.spawn })
+  assert.equal(result.ok, true)
+  const call = stub.calls[0]
+  assert.equal(call.command, 'codex')
+  assert.equal(call.system, systemText(ORCA_CODEX))
+  assert.equal(call.auth, 'hand-written-auth')
+  assert.notEqual(call.env.CODEX_HOME, home, 'auth file is linked into a clean model home')
+  assert.deepEqual(call.args.slice(0, 10), ['exec', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--skip-git-repo-check', '-s', 'read-only', '-C', call.cwd, '-m'])
+  assert.ok(call.args.includes('model_reasoning_effort="low"'))
+  assert.ok(call.args.includes('project_doc_max_bytes=0'))
+  assert.ok(call.args.includes('cli_auth_credentials_store="file"'))
+  assert.ok(call.args.includes('--disable'))
+  assert.equal(call.args.at(-1), 'prompt')
+})
+
+test('Codex exec keeps a keyring account home, reports bad answers and failed runs', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'inbox-codex-keyring-'))
+  const bad = codexStub({ answer: 'hello' })
+  const unparsed = await runCodexModel('prompt', home, { spawn: bad.spawn })
+  assert.ok(!unparsed.ok)
+  assert.equal(unparsed.reason, 'unparsed')
+  assert.equal(bad.calls[0].env.CODEX_HOME, home)
+  const failed = await runCodexModel('prompt', home, { spawn: codexStub({ code: 1, stderr: 'API failed' }).spawn })
+  assert.ok(!failed.ok)
+  assert.equal(failed.reason, 'failed')
+  assert.equal(failed.detail, 'API failed')
+})
+
+test('Codex exec kills a slow run at its timeout', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'inbox-codex-timeout-'))
+  const stub = codexStub({ hang: true })
+  const result = await runCodexModel('prompt', home, { spawn: stub.spawn, timeoutMs: 10 })
+  assert.ok(!result.ok)
+  assert.equal(result.reason, 'timeout')
+  assert.equal(stub.killed(), true)
+})
+
+test('Codex exec waits for the pane account before spawning', async () => {
+  const stub = codexStub({ answer: GOOD })
+  const result = await runCodexModel('prompt', '', { spawn: stub.spawn })
+  assert.ok(!result.ok)
+  assert.equal(result.reason, 'unavailable')
+  assert.equal(stub.calls.length, 0)
 })
