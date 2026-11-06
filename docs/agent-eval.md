@@ -64,3 +64,11 @@ Not covered: the finding press messages (`src/presses.ts`) have no case in the a
 ## Follow-up
 
 - No agent case covers the finding press messages (Fix, File issue, Reply on a finding) in `src/presses.ts:106-114`. They are copied word for word from the inbox, but untested here. The failure it would catch: an agent that does not act on a Fix hand-off sent from the Orca panel.
+
+# Agent eval for Codex (T20)
+
+Date: 2026-11-05. Codex 0.166.0, model requested `gpt-6.1-sol` (Codex does not report which model answered). Plugin commit `c6cd080`. Inbox commit `aed5f52`, in a temporary copy with these changes: `hooks/model-text.ts` gains the `ORCA` and `ORCA_CODEX` hosts, copied from `src/core/model-text.ts`; `evals/agent.ts` and `evals/probe.ts` gain `--host`, and with `orca-codex` the stand-in server is `orca-inbox` and the agent gets `guidanceText(ORCA_CODEX)` as `developer_instructions`, as `src/launch.ts:129` passes it; `evals/agent-cases.json` gains `record-not-available`.
+
+Ran `./scripts/eval.sh --suite agent --agent codex`, 5 runs per case, once with `--host orca-codex` and once with the default Codex host. Both: 23 of 23 cases pass, every run graded, exit 0. With `--host orca-codex` every case passed 5 of 5. With the default host, `record-not-available` passed 4 of 5 (the bar is 75%). Results files: `eval-orca-codex.json` and `eval-codex.json`, kept outside the repo.
+
+`ORCA_CODEX` passes every case that the default Codex host passes, so T21 is not blocked.
