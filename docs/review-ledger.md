@@ -37,3 +37,9 @@
 - [fixed] A different thread rebinds a pane only with a later rollout start time from `session_meta` or its file name (`src/worker.ts:297`, `src/worker.ts:323`; late old signals test `src/worker.test.ts:158`).
 - [fixed] Codex sends require a seen prompt hook in that terminal's pane; untrusted rows offer Copy and the trust instruction. A press prompt from another thread makes the hook exit 2 (`src/presses.ts:206`, `src/worker.ts:448`, `src/panel.tsx:574`, `src/socket.ts:143`, `bin/prompt-hook.mjs:59`; tests `src/presses.test.ts:81`, `src/socket.test.ts:521`).
 - [fixed] The MCP server inherits `CODEX_HOME`; both clients use it directly, and the parent lookup script is removed. The hook command remains stable (`src/launch.ts:127`, `bin/mcp-server.mjs:47`, `bin/prompt-hook.mjs:44`; `src/launch.test.ts:278`).
+
+## Code round 2 — 2026-11-05
+- Verified real: all round 1 fixes; no duplicate-turn path found; restart between notify and read, and Codex outside Orca (`~/.codex`), raise nothing.
+- [open] A reused pane can tie a later Claude launch's status to the old Codex thread (`src/worker.ts:178-185`) → stored-state change. Fix: a tracked launch in a terminal clears any Codex pane binding for that terminal; status reattaches a pane only when the terminal's launch was Codex.
+- [open] A typed prompt equal to an old press can be blocked by exit 2 (`src/socket.ts:141-143`) → small edit. Fix: block only while that press is `sending` (sent under 10 s ago, not yet confirmed) to this terminal, never for `undelivered`.
+- [open] Missing rollout start times refuse every later thread switch (`src/worker.ts:323-330`) → small edit. Fix: a prompt hook or tool call (live in the pane, main thread) rebinds without times; only a notify needs the later start time.
