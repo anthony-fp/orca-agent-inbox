@@ -49,6 +49,8 @@ const stepResults = atom<Record<string, RowLabel>>({})
 const copies = atom<Record<string, 'copying' | 'copied' | 'failed'>>({})
 /** Plan tasks the person opened or closed, by `planKey`. Kept while the panel runs; a task not here takes its default. */
 const planOpen = atom<Record<string, boolean>>({})
+/** Whether each session's completed plan tasks are visible. */
+const completedPlansOpen = atom<Record<string, boolean>>({})
 
 /** What a row reads while its press is out. Done and Dismiss read as the row closing, as the inbox's Mark presses do. */
 const SENDING: RowLabel = { text: 'Sending…', tone: 'muted', copy: null }
@@ -515,7 +517,8 @@ function PlanText({ line }: { line: PlanLine }) {
 
 /**
  * The session plan (spec "The session plan", step 3), from `planLines`: "PLAN N of M steps", a progress bar, then one
- * fold per task with its count and steps. A task with a step in progress starts open; a press toggles it. A plan file
+ * fold per task, in source order within Active and Completed. Completed starts collapsed. A task with a step in progress
+ * starts open; a press toggles it. A plan file
  * that cannot be read gives the one error line instead.
  */
 function Plan({ section }: { section: InboxSection }) {
@@ -532,27 +535,44 @@ function Plan({ section }: { section: InboxSection }) {
     if (line.indent === 0) tasks.push({ line, steps: [] })
     else tasks.at(-1)?.steps.push(line)
   }
+  const entries = tasks.map((lines, n) => ({ lines, task: view.tasks[n]!, n }))
+  const isDone = ({ task }: (typeof entries)[number]) => task.steps.every(step => step.mark === 'done')
+  const active = entries.filter(entry => !isDone(entry))
+  const completed = entries.filter(isDone)
+  const drawTask = ({ lines, task, n }: (typeof entries)[number]) => (
+    <Collapsible
+      key={planKey(section, n, task.title)}
+      title={lines.line.text.replace(/^[▸▾] /, '')}
+      open={task.isOpen}
+      onChange={(open: boolean) => update(planOpen, m => ({ ...m, [planKey(section, n, task.title)]: open }))}
+    >
+      <Stack gap="xs">
+        {lines.steps.map((step, k) => (
+          <PlanText key={`step-${k}`} line={step} />
+        ))}
+      </Stack>
+    </Collapsible>
+  )
   return (
     <Stack gap="sm">
       <PlanText line={head} />
       <Progress label={head.text} labelHidden value={plan.total === 0 ? 0 : Math.round((plan.done / plan.total) * 100)} />
-      {tasks.map((t, n) => {
-        const task = view.tasks[n]!
-        return (
-          <Collapsible
-            key={planKey(section, n, task.title)}
-            title={t.line.text.replace(/^[▸▾] /, '')}
-            open={task.isOpen}
-            onChange={(open: boolean) => update(planOpen, m => ({ ...m, [planKey(section, n, task.title)]: open }))}
-          >
-            <Stack gap="xs">
-              {t.steps.map((step, k) => (
-                <PlanText key={`step-${k}`} line={step} />
-              ))}
-            </Stack>
-          </Collapsible>
-        )
-      })}
+      {active.length > 0 ? (
+        <Stack gap="xs">
+          <Text size="sm" weight="semibold" muted>Active</Text>
+          {active.map(drawTask)}
+        </Stack>
+      ) : null}
+      {completed.length > 0 ? (
+        <Collapsible
+          key={`${section.sessionId}:completed-plan`}
+          title={`Completed (${completed.length})`}
+          open={read(completedPlansOpen)[section.sessionId] ?? false}
+          onChange={(open: boolean) => update(completedPlansOpen, m => ({ ...m, [section.sessionId]: open }))}
+        >
+          <Stack gap="xs">{completed.map(drawTask)}</Stack>
+        </Collapsible>
+      ) : null}
     </Stack>
   )
 }

@@ -5,7 +5,7 @@ An Orca plugin that adds an inbox icon to Orca's right sidebar. The panel shows 
 - **Questions** the agent asked you, with its options and its recommendation. Press an option to type the answer into that agent's terminal.
 - **Tasks** that only you can do, such as a sign-in or a review.
 - **Findings**: Issues and Opportunities the agent noticed outside its task, with Fix (or Do it), File issue, Reply and Dismiss.
-- **The session plan**: the agent's plan file, as "PLAN N of M steps" with one collapsible line per task.
+- **The session plan**: the agent's plan file, as "PLAN N of M steps" with active tasks first and completed tasks collapsed under Completed. Each group keeps the plan-file order, with one collapsible line per task.
 
 The panel has one section per tracked agent, newest activity first.
 

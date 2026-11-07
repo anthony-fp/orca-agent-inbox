@@ -1,6 +1,7 @@
 // `orca plugin test .` runs this in Node with the same runtime and checks Orca uses.
 import { assert, mockHost, mount, test } from 'orca/testing'
 import * as panel from './panel'
+import { parsePlan } from './core/plan'
 import { CLOSED_FINDINGS, CODEX_ONLY, EMPTY_VIEW, FINDINGS, MANY_OPTIONS, MIXED, ONE_AGENT, PLAN, STEPS, THREE_AGENTS, section } from './panel-views'
 import type { InboxView } from './protocol'
 import type { PressInput, PressOutcome } from './presses'
@@ -369,9 +370,9 @@ test('plan: "PLAN N of M steps", a progress bar, and one fold per task; a task w
   assert.deepEqual(
     view.findAll({ type: 'Collapsible' }).map(c => [c.props.title, c.props.open]),
     [
-      ['✓ Read the code  2/2', false],
       ['Write the fix  1/3', true],
       ['Ship it  0/1', false],
+      ['Completed (1)', false],
     ],
   )
   const current = view.find({ text: '◐ Change the parser' })
@@ -381,6 +382,43 @@ test('plan: "PLAN N of M steps", a progress bar, and one fold per task; a task w
   assert.ok(view.find({ text: '○ Run the suite' }))
   assert.equal(view.find({ text: '○ Open the PR' }), null, 'a closed task lists no steps')
   assert.equal(view.find({ text: 'Nothing waits on you.' }), null)
+  await clean(view)
+})
+
+test('plan: groups keep source order across completion and reopening, with Completed collapsed per session', async () => {
+  const source = '## A\n- [x] a\n## B\n- [ ] b\n## C\n- [x] c\n## D\n- [~] d\n- [ ] e'
+  let current: InboxView = { sections: [section(1, { plan: parsePlan(source) })], others: [], untracked: 0, unread: 0 }
+  const host = mockHost({ requests: { 'inbox.view': () => current } })
+  const view = await mount(panel, { host })
+  const folds = () => view.findAll({ type: 'Collapsible' })
+  const titles = () => folds().map(c => c.props.title)
+  const fold = (title: string) => {
+    const found = view.find({ type: 'Collapsible', label: title })
+    assert.ok(found, title)
+    return found
+  }
+  assert.deepEqual(titles(), ['B  0/1', 'D  0/2', 'Completed (2)'])
+  assert.equal(fold('Completed (2)').props.open, false)
+  await view.toggle(fold('B  0/1'))
+  await view.toggle(fold('Completed (2)'))
+  assert.deepEqual(titles(), ['B  0/1', 'D  0/2', '✓ A  1/1', '✓ C  1/1'])
+  current.sections[0]!.plan = parsePlan(source.replace('[ ] b', '[x] b'))
+  await view.post('inbox.changed', {})
+  assert.deepEqual(titles(), ['D  0/2', '✓ A  1/1', 'B  1/1', '✓ C  1/1'])
+  assert.equal(fold('B  1/1').props.open, true, 'grouping preserves the original task key and open choice')
+  current.sections[0]!.plan = parsePlan(source)
+  await view.post('inbox.changed', {})
+  assert.deepEqual(titles(), ['B  0/1', 'D  0/2', '✓ A  1/1', '✓ C  1/1'])
+  assert.equal(fold('B  0/1').props.open, true)
+  await view.toggle(fold('Completed (2)'))
+  assert.deepEqual(titles(), ['B  0/1', 'D  0/2', 'Completed (2)'])
+  current = { sections: [section(2, { plan: parsePlan('## A\n- [x] a') })], others: [], untracked: 0, unread: 0 }
+  await view.post('inbox.changed', {})
+  assert.deepEqual(titles(), ['Completed (1)'])
+  assert.equal(fold('Completed (1)').props.open, false)
+  assert.equal(view.find({ text: 'Active' }), null)
+  await view.toggle(fold('Completed (1)'))
+  assert.deepEqual(titles(), ['✓ A  1/1'])
   await clean(view)
 })
 
