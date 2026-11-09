@@ -631,6 +631,11 @@ function isPersonsAnswer(outcome: string): boolean {
   return outcome.trim() !== '' && !NOT_AN_ANSWER.test(outcome)
 }
 
+/** An item the agent recorded during the exchange: at or after `startedAt`, else on turn `turn`. */
+export function isRecordedDuring(item: Item, turn: number, startedAt: number | null): boolean {
+  return item.from === 'record' && (startedAt === null ? item.turn === turn : item.at !== null && item.at >= startedAt)
+}
+
 /**
  * `promptAt` is when the update's prompt was built. A NEW line that repeats an
  * item closed since then is dropped: the person answered it while the model ran.
@@ -658,8 +663,7 @@ export function applyUpdate(
   const closing = new Map(
     u.closed.filter(c => !stillAsked.has(c.id) && !UNFOUNDED_MOOT.test(c.outcome)).map(c => [c.id, c.outcome]),
   )
-  const isRecordedNow = (i: Item) =>
-    i.from === 'record' && (startedAt === null ? i.turn === turn : i.at !== null && i.at >= startedAt)
+  const isRecordedNow = (i: Item) => isRecordedDuring(i, turn, startedAt)
   const closed = [...ledger.closed]
   const items: Item[] = []
   for (const item of ledger.items) {

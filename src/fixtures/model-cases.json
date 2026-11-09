@@ -1,0 +1,332 @@
+[
+  {
+    "name": "asked-after-answer",
+    "note": "Live Codex test, 2026-11-09: the person answered the hand-off question with \"1\", the agent closed it and recorded the snooze question during its reply. \"1\" must not close the snooze question.",
+    "ledger": {
+      "card": {
+        "goal": "Test Agent Inbox question recording and closure",
+        "done": [],
+        "now": "Waiting on new worktree, existing workspace, or drop it choice",
+        "running": []
+      },
+      "items": [
+        {
+          "kind": "question",
+          "ask": "Snooze hides a row for how long?",
+          "options": [
+            "1 hour",
+            "Until tomorrow 9am",
+            "Pick 1 hour or tomorrow"
+          ],
+          "rec": "1 hour",
+          "helps": [],
+          "label": null,
+          "id": "i2",
+          "turn": 2,
+          "at": 1794238412800,
+          "from": "record"
+        }
+      ],
+      "closed": [
+        {
+          "id": "i1",
+          "kind": "question",
+          "ask": "Hand off: new worktree or existing workspace?",
+          "how": "answered",
+          "outcome": "New worktree",
+          "at": 1794238412700,
+          "item": {
+            "kind": "question",
+            "ask": "Hand off: new worktree or existing workspace?",
+            "options": [
+              "New worktree",
+              "Existing workspace",
+              "Drop it"
+            ],
+            "rec": null,
+            "helps": [],
+            "label": null,
+            "id": "i1",
+            "turn": 1,
+            "at": 1794238398400,
+            "from": "record"
+          }
+        }
+      ],
+      "findings": [],
+      "closedFindings": [],
+      "prs": [],
+      "nextId": 3,
+      "turn": 2,
+      "batchTurn": 2
+    },
+    "exchange": {
+      "person": "1",
+      "trigger": null,
+      "activity": [],
+      "reply": "Selected: New worktree.\n\nDesign question 4 of 6: Snooze hides a row for how long?\n\n- 1 hour\n- Until tomorrow 9am\n- Pick 1 hour or tomorrow\n\nI recommend 1 hour: it brings the row back soon.",
+      "turn": 2,
+      "startedAt": 1794238407776,
+      "press": null,
+      "screen": "The Agent Inbox panel in Orca's sidebar is open beside the conversation, listing every open item."
+    },
+    "close": [],
+    "open": [
+      "i2"
+    ]
+  },
+  {
+    "name": "numbered-answer",
+    "note": "The agent did not close the question the person answered with \"1\".",
+    "ledger": {
+      "card": {
+        "goal": "Test Agent Inbox question recording and closure",
+        "done": [],
+        "now": "Waiting on handoff workspace choice",
+        "running": []
+      },
+      "items": [
+        {
+          "kind": "question",
+          "ask": "Hand off: new worktree or existing workspace?",
+          "options": [
+            "New worktree",
+            "Existing workspace",
+            "Drop it"
+          ],
+          "rec": null,
+          "helps": [],
+          "label": null,
+          "id": "i1",
+          "turn": 1,
+          "at": 1000,
+          "from": "record"
+        }
+      ],
+      "closed": [],
+      "findings": [],
+      "closedFindings": [],
+      "prs": [],
+      "nextId": 2,
+      "turn": 2,
+      "batchTurn": 1
+    },
+    "exchange": {
+      "person": "1",
+      "trigger": null,
+      "activity": [],
+      "reply": "Going with a new worktree. I will set it up next.",
+      "turn": 2,
+      "startedAt": 2000,
+      "press": null,
+      "screen": "The Agent Inbox panel in Orca's sidebar is open beside the conversation, listing every open item."
+    },
+    "close": [
+      "i1"
+    ],
+    "open": []
+  },
+  {
+    "name": "numbered-answer-then-new-question",
+    "note": "As numbered-answer, and the agent recorded the snooze question during its reply.",
+    "ledger": {
+      "card": {
+        "goal": "Test Agent Inbox question recording and closure",
+        "done": [],
+        "now": "Waiting on handoff workspace choice",
+        "running": []
+      },
+      "items": [
+        {
+          "kind": "question",
+          "ask": "Hand off: new worktree or existing workspace?",
+          "options": [
+            "New worktree",
+            "Existing workspace",
+            "Drop it"
+          ],
+          "rec": null,
+          "helps": [],
+          "label": null,
+          "id": "i1",
+          "turn": 1,
+          "at": 1000,
+          "from": "record"
+        },
+        {
+          "kind": "question",
+          "ask": "Snooze hides a row for how long?",
+          "options": [
+            "1 hour",
+            "Until tomorrow 9am",
+            "Pick 1 hour or tomorrow"
+          ],
+          "rec": "1 hour",
+          "helps": [],
+          "label": null,
+          "id": "i2",
+          "turn": 2,
+          "at": 2500,
+          "from": "record"
+        }
+      ],
+      "closed": [],
+      "findings": [],
+      "closedFindings": [],
+      "prs": [],
+      "nextId": 3,
+      "turn": 2,
+      "batchTurn": 2
+    },
+    "exchange": {
+      "person": "1",
+      "trigger": null,
+      "activity": [],
+      "reply": "Selected: New worktree.\n\nDesign question 4 of 6: Snooze hides a row for how long?\n\n- 1 hour\n- Until tomorrow 9am\n- Pick 1 hour or tomorrow\n\nI recommend 1 hour: it brings the row back soon.",
+      "turn": 2,
+      "startedAt": 2000,
+      "press": null,
+      "screen": "The Agent Inbox panel in Orca's sidebar is open beside the conversation, listing every open item."
+    },
+    "close": [
+      "i1"
+    ],
+    "open": [
+      "i2"
+    ]
+  },
+  {
+    "name": "two-numbered-answers",
+    "note": "Questions the update added, answered by number.",
+    "ledger": {
+      "card": {
+        "goal": "Add rate limiting to the public API",
+        "done": [],
+        "now": "Waiting on rate-limit key and storage choices",
+        "running": []
+      },
+      "items": [
+        {
+          "kind": "question",
+          "label": "1",
+          "ask": "Rate-limit per IP address or per API key?",
+          "options": [
+            "Per IP",
+            "Per API key"
+          ],
+          "rec": "Per API key",
+          "helps": [],
+          "id": "i1",
+          "turn": 1,
+          "at": 1000,
+          "from": "update"
+        },
+        {
+          "kind": "question",
+          "label": "2",
+          "ask": "Store rate-limit counters in memory or in Redis?",
+          "options": [
+            "In memory",
+            "Redis"
+          ],
+          "rec": "In memory",
+          "helps": [],
+          "id": "i2",
+          "turn": 1,
+          "at": 1000,
+          "from": "update"
+        }
+      ],
+      "closed": [],
+      "findings": [],
+      "closedFindings": [],
+      "prs": [],
+      "nextId": 3,
+      "turn": 2,
+      "batchTurn": 1
+    },
+    "exchange": {
+      "person": "1. per API key 2. in-memory is fine",
+      "trigger": null,
+      "activity": [],
+      "reply": "Done: the limiter now keys on the API key and keeps its counters in an in-memory map. Tests pass.",
+      "turn": 2,
+      "startedAt": 2000,
+      "press": null,
+      "screen": "The Agent Inbox panel in Orca's sidebar is open beside the conversation, listing every open item."
+    },
+    "close": [
+      "i1",
+      "i2"
+    ],
+    "open": []
+  },
+  {
+    "name": "all-recommended",
+    "note": "Recorded questions with recommendations, answered with \"all recommended\".",
+    "ledger": {
+      "card": {
+        "goal": "Move orders API to v2",
+        "done": [
+          "v2 endpoints added"
+        ],
+        "now": "Waiting on migration and old endpoint choices",
+        "running": []
+      },
+      "items": [
+        {
+          "kind": "question",
+          "ask": "Run the migration now or after the release?",
+          "options": [
+            "Now",
+            "After the release"
+          ],
+          "rec": "After the release",
+          "helps": [],
+          "label": null,
+          "id": "i1",
+          "turn": 1,
+          "at": 1000,
+          "from": "record"
+        },
+        {
+          "kind": "question",
+          "ask": "Keep the old endpoint for one release?",
+          "options": [
+            "Keep it",
+            "Remove it"
+          ],
+          "rec": "Keep it",
+          "helps": [],
+          "label": null,
+          "id": "i2",
+          "turn": 1,
+          "at": 1100,
+          "from": "record"
+        }
+      ],
+      "closed": [],
+      "findings": [],
+      "closedFindings": [],
+      "prs": [],
+      "nextId": 3,
+      "turn": 2,
+      "batchTurn": 1
+    },
+    "exchange": {
+      "person": "all recommended",
+      "trigger": null,
+      "activity": [],
+      "reply": "Taking both recommendations: the migration runs after the release, and the old endpoint stays for one more release. I updated the release notes to match.",
+      "turn": 2,
+      "startedAt": 2000,
+      "press": null,
+      "screen": "The Agent Inbox panel in Orca's sidebar is open beside the conversation, listing every open item."
+    },
+    "close": [
+      "i1",
+      "i2"
+    ],
+    "open": []
+  }
+]

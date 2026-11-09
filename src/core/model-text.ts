@@ -2,7 +2,7 @@ import type { Closed, Finding, Item, Ledger, Told } from './types'
 
 export type { Told } from './types'
 import type { Exchange } from './ledger'
-import { isAskedForChoices, LIST_CHOICES } from './ledger'
+import { isAskedForChoices, isRecordedDuring, LIST_CHOICES } from './ledger'
 import { clip, clipMiddle, numberBlocks } from './text'
 
 const NL = '\n'
@@ -16,7 +16,7 @@ export function systemText(host: Host): string {
 
 Input:
 - <card>: the ledger before this exchange (may be empty)
-- <open>: items still waiting on the person, as id | kind | label | ask | options | rec
+- <open>: items still waiting on the person, as id | kind | label | ask | options | rec. An item marked "asked after <person>" was asked in this reply: <person> does not answer it.
 - <findings>: findings the agent recorded for the person to review later, outside the current task, each with an id
 - <decided>: items the person already settled, and how. Never add one of these again as NEW, even when the reply asks it again.
 - <person>: what the person just sent, and the commands they ran themselves: "$ cmd" for a shell command, with its output, and "/name" for a slash command
@@ -214,7 +214,8 @@ export function dialogActivity(questions: DialogQuestion[], outcome: DialogOutco
   }
 }
 
-function ledgerBlocks(ledger: Ledger): string[] {
+/** `ex` marks the items the agent recorded during the exchange: its person's message came before them. */
+function ledgerBlocks(ledger: Ledger, ex: Exchange | null = null): string[] {
   const card = ledger.card
     ? [
         `GOAL: ${ledger.card.goal}`,
@@ -226,7 +227,9 @@ function ledgerBlocks(ledger: Ledger): string[] {
   const open = ledger.items
     .map(
       i =>
-        `${i.id} | ${MODEL_KIND[i.kind]} | ${i.label ?? '-'} | ${i.ask} | ${i.options.join(' / ') || '-'} | ${i.rec ?? '-'}`,
+        `${i.id} | ${MODEL_KIND[i.kind]} | ${i.label ?? '-'} | ${i.ask} | ${i.options.join(' / ') || '-'} | ${i.rec ?? '-'}${
+          ex && isRecordedDuring(i, ex.turn, ex.startedAt ?? null) ? ' | asked after <person>' : ''
+        }`,
     )
     .join(NL)
   const findings = ledger.findings.map(f => `${f.id} | ${f.kind}: ${f.title}`).join(NL)
@@ -247,7 +250,7 @@ export function buildPrompt(ledger: Ledger, ex: Exchange): string {
   const person = ex.person ?? `(The person sent nothing. The turn was started by: ${ex.trigger ?? 'unknown'}.)`
 
   return [
-    ...ledgerBlocks(ledger),
+    ...ledgerBlocks(ledger, ex),
     `<person>${NL}${clipMiddle(person, 4000, 1500)}${NL}</person>`,
     `<activity>${NL}${clipMiddle(ex.activity.join(NL), 2500, 500)}${NL}</activity>`,
     `<reply>${NL}${clipMiddle(numberBlocks(ex.reply), 12000, 4000)}${NL}</reply>`,

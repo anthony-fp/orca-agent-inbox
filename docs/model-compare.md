@@ -61,3 +61,27 @@ Four runs took 11 to 22 s, and one hit the 45 s cap with no answer. The tail is 
 ## Verdict
 
 Keep `ORCA`. The counts match on every exchange, and the one timeout was in a `CLAUDE_CODE` run.
+
+## Model cases
+
+`src/fixtures/model-cases.json` holds exchanges with the ids the person's message must close (`close`) and must leave open (`open`). `scripts/model-cases.ts` runs `buildPrompt` on each with `runInboxModel`, as the worker does, and counts the runs that pass:
+
+```
+bun scripts/model-cases.ts claude 10 [case]
+bun scripts/model-cases.ts codex <Codex account home> 10 [case]
+```
+
+Run it after a change to `systemText` or `buildPrompt`.
+
+### Asked after the person's message (2026-11-09)
+
+In a live Codex test the person answered a question with "1". During the reply the agent closed that question and recorded a new one, whose first option was "1 hour". The Codex inbox model then read "1" as the answer to the new question: it wrote `CLOSED: i2 | 1 hour` and a card that said the snooze question was answered. The ledger dropped the close, as the agent recorded the question during the exchange, but kept the card. `<open>` did not say which items the agent recorded after the person's message.
+
+`buildPrompt` now ends such a row with `| asked after <person>`, and `systemText` says what the mark means. Counts on the turn's prompt (`asked-after-answer`, four versions of the turn-1 card), Codex model at low effort:
+
+| | Runs that closed the new question | Cards that said it was answered |
+|---|---|---|
+| Before | 3 of 102 | 3 of 102 |
+| After | 0 of 130 | 0 of 130 |
+
+Sonnet closed it in 0 of 12 runs before and 0 of 22 after. With the mark, the other four cases, where the person's answer must close a question, passed 10 of 10 runs on each model.

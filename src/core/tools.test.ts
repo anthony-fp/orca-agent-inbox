@@ -77,10 +77,10 @@ describe('guidedCloseDescription', () => {
 
 // New here, not ported.
 describe('the ORCA host', () => {
-  test('systemText(ORCA) is the text the inbox model read before the host got its tool names and intro', () => {
-    // The SHA-256 of JSON.stringify(systemText(ORCA)) at the commit before T9 (8301 bytes).
+  test('systemText(ORCA) changes only with a model run that tests the change', () => {
+    // The SHA-256 of JSON.stringify(systemText(ORCA)) after the "asked after <person>" note (runs in docs/model-compare.md).
     const hash = createHash('sha256').update(JSON.stringify(systemText(ORCA))).digest('hex')
-    expect(hash).toBe('912b9f8c99742d61190d739e02294adacbaaa4c4822e6aebcdf03d55e5a0156b')
+    expect(hash).toBe('dfe47b4bf3925526e28a86997d5f07f709b0d399683a9f2cdd91bdf94af8348f')
   })
 
   test("the close description stays within the length Claude Code sends, with ORCA's names", () => {
