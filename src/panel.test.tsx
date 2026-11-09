@@ -22,6 +22,15 @@ const labelCopies = (view: Awaited<ReturnType<typeof mount>>) =>
 const NO_TOOLS = /^No tools: /
 const UNTRACKED_CODEX = 'Started before Agent Inbox; not tracked.'
 
+/**
+ * What the panel draws while a press is still out. view.settled() would wait for the press, so this waits task by task:
+ * the harness draws on a setImmediate, and a setTimeout(0) may fire before it.
+ */
+async function drawn(view: Awaited<ReturnType<typeof mount>>, query: { text: string }) {
+  for (let i = 0; i < 10 && !view.find(query); i++) await new Promise(r => setImmediate(r))
+  return view.find(query)
+}
+
 async function clean(view: Awaited<ReturnType<typeof mount>>) {
   assert.deepEqual(view.errors, [])
   assert.deepEqual(view.refusals, [])
@@ -251,8 +260,7 @@ test('Open shows only on rows with a path, after Explain and before Copy, and as
   const view = await mount(panel, { host })
   assert.deepEqual(texts(view, 'Button'), ['Reply', 'Explain', 'Open', 'Copy', 'Snooze', 'Dismiss', 'Done', 'Reply', 'Explain', 'Copy', 'Hand off', 'Snooze'])
   const pressing = view.press({ type: 'Button', text: 'Open' })
-  await new Promise(r => setTimeout(r, 0))
-  assert.ok(view.find({ text: 'Opening parse.ts…' }))
+  assert.ok(await drawn(view, { text: 'Opening parse.ts…' }))
   finish({ ok: true })
   await pressing
   assert.deepEqual(opened, [{ sessionId: 'session-1', path: 'src/parse.ts' }])
@@ -324,8 +332,7 @@ test('an option press shows Sending… at once, sends the drawn row, then shows 
     return new Promise(done => (release = done))
   })
   const pressing = view.press({ type: 'Button', text: 'Yes' })
-  for (let i = 0; i < 5 && !view.find({ text: 'Sending…' }); i++) await new Promise(r => setTimeout(r, 0))
-  assert.ok(view.find({ text: 'Sending…' }), 'the label shows before the worker answers')
+  assert.ok(await drawn(view, { text: 'Sending…' }), 'the label shows before the worker answers')
   assert.equal(view.find({ type: 'Button', text: 'Yes' })?.disabled, true)
   release({ ok: true, label: { text: 'Waits for the agent', tone: 'muted', copy: 'Re "Rename the folder to tools?": Yes' } })
   await pressing
@@ -457,8 +464,7 @@ test('Hand off shows on findings and tasks, not on questions; it reads "Handing 
   assert.equal(view.findAll({ type: 'Button', text: 'Hand off' }).length, 3)
   assert.deepEqual(texts(view, 'Button').slice(0, 7), ['Yes', 'No', 'Reply', 'Explain', 'Copy', 'Snooze', 'Dismiss'])
   const pressing = view.press({ type: 'Button', text: 'Hand off' })
-  await new Promise(r => setTimeout(r, 0))
-  assert.ok(view.find({ text: 'Handing off…' }))
+  assert.ok(await drawn(view, { text: 'Handing off…' }))
   assert.deepEqual(handed, [{ sessionId: 'session-1', id: 't1' }])
   const label = { text: '✓ Handed off to run-the-migration-on-staging', tone: 'success' as const, copy: null }
   const s = current.sections[0]
