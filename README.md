@@ -7,6 +7,8 @@ An Orca plugin that adds an inbox icon to Orca's right sidebar. The panel shows 
 - **Findings**: Issues and Opportunities the agent noticed outside its task, with Fix (or Do it), File issue, Reply and Dismiss.
 - **The session plan**: the agent's plan file, as "PLAN N of M steps" with active tasks first and completed tasks collapsed under Completed. Each group keeps the plan-file order, with one collapsible line per task.
 
+Every question, task and finding also has Explain and Copy. Explain asks the agent to explain the row in its terminal. Copy puts the row on the clipboard as Markdown, with its file when the agent gave one. A task with commands to run copies only the commands. Copy uses `pbcopy` on macOS, `wl-copy`, `xclip` or `xsel` on Linux, and PowerShell on Windows.
+
 The panel has one section per tracked agent, newest activity first.
 
 ## Claude Code and Codex
