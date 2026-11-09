@@ -24,6 +24,7 @@ type Line = {
   type?: string
   cwd?: unknown
   uuid?: string
+  timestamp?: unknown
   isSidechain?: boolean
   isMeta?: boolean
   isCompactSummary?: boolean
@@ -158,12 +159,14 @@ export function readTurn(source: Buffer | string, offset: number, prompts?: numb
   const hasReply = reply.length > 0 && calls.size === 0 && last?.type === 'assistant' && last.message?.stop_reason !== 'tool_use'
   const status = hasReply ? 'complete' : next !== -1 ? 'incomplete' : 'pending'
   const before = prompts ?? promptsBefore(bytes, offset)
+  const startedAt = typeof first.timestamp === 'string' ? Date.parse(first.timestamp) : NaN
   const exchange: Exchange = {
     person: isPersonTurn ? text(first.message?.content) : null,
     trigger: isPersonTurn ? null : (first.origin?.kind ?? first.turnOrigin ?? 'unknown'),
     activity,
     reply: status === 'complete' ? reply.join('\n\n') : '',
     turn: before + (isPersonTurn ? 1 : 0),
+    ...(Number.isFinite(startedAt) && { startedAt }),
     press: null, // T7 sets it when the turn answers a press.
     screen: '', // T4 sets it from what the panel showed when the turn started.
   }

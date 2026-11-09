@@ -275,6 +275,37 @@ describe('applyExchangeUpdate', () => {
     const next = applyExchangeUpdate({ ...first, turn: 2 }, update, ex, 2000, 2000)
     expect(next.items.map(i => i.id)).toEqual(['i1', 'i3'])
   })
+
+  // The person typed "1" for an earlier question; during the reply the agent recorded the Snooze question, with a
+  // turn stamp 2 above the exchange's (subagent hand-backs raise the active turn, not the person-prompt count).
+  const snooze = { kind: 'question' as const, ask: 'How long should a snoozed row stay hidden?', options: ['1 hour', 'Until tomorrow 9am', 'Pick 1 hour or tomorrow'], rec: null, helps: [] }
+  const recordedDuring = (startedAt: number) => {
+    const recorded = addAgentItem({ ...EMPTY, turn: 8 }, snooze, 5000).ledger
+    const ledger = { ...recorded, turn: 6 }
+    const ex = { person: '1', trigger: null, activity: [], reply: 'Design question 4 of 6: how long should a snoozed row stay hidden?', turn: 6, press: null, screen: '', startedAt }
+    return { ledger, ex }
+  }
+  const copy = 'NEW: decide | 4 | How long does Snooze hide a row? | 1 hour / Until tomorrow 9am | -'
+
+  test('a CLOSED line never closes a question the agent recorded after the person sent the message, nor adds its copy', () => {
+    const { ledger, ex } = recordedDuring(4000)
+    const next = applyExchangeUpdate(ledger, parseReply(`CLOSED: i1 | 1 hour\n${copy}`)!, ex, 6000, 6000)
+    expect(next.items.map(i => [i.id, i.ask])).toEqual([['i1', snooze.ask]])
+    expect(next.closed).toEqual([])
+  })
+
+  test('a reworded NEW copy of a question the agent recorded during the exchange is dropped', () => {
+    const { ledger, ex } = recordedDuring(4000)
+    const next = applyExchangeUpdate(ledger, parseReply(copy)!, ex, 6000, 6000)
+    expect(next.items.map(i => i.id)).toEqual(['i1'])
+  })
+
+  test('a CLOSED line closes a recorded question from an earlier exchange with the person\'s answer', () => {
+    const { ledger, ex } = recordedDuring(5500)
+    const next = applyExchangeUpdate(ledger, parseReply('CLOSED: i1 | 1 hour')!, ex, 6000, 6000)
+    expect(next.items).toEqual([])
+    expect(next.closed.map(c => [c.id, c.outcome])).toEqual([['i1', '1 hour']])
+  })
 })
 
 describe('buildPrompt', () => {

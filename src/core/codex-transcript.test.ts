@@ -46,6 +46,13 @@ test('three completed turns catch up from the saved offset after a restart', () 
   assert.equal(found[2].nextOffset, readFileSync(file).length)
 })
 
+test('a turn carries when its task started, and none when the row has no time', () => {
+  const started = (stamp: object) => JSON.stringify({ ...stamp, type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-1' } }) + '\n'
+  const read = (stamp: object) => readCodexTurn(Buffer.from(started(stamp) + row({ type: 'task_complete' }, 'event_msg')), 0)
+  assert.equal(read({ timestamp: '2026-01-01T00:00:05.000Z' })?.exchange.startedAt, Date.parse('2026-01-01T00:00:05.000Z'))
+  assert.equal(read({})?.exchange.startedAt, undefined)
+})
+
 test('a newly tracked resume starts at its current turn and skips old history', () => {
   const bytes = readFileSync(fixture('three'))
   const start = codexResumeStart(bytes, 'turn-3')

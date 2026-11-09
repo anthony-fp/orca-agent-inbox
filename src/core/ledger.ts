@@ -617,6 +617,7 @@ export function applyExchangeUpdate(
     now,
     exchange.turn,
     promptAt,
+    exchange.startedAt ?? null,
   )
 }
 
@@ -634,9 +635,18 @@ function isPersonsAnswer(outcome: string): boolean {
  * `promptAt` is when the update's prompt was built. A NEW line that repeats an
  * item closed since then is dropped: the person answered it while the model ran.
  * The agent closes the items it recorded with its close tool, so a CLOSED line
- * closes one of those only with the person's answer.
+ * closes one of those only with the person's answer, and never one recorded at or after
+ * `startedAt`, when the exchange's prompt started: the person's message came before it.
+ * Without `startedAt`, an item recorded this exchange is one whose turn is `turn`.
  */
-export function applyUpdate(ledger: Ledger, u: Update, now: number, turn: number, promptAt = now): Ledger {
+export function applyUpdate(
+  ledger: Ledger,
+  u: Update,
+  now: number,
+  turn: number,
+  promptAt = now,
+  startedAt: number | null = null,
+): Ledger {
   const prev = ledger.card
   const card: Card = {
     goal: u.card.goal || prev?.goal || '',
@@ -648,18 +658,22 @@ export function applyUpdate(ledger: Ledger, u: Update, now: number, turn: number
   const closing = new Map(
     u.closed.filter(c => !stillAsked.has(c.id) && !UNFOUNDED_MOOT.test(c.outcome)).map(c => [c.id, c.outcome]),
   )
+  const isRecordedNow = (i: Item) =>
+    i.from === 'record' && (startedAt === null ? i.turn === turn : i.at !== null && i.at >= startedAt)
   const closed = [...ledger.closed]
   const items: Item[] = []
   for (const item of ledger.items) {
     const outcome = closing.get(item.id)
     const helps = u.helped.filter(h => h.id === item.id).reduce((all, h) => withHelp(all, h.help), item.helps)
-    const isClosing = outcome !== undefined && (item.from !== 'record' || isPersonsAnswer(outcome))
+    const isClosing =
+      outcome !== undefined &&
+      (item.from !== 'record' || (isPersonsAnswer(outcome) && (startedAt === null || !isRecordedNow(item))))
     if (isClosing) closed.push(closedRecord(item, { outcome, how: 'update' }, now))
     else items.push(withUpdate({ ...item, helps }, u.updated))
   }
   const recordedThisTurn = new Set(
     [...ledger.items, ...ledger.closed.flatMap(c => c.item ?? [])]
-      .filter(i => i.from === 'record' && i.turn === turn)
+      .filter(isRecordedNow)
       .map(i => i.kind),
   )
 
@@ -668,7 +682,7 @@ export function applyUpdate(ledger: Ledger, u: Update, now: number, turn: number
   const addedIds: (string | null)[] = []
   const created = new Set<string>()
   for (const a of u.added) {
-    if (repeatsClosed(ledger.closed, a, promptAt)) {
+    if (repeatsClosed(closed, a, promptAt)) {
       addedIds.push(null)
       continue
     }

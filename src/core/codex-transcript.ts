@@ -266,7 +266,7 @@ const ROLLOUT_BYTES = 8 * 1024 * 1024
 
 type Payload = Record<string, unknown>
 
-type RolloutRow = { type?: unknown; payload?: Payload }
+type RolloutRow = { type?: unknown; timestamp?: unknown; payload?: Payload }
 
 const record = (v: unknown): Payload => (v && typeof v === 'object' && !Array.isArray(v) ? (v as Payload) : {})
 
@@ -484,12 +484,14 @@ export function readCodexTurn(file: string | Buffer, offset: number): CodexTurnR
   const reply = status === 'complete' ? turns.filter(turn => turn.role === 'agent' && turn.text.trim()).at(-1)?.text ?? '' : ''
   const previous = rolloutTurns(rows.slice(0, start).map(({ at, end }) => bytes.toString('utf8', at, end)), cwd)
   const prompts = previous.filter(turn => turn.turns.some(message => message.role === 'person')).length
+  const startedAt = typeof first.row.timestamp === 'string' ? Date.parse(first.row.timestamp) : NaN
   const exchange: Exchange = {
     person,
     trigger: person === null ? 'codex' : null,
     activity: turns.flatMap(turn => turn.role === 'agent' ? turn.activity : []),
     reply,
     turn: prompts + (person === null ? 0 : 1),
+    ...(Number.isFinite(startedAt) && { startedAt }),
     press: null,
     screen: '',
   }

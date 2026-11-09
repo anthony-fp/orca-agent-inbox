@@ -99,6 +99,8 @@ export type Exchange = {
   reply: string
   /** The person-prompt count when the reply was written. */
   turn: number
+  /** When the turn's prompt started, from the transcript; absent for a turn saved before the mod kept it. */
+  startedAt?: number
   press: Press | null
   screen: string
 }

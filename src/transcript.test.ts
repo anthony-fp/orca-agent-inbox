@@ -30,6 +30,7 @@ test('a plain turn is complete, with the prompt, the reply and no activity', () 
     activity: [],
     reply: 'It reads one line at a time.',
     turn: 1,
+    startedAt: Date.parse('2026-01-01T00:00:00.000Z'),
     press: null,
     screen: '',
   })
