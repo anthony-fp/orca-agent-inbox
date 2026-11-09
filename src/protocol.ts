@@ -28,6 +28,8 @@ export type InboxSection = {
   plan: PlanView | null
   /** The plan file's path when it exists but cannot be read or has text but no step: the section says so in one line. */
   planError: string | null
+  /** Snoozed rows by id, each with the time (ms) its snooze ends. The panel hides each row until then. */
+  snoozed: Record<string, number>
 }
 
 /** An agent without a tracked section. */
@@ -38,6 +40,9 @@ export type CopyOutcome = { ok: true } | { ok: false; error: string }
 
 /** What an Open did: the worker opened the file in Orca's editor, or why it could not. */
 export type OpenOutcome = CopyOutcome
+
+/** What a Snooze did: the worker saved it, or why it could not. */
+export type SnoozeOutcome = CopyOutcome
 
 export type InboxView = {
   sections: InboxSection[]
@@ -59,6 +64,8 @@ declare module 'orca' {
     'inbox.copy': { input: { text: string }; output: CopyOutcome }
     /** Opens a row's file in Orca's editor. The path is as the agent gave it, relative to the session's folder or absolute. */
     'inbox.openFile': { input: { sessionId: string; path: string }; output: OpenOutcome }
+    /** Hides a row in the panel until `until` (ms). The agent still sees the row open. */
+    'inbox.snooze': { input: { sessionId: string; id: string; until: number }; output: SnoozeOutcome }
   }
   interface PluginPanelEvents {
     /** Posted after each saved change: ask for `inbox.view` again. */

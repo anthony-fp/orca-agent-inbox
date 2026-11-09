@@ -25,7 +25,7 @@ import {
 } from 'orca'
 import { rowCopyText, type ClosedGroup, type CopySource, type Step } from './core/now'
 import { planLines, type PlanLine } from './core/plan'
-import type { CopyOutcome, InboxSection, InboxView, OpenOutcome, OtherAgent } from './protocol'
+import type { CopyOutcome, InboxSection, InboxView, OpenOutcome, OtherAgent, SnoozeOutcome } from './protocol'
 import type { LabelledFinding, LabelledRow, PressInput, RowLabel } from './presses'
 
 type Loaded = { is: 'loading' } | { is: 'error'; message: string } | { is: 'ready'; view: InboxView }
@@ -41,6 +41,8 @@ const drafts = atom<Record<string, string>>({})
 const shown = atom<Record<string, boolean>>({})
 /** Rows whose reply field is open. */
 const replying = atom<Record<string, boolean>>({})
+/** Rows whose Snooze menu shows. */
+const snoozeMenus = atom<Record<string, boolean>>({})
 /** Questions whose folded options show. */
 const allShown = atom<Record<string, boolean>>({})
 /** What a row's last local step did: opened a link, copied, or shows text to copy. */
@@ -74,9 +76,26 @@ const rowKey = (s: InboxSection, id: string) => `${s.sessionId}:${id}`
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
+/** The one timer that loads the view again when the earliest snooze ends. */
+let wake: ReturnType<typeof setTimeout> | undefined
+
+/** The view without its snoozed rows, and the timer set for the earliest snooze's end. */
+function hideSnoozed(view: InboxView): InboxView {
+  const now = Date.now()
+  const ends = view.sections.flatMap(s => Object.values(s.snoozed)).filter(end => end > now)
+  clearTimeout(wake)
+  wake = ends.length > 0 ? setTimeout(() => void load(), Math.min(...ends) - now) : undefined
+  const sections = view.sections.map(s => {
+    const awake = <R extends { id: string }>(rows: R[]) => rows.filter(r => !((s.snoozed[r.id] ?? 0) > now))
+    const f = s.findings
+    return { ...s, questions: awake(s.questions), tasks: awake(s.tasks), findings: { ...f, issues: awake(f.issues), opportunities: awake(f.opportunities) } }
+  })
+  return { ...view, sections }
+}
+
 async function load(): Promise<void> {
   try {
-    const view = await plugin.request('inbox.view')
+    const view = hideSnoozed(await plugin.request('inbox.view'))
     update(loaded, () => ({ is: 'ready', view }))
   } catch (e) {
     update(loaded, () => ({ is: 'error', message: message(e) }))
@@ -220,6 +239,55 @@ function OpenButton({ section, row, path, busy }: { section: InboxSection; row: 
   )
 }
 
+const HOUR = 60 * 60 * 1000
+
+/** 09:00 on the next calendar day, in the local time zone: at 08:00 too, a day and an hour away. */
+function tomorrowNine(now: number): number {
+  const d = new Date(now)
+  d.setDate(d.getDate() + 1)
+  d.setHours(9, 0, 0, 0)
+  return d.getTime()
+}
+
+/** A Snooze choice: the worker saves it and the row hides until `until`. Where it fails, the row says why in red. */
+async function snoozeRow(s: InboxSection, row: Pressable, until: number): Promise<void> {
+  const key = rowKey(s, row.id)
+  let error: string | null
+  try {
+    const out: SnoozeOutcome = await plugin.request('inbox.snooze', { sessionId: s.sessionId, id: row.id, until })
+    error = out.ok ? null : out.error
+  } catch (e) {
+    error = message(e)
+  }
+  update(snoozeMenus, m => ({ ...m, [key]: false }))
+  if (error !== null) update(stepResults, m => ({ ...m, [key]: { text: `Not snoozed: ${error}`, tone: 'danger', copy: null } }))
+  else await load()
+}
+
+/** Snooze on any row, after Copy (and Hand off) and before Dismiss: it shows or hides the row's Snooze menu. */
+function SnoozeButton({ rowKey: key, busy }: { rowKey: string; busy: boolean }) {
+  return (
+    <Button size="sm" variant="outline" disabled={busy} onPress={() => update(snoozeMenus, m => ({ ...m, [key]: m[key] !== true }))}>
+      Snooze
+    </Button>
+  )
+}
+
+/** The Snooze menu under a row: "1 hour" or "Tomorrow 9am". */
+function SnoozeMenu({ section, row, busy }: { section: InboxSection; row: Pressable; busy: boolean }) {
+  if (read(snoozeMenus)[rowKey(section, row.id)] !== true) return null
+  return (
+    <Row gap="xs" wrap>
+      <Button size="sm" variant="outline" disabled={busy} onPress={() => snoozeRow(section, row, Date.now() + HOUR)}>
+        1 hour
+      </Button>
+      <Button size="sm" variant="outline" disabled={busy} onPress={() => snoozeRow(section, row, tomorrowNine(Date.now()))}>
+        Tomorrow 9am
+      </Button>
+    </Row>
+  )
+}
+
 /** Copy on any row, after Explain (and Open, when a row has it) and before Hand off, Snooze and Dismiss. */
 function CopyButton({ section, row, source, busy }: { section: InboxSection; row: Pressable; source: CopySource; busy: boolean }) {
   return (
@@ -267,6 +335,7 @@ export function setup(ctx: { subscriptions: { dispose(): void }[] }) {
   ctx.subscriptions.push(plugin.on('inbox.changed', () => void load()))
   // A focus change saves nothing in the worker, so the panel hears it from Orca. A panel needs no manifest entry.
   ctx.subscriptions.push(on('workspace.changed', () => void load()))
+  ctx.subscriptions.push({ dispose: () => clearTimeout(wake) })
   void load()
 }
 
@@ -378,7 +447,7 @@ function RowHead({ row }: { row: LabelledRow }) {
 /**
  * A question, with buttons in the inbox's order (`rowActions` and `rowKeyPlan` in `hooks/view.ts`): each option, the
  * recommended one first; "All N options" after the fourth when there are more than five; its steps; then Reply,
- * Explain, Open (with a path), Copy and Dismiss.
+ * Explain, Open (with a path), Copy, Snooze and Dismiss.
  */
 function Question({ section, row }: { section: InboxSection; row: LabelledRow }) {
   const { key, label, busy } = rowState(section, row)
@@ -412,10 +481,12 @@ function Question({ section, row }: { section: InboxSection; row: LabelledRow })
         <ExplainButton section={section} row={row} busy={busy} />
         <OpenButton section={section} row={row} path={row.path} busy={busy} />
         <CopyButton section={section} row={row} source={{ kind: 'question', title: row.text, path: row.path }} busy={busy} />
+        <SnoozeButton rowKey={key} busy={busy} />
         <Button size="sm" variant="ghost" disabled={busy} onPress={() => press(section, row, { action: 'dismiss' })}>
           Dismiss
         </Button>
       </Row>
+      <SnoozeMenu section={section} row={row} busy={busy} />
       {read(replying)[key] === true && <ReplyField section={section} row={row} hint="Your answer" busy={busy} />}
       <Labels rowKey={key} label={label} />
     </Stack>
@@ -431,7 +502,7 @@ function ExplainButton({ section, row, busy }: { section: InboxSection; row: Lab
   )
 }
 
-/** A task: its whole text with its age, then its steps, Done, Reply (`rowActions` in `hooks/view.ts`), Explain, Open (with a path) and Copy. */
+/** A task: its whole text with its age, then its steps, Done, Reply (`rowActions` in `hooks/view.ts`), Explain, Open (with a path), Copy and Snooze. */
 function Task({ section, row }: { section: InboxSection; row: LabelledRow }) {
   const { key, label, busy } = rowState(section, row)
   return (
@@ -448,7 +519,9 @@ function Task({ section, row }: { section: InboxSection; row: LabelledRow }) {
         <ExplainButton section={section} row={row} busy={busy} />
         <OpenButton section={section} row={row} path={row.path} busy={busy} />
         <CopyButton section={section} row={row} source={{ kind: 'task', title: row.text, steps: row.steps, path: row.path }} busy={busy} />
+        <SnoozeButton rowKey={key} busy={busy} />
       </Row>
+      <SnoozeMenu section={section} row={row} busy={busy} />
       {read(replying)[key] === true && (
         <ReplyField section={section} row={row} hint={`Your reply to ${section.agent === 'codex' ? 'Codex' : 'Claude'}`} busy={busy} />
       )}
@@ -496,7 +569,7 @@ const FINDING_TONES = { issue: 'warning', opportunity: 'success' } as const
 
 /**
  * An issue or opportunity: its mark and title with the age on the right, its detail and file, then the inbox's
- * finding buttons (`actionsOf` in `hooks/view.ts`) less Discuss: Fix or Do it, File issue, Reply, Explain, Open (with a path), Copy, Dismiss.
+ * finding buttons (`actionsOf` in `hooks/view.ts`) less Discuss: Fix or Do it, File issue, Reply, Explain, Open (with a path), Copy, Snooze, Dismiss.
  */
 function Finding({ section, row }: { section: InboxSection; row: LabelledFinding }) {
   const { key, label, busy } = rowState(section, row)
@@ -532,10 +605,12 @@ function Finding({ section, row }: { section: InboxSection; row: LabelledFinding
         <ExplainButton section={section} row={row} busy={busy} />
         <OpenButton section={section} row={row} path={row.path} busy={busy} />
         <CopyButton section={section} row={row} source={{ kind: 'finding', title: row.title, detail: row.detail, path: row.path }} busy={busy} />
+        <SnoozeButton rowKey={key} busy={busy} />
         <Button size="sm" variant="ghost" disabled={busy} onPress={() => press(section, row, { action: 'dismiss' })}>
           Dismiss
         </Button>
       </Row>
+      <SnoozeMenu section={section} row={row} busy={busy} />
       {read(replying)[key] === true && <ReplyField section={section} row={row} hint={`Your reply to ${section.agent === 'codex' ? 'Codex' : 'Claude'}`} busy={busy} />}
       <Labels rowKey={key} label={label} />
     </Stack>

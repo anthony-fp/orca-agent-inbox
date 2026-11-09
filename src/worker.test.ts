@@ -37,14 +37,14 @@ const openLedger = () => {
   return applyUpdate(EMPTY, u, 0, 1)
 }
 
-async function setup(opts: { state?: State; files?: Record<string, string>; unreadable?: string[]; agents?: unknown[]; copyFails?: boolean; list?: unknown[]; truncated?: boolean; socket?: string; clockAt?: number; codexRollout?: (home: string, threadId: string) => Promise<{ path: string; cwd: string } | null> } = {}) {
+async function setup(opts: { state?: State; storage?: Record<string, unknown>; files?: Record<string, string>; unreadable?: string[]; agents?: unknown[]; copyFails?: boolean; list?: unknown[]; truncated?: boolean; socket?: string; clockAt?: number; codexRollout?: (home: string, threadId: string) => Promise<{ path: string; cwd: string } | null> } = {}) {
   const time = fakeClock(opts.clockAt ?? 100 * DAY)
   const files = new Map(Object.entries(opts.files ?? {}))
   const reads: string[] = []
   const models: string[] = []
   const copied: string[] = []
   const host = mockHost({
-    storage: opts.state ? { state: opts.state } : {},
+    storage: { ...(opts.state ? { state: opts.state } : {}), ...opts.storage },
     results: {
       'workspace.list': { workspaces: opts.list ?? [WS], truncated: opts.truncated ?? false },
       'editor.open': { opened: true },
@@ -635,6 +635,7 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
         plan: null,
         planError: null,
         tools: true,
+        snoozed: {},
       },
       {
         terminalId: 'term-2',
@@ -649,6 +650,7 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
         plan: null,
         planError: null,
         tools: true,
+        snoozed: {},
       },
     ],
     // The Codex agent gets its untracked note; the count covers only Claude agents.
@@ -856,6 +858,39 @@ test('inbox.openFile opens the file in the one local workspace that holds the fo
   await fails('/a/bc', 'x.ts', 'No workspace holds this folder', { list: [B, remote] })
   await fails(sub, 'a.ts', 'More than one workspace holds this folder', { list: [{ ...WS, path: '/work' }, WS, { ...WS, id: 'ws-2', hostId: 'local' }] })
   await fails(sub, 'a.ts', 'Orca listed only some workspaces', { truncated: true })
+})
+
+test('a snooze saves under its own key and leaves the state alone, survives a restart, and is dropped once it ends; the inbox: text still lists the row', async () => {
+  const HOUR = 60 * 60 * 1000
+  const ledger = openLedger()
+  const id = ledger.items[0].id
+  const state: State = { version: 3, terminals: { 'term-1': { sessionId: S } }, panes: {}, paneLaunches: {}, sessions: { [S]: { ...emptySession(100 * DAY), ledger } } }
+  const agents = [{ terminalId: 'term-1', title: 'Agent', agent: 'claude', state: 'done', stateStartedAt: 1 }]
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  const t = await setup({ state, agents, socket })
+  const until = 100 * DAY + HOUR
+  const before = JSON.stringify(t.saved())
+  assert.deepEqual(await t.worker.request('inbox.snooze', { sessionId: S, id, until }), { ok: true })
+  const storage = () => (t.host.data() as { storage: Record<string, unknown> }).storage
+  assert.deepEqual(storage().snoozes, { [`${S}:${id}`]: until })
+  assert.equal(JSON.stringify(t.saved()), before, 'the state, and its version 3, do not change')
+  assert.deepEqual(await t.worker.request('inbox.snooze', { sessionId: S, id, until: 100 * DAY }), { ok: false, error: 'Not a snooze' }, 'a time already past')
+  const section = (await t.worker.request('inbox.view', undefined)).sections[0]
+  assert.deepEqual(section.snoozed, { [id]: until })
+  assert.equal(section.questions.length, 1, 'the worker still sends the row; the panel hides it')
+  const told = await ask(socket, { type: 'inbox-text', sessionId: S, prompt: 'next' }, 2000)
+  assert.match(String(told.text), /Ship the parser today\?/, 'the agent still sees the row open')
+  await t.close()
+  await t.worker.deactivate()
+
+  const restarted = await setup({ state: t.saved(), storage: { snoozes: storage().snoozes }, agents })
+  assert.deepEqual((await restarted.worker.request('inbox.view', undefined)).sections[0].snoozed, { [id]: until }, 'kept across a restart')
+  await restarted.worker.deactivate()
+
+  const ended = await setup({ state: t.saved(), storage: { snoozes: storage().snoozes }, agents, clockAt: until })
+  assert.deepEqual((await ended.worker.request('inbox.view', undefined)).sections[0].snoozed, {})
+  assert.deepEqual((ended.host.data() as { storage: Record<string, unknown> }).storage.snoozes, {}, 'dropped from storage once it ends')
+  await ended.worker.deactivate()
 })
 
 // The live check (docs/live-check.md): the launch gives `<repoId>::<path>`, workspace.list gives `identity:<key>`.

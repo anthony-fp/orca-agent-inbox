@@ -1,5 +1,6 @@
 // `orca plugin test .` runs this in Node with the same runtime and checks Orca uses.
 import { assert, mockHost, mount, test } from 'orca/testing'
+import { mock } from 'node:test'
 import * as panel from './panel'
 import { parsePlan } from './core/plan'
 import { CLOSED_FINDINGS, CODEX_ONLY, EMPTY_VIEW, FINDINGS, MANY_OPTIONS, MIXED, ONE_AGENT, PLAN, STEPS, THREE_AGENTS, row, section } from './panel-views'
@@ -52,7 +53,7 @@ test('one agent: its title, then Questions and Tasks with their counts and butto
   assert.ok(view.find({ text: '5m' }))
   // The inbox's rowActions (hooks/view.ts), then Explain and Copy before Dismiss: question options, Reply, Explain,
   // Copy, Dismiss; task Done, Reply, Explain, Copy. No field until Reply.
-  assert.deepEqual(texts(view, 'Button'), ['Yes', 'No', 'Reply', 'Explain', 'Copy', 'Dismiss', 'Done', 'Reply', 'Explain', 'Copy'])
+  assert.deepEqual(texts(view, 'Button'), ['Yes', 'No', 'Reply', 'Explain', 'Copy', 'Snooze', 'Dismiss', 'Done', 'Reply', 'Explain', 'Copy', 'Snooze'])
   assert.equal(view.find({ type: 'Input' }), null)
   await clean(view)
 })
@@ -60,11 +61,11 @@ test('one agent: its title, then Questions and Tasks with their counts and butto
 test('the recommended option comes first, marked, and options past five fold behind "All N options"', async () => {
   const view = await open(MANY_OPTIONS)
   const order = ['Bun (recommended)', 'Node 20', 'Node 22', 'Deno']
-  assert.deepEqual(texts(view, 'Button'), [...order, 'All 6 options', 'Reply', 'Explain', 'Copy', 'Dismiss'])
+  assert.deepEqual(texts(view, 'Button'), [...order, 'All 6 options', 'Reply', 'Explain', 'Copy', 'Snooze', 'Dismiss'])
   assert.equal(view.find({ type: 'Button', text: 'Bun (recommended)' })?.props.variant, 'solid')
   assert.equal(view.find({ type: 'Button', text: 'Node 20' })?.props.variant, 'outline')
   await view.press({ type: 'Button', text: 'All 6 options' })
-  assert.deepEqual(texts(view, 'Button'), [...order, 'Workers', 'Lambda', 'Reply', 'Explain', 'Copy', 'Dismiss'])
+  assert.deepEqual(texts(view, 'Button'), [...order, 'Workers', 'Lambda', 'Reply', 'Explain', 'Copy', 'Snooze', 'Dismiss'])
   await clean(view)
 })
 
@@ -77,6 +78,7 @@ test("steps come after a question's options and before a task's Done, as the inb
     'Reply',
     'Explain',
     'Copy',
+    'Snooze',
     'Dismiss',
     'Run Friday check query',
     'Open runbook',
@@ -84,6 +86,7 @@ test("steps come after a question's options and before a task's Done, as the inb
     'Reply',
     'Explain',
     'Copy',
+    'Snooze',
   ])
   await clean(view)
 })
@@ -245,7 +248,7 @@ test('Open shows only on rows with a path, after Explain and before Copy, and as
     },
   })
   const view = await mount(panel, { host })
-  assert.deepEqual(texts(view, 'Button'), ['Reply', 'Explain', 'Open', 'Copy', 'Dismiss', 'Done', 'Reply', 'Explain', 'Copy'])
+  assert.deepEqual(texts(view, 'Button'), ['Reply', 'Explain', 'Open', 'Copy', 'Snooze', 'Dismiss', 'Done', 'Reply', 'Explain', 'Copy', 'Snooze'])
   const pressing = view.press({ type: 'Button', text: 'Open' })
   await new Promise(r => setTimeout(r, 0))
   assert.ok(view.find({ text: 'Opening parse.ts…' }))
@@ -386,6 +389,58 @@ test('a refused press shows why on its row', async () => {
   await clean(view)
 })
 
+/** ONE_AGENT whose rows the mock worker snoozes as the panel asks, at local time `now`, with Date and setTimeout faked. */
+async function snoozable(now: Date) {
+  mock.timers.enable({ apis: ['Date', 'setTimeout'], now: now.getTime() })
+  const snoozes: { id: string; until: number }[] = []
+  const host = mockHost({
+    requests: {
+      'inbox.view': () => ({ ...ONE_AGENT, sections: ONE_AGENT.sections.map(s => ({ ...s, snoozed: Object.fromEntries(snoozes.map(z => [z.id, z.until])) })) }),
+      'inbox.snooze': (input: { sessionId: string; id: string; until: number }) => (snoozes.push(input), { ok: true as const }),
+    },
+  })
+  return { view: await mount(panel, { host }), snoozes }
+}
+
+test('Snooze opens "1 hour" and "Tomorrow 9am"; 1 hour hides the row, and the row comes back when the hour ends', async () => {
+  try {
+    const { view, snoozes } = await snoozable(new Date(2026, 10, 9, 14, 0))
+    await view.press({ type: 'Button', text: 'Snooze' })
+    assert.deepEqual(texts(view, 'Button').slice(0, 8), ['Yes', 'No', 'Reply', 'Explain', 'Copy', 'Snooze', 'Dismiss', '1 hour'])
+    assert.ok(view.find({ type: 'Button', text: 'Tomorrow 9am' }))
+    await view.press({ type: 'Button', text: '1 hour' })
+    assert.deepEqual(snoozes, [{ sessionId: 'session-1', id: 'q1', until: new Date(2026, 10, 9, 15, 0).getTime() }])
+    assert.equal(view.find({ text: '1) Rename the folder to tools?' }), null, 'the snoozed row hides')
+    assert.ok(view.find({ text: 'Run the migration on staging' }), 'the other row stays')
+    mock.timers.tick(60 * 60 * 1000 - 1)
+    await view.settled()
+    assert.equal(view.find({ text: '1) Rename the folder to tools?' }), null, 'still hidden a moment before the end')
+    mock.timers.tick(1)
+    await view.settled()
+    assert.ok(view.find({ text: '1) Rename the folder to tools?' }), 'back when the snooze ends')
+    await clean(view)
+  } finally {
+    mock.timers.reset()
+  }
+})
+
+test('"Tomorrow 9am" is 09:00 local on the next calendar day, at 23:30 and at 08:00 alike', async () => {
+  for (const [now, until] of [
+    [new Date(2026, 10, 9, 23, 30), new Date(2026, 10, 10, 9, 0)],
+    [new Date(2026, 10, 9, 8, 0), new Date(2026, 10, 10, 9, 0)],
+  ]) {
+    try {
+      const { view, snoozes } = await snoozable(now)
+      await view.press({ type: 'Button', text: 'Snooze' })
+      await view.press({ type: 'Button', text: 'Tomorrow 9am' })
+      assert.equal(snoozes[0]?.until, until.getTime(), `at ${now.getHours()}:${now.getMinutes()}`)
+      await clean(view)
+    } finally {
+      mock.timers.reset()
+    }
+  }
+})
+
 test('inbox.changed asks for the view again', async () => {
   let current: InboxView = EMPTY_VIEW
   const host = mockHost({ requests: { 'inbox.view': () => current } })
@@ -429,9 +484,9 @@ test('findings: Issues and Opportunities after Tasks, each row with its mark, de
   assert.ok(view.find({ text: '✦' }))
   // The inbox's actionsOf (hooks/view.ts) less Discuss: Fix or Do it, File issue, Reply, Explain, Dismiss. Open only on the row with a path.
   assert.deepEqual(texts(view, 'Button'), [
-    'Done', 'Reply', 'Explain', 'Copy',
-    'Fix', 'File issue', 'Reply', 'Explain', 'Open', 'Copy', 'Dismiss',
-    'Do it', 'File issue', 'Reply', 'Explain', 'Copy', 'Dismiss',
+    'Done', 'Reply', 'Explain', 'Copy', 'Snooze',
+    'Fix', 'File issue', 'Reply', 'Explain', 'Open', 'Copy', 'Snooze', 'Dismiss',
+    'Do it', 'File issue', 'Reply', 'Explain', 'Copy', 'Snooze', 'Dismiss',
   ])
   assert.equal(view.find({ type: 'Button', text: 'Fix' })?.props.variant, 'solid')
   assert.deepEqual(view.findAll({ type: 'Collapsible' }).map(c => c.props.title), ['1 closed'])
@@ -616,7 +671,7 @@ test('a tracked Codex agent uses the same rows and buttons as Claude', async () 
   assert.deepEqual(texts(view, 'Heading'), ['Codex'])
   assert.ok(view.find({ text: '1) Rename the folder to tools?' }))
   assert.ok(view.find({ text: 'Run the migration on staging' }))
-  assert.deepEqual(texts(view, 'Button'), ['Yes', 'No', 'Reply', 'Explain', 'Copy', 'Dismiss', 'Done', 'Reply', 'Explain', 'Copy'])
+  assert.deepEqual(texts(view, 'Button'), ['Yes', 'No', 'Reply', 'Explain', 'Copy', 'Snooze', 'Dismiss', 'Done', 'Reply', 'Explain', 'Copy', 'Snooze'])
   assert.equal(view.find({ text: UNTRACKED_CODEX }), null)
   await clean(view)
 })

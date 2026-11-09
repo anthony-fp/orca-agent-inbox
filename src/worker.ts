@@ -14,7 +14,7 @@ import { codexResumeStart, codexToolTurn, readCodexTurn, rolloutFor } from './co
 import { tagLaunch, tokenize } from './launch'
 import { runInboxModel } from './model'
 import { createPresses, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
-import type { CopyOutcome, InboxSection, InboxView, OpenOutcome, OtherAgent } from './protocol'
+import type { CopyOutcome, InboxSection, InboxView, OpenOutcome, OtherAgent, SnoozeOutcome } from './protocol'
 import { binPaths, createAnswerer, listen, socketPath, stableBinPaths } from './socket'
 import { emptySession } from './state'
 import { cwdOf, promptsBefore, wholeLinesEnd } from './transcript'
@@ -73,6 +73,10 @@ const TRACK_WAIT_MS = 1000
 
 /** How long the panel's reload after a status change waits, so a burst of changes reloads it once. */
 const RELOAD_MS = 250
+
+/** The storage key of the snoozes, apart from the state: `"<sessionId>:<rowId>"` to the time (ms) each one ends. */
+const SNOOZES = 'snoozes'
+type Snoozes = Record<string, number>
 
 /**
  * Why `tagLaunch` left a launch untagged, for the launch log. It reads the command as `tagLaunch` does and never
@@ -313,6 +317,25 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
     .then(() => tracker.prune())
     .catch(e => log(`start: ${message(e)}`))
 
+  /**
+   * The snoozes that have not ended, after `change` when given. Ended ones are dropped from storage as they are read.
+   * One read or change at a time, so two snoozes at once both save.
+   */
+  let snoozing: Promise<unknown> = Promise.resolve()
+  function snoozes(change?: (live: Snoozes) => Snoozes): Promise<Snoozes> {
+    const run = snoozing.then(async () => {
+      const raw = await orca.storage.get(SNOOZES)
+      const saved = Object.entries(raw !== null && typeof raw === 'object' ? raw : {})
+      const now = deps.clock.now()
+      const live: Snoozes = Object.fromEntries(saved.filter(([, end]) => typeof end === 'number' && end > now))
+      const next = change ? change(live) : live
+      if (change || saved.length !== Object.keys(live).length) await orca.storage.set(SNOOZES, next)
+      return next
+    })
+    snoozing = run.catch(() => undefined)
+    return run
+  }
+
   /** The first session_meta time, or the timestamp Codex put in the rollout name. */
   async function rolloutStart(path: string): Promise<number | null> {
     const bytes = await deps.readFile(path)
@@ -470,6 +493,9 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
     const others: OtherAgent[] = []
     let untracked = 0
     let unread = 0
+    const snoozed = await snoozes().catch(e => (log(`snooze: could not read: ${message(e)}`), {} as Snoozes))
+    const snoozedIn = (sessionId: string) =>
+      Object.fromEntries(Object.entries(snoozed).filter(([key]) => key.startsWith(`${sessionId}:`)).map(([key, end]) => [key.slice(sessionId.length + 1), end]))
     // Orca gives one entry per status, and two statuses can resolve to one terminal: the newest entry comes first and
     // stands for the terminal, so a section and its unread turns count once.
     const seen = new Set<string>()
@@ -493,7 +519,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
             sections.push({
               terminalId: agent.terminalId, sessionId: `codex-launch:${agent.terminalId}`,
               title: agent.title ?? 'Codex', agent: 'codex', trustHook: true,
-              drawn: '', lastActivity: launch.at, plan: null, planError: null, tools: true,
+              drawn: '', lastActivity: launch.at, plan: null, planError: null, tools: true, snoozed: {},
               ...labelledRows(blank, deps.clock.now()),
             })
           } else others.push({ key: agent.terminalId ?? `agent-${n}`, title: agent.title ?? 'Codex', agent: 'codex',
@@ -520,6 +546,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
         plan,
         planError,
         tools: s.tools,
+        snoozed: snoozedIn(sessionId),
         ...labelledRows(s, deps.clock.now()),
       })
     }
@@ -558,6 +585,20 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
       return { ok: true }
     } catch (e) {
       log(`open: ${message(e)}`)
+      return { ok: false, error: message(e) }
+    }
+  })
+
+  // Only the panel reads a snooze: the agent's `inbox:` text still lists the row as open.
+  orca.panels.handle('inbox.snooze', async ({ sessionId, id, until }: { sessionId: string; id: string; until: number }): Promise<SnoozeOutcome> => {
+    if (typeof sessionId !== 'string' || typeof id !== 'string' || typeof until !== 'number' || !(until > deps.clock.now()))
+      return { ok: false, error: 'Not a snooze' }
+    try {
+      await snoozes(live => ({ ...live, [`${sessionId}:${id}`]: until }))
+      orca.panels.post('inbox.changed', {})
+      return { ok: true }
+    } catch (e) {
+      log(`snooze: ${message(e)}`)
       return { ok: false, error: message(e) }
     }
   })
