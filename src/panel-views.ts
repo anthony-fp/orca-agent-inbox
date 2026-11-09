@@ -41,10 +41,11 @@ export function row(
     age?: string | null
     label?: LabelledRow['label']
     explained?: boolean
+    path?: string | null
   } = {},
 ): LabelledRow {
-  const { options = [], rec = null, helps = [], handle = '', age = '2h', label = null, explained = false } = over
-  return { id, handle, text, age, rec, choices: choices({ options, rec }), steps: stepsOf(helps), label, explained }
+  const { options = [], rec = null, helps = [], handle = '', age = '2h', label = null, explained = false, path = null } = over
+  return { id, handle, text, age, rec, choices: choices({ options, rec }), steps: stepsOf(helps), label, explained, path }
 }
 
 /** A finding as the worker sends it. */

@@ -27,7 +27,8 @@
     { "kind": "agent:read" },
     { "kind": "terminal:send" },
     { "kind": "storage:own" },
-    { "kind": "workspace:read" }
+    { "kind": "workspace:read" },
+    { "kind": "workspace:write" }
   ],
   "cover": {
     "path": "images/cover.png",

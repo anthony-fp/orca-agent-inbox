@@ -106,7 +106,7 @@ Codex risks, each probed first in the build plan:
 
 ## Access the plugin asks for
 
-`agent:read`, `terminal:send`, `storage:own`, `workspace:read`, and the `agent.launch.before` hook. Its README says that the hook adds a session id to each new `claude` session and changes nothing else. It also says what each is for, and that the plugin runs `claude -p` on your account after each agent turn. For Codex, it says that the hook adds `-c` flags for `notify`, the `orca-inbox` tools and the guidance, and that the plugin runs `codex exec` on that Codex account after each turn.
+`agent:read`, `terminal:send`, `storage:own`, `workspace:read`, `workspace:write`, and the `agent.launch.before` hook. Its README says that the hook adds a session id to each new `claude` session and changes nothing else. It also says what each is for, and that the plugin runs `claude -p` on your account after each agent turn. For Codex, it says that the hook adds `-c` flags for `notify`, the `orca-inbox` tools and the guidance, and that the plugin runs `codex exec` on that Codex account after each turn.
 
 ## Out of scope for version 1
 

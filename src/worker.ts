@@ -4,7 +4,7 @@
 import { readFile, readdir } from 'node:fs/promises'
 import type { Server } from 'node:net'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
 import type { OrcaWorkerApi } from 'orca/worker'
 
@@ -14,7 +14,7 @@ import { codexResumeStart, codexToolTurn, readCodexTurn, rolloutFor } from './co
 import { tagLaunch, tokenize } from './launch'
 import { runInboxModel } from './model'
 import { createPresses, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
-import type { CopyOutcome, InboxSection, InboxView, OtherAgent } from './protocol'
+import type { CopyOutcome, InboxSection, InboxView, OpenOutcome, OtherAgent } from './protocol'
 import { binPaths, createAnswerer, listen, socketPath, stableBinPaths } from './socket'
 import { emptySession } from './state'
 import { cwdOf, promptsBefore, wholeLinesEnd } from './transcript'
@@ -78,6 +78,15 @@ const RELOAD_MS = 250
  * Why `tagLaunch` left a launch untagged, for the launch log. It reads the command as `tagLaunch` does and never
  * changes it. The log never holds the command, which can hold a prompt.
  */
+/** Whether `path` is `folder` or inside it, by whole path parts: `/a/b` holds `/a/b/c`, not `/a/bc`. */
+function holds(folder: string, path: string): boolean {
+  const rel = relative(folder, path)
+  return rel === '' || (rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel))
+}
+
+/** `workspace.list` gives no local marker: Orca's own code names this machine `local`, and a folder may give null. */
+const isLocal = (hostId: string | null) => hostId === null || hostId === 'local'
+
 function untaggedReason(agent: string, command: string): string {
   if (agent !== 'claude') return 'not-claude'
   const words = tokenize(command)?.map(t => t.text)
@@ -524,6 +533,29 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
       return { ok: true }
     } catch (e) {
       log(`copy: ${message(e)}`)
+      return { ok: false, error: message(e) }
+    }
+  })
+
+  // Orca opens only a path inside a workspace, relative to it: find the one local workspace that holds the session's folder.
+  orca.panels.handle('inbox.openFile', async ({ sessionId, path }: { sessionId: string; path: string }): Promise<OpenOutcome> => {
+    await ready
+    try {
+      const cwd = await dirOf(sessionId)
+      if (!cwd) return { ok: false, error: "The agent's folder is not known" }
+      const { workspaces, truncated } = (await orca.host.call('workspace.list', {})) as {
+        workspaces: { id: string; path: string; hostId: string | null }[]
+        truncated: boolean
+      }
+      if (truncated) return { ok: false, error: 'Orca listed only some workspaces' }
+      const hits = workspaces.filter(w => isLocal(w.hostId) && holds(w.path, cwd))
+      if (hits.length !== 1) return { ok: false, error: hits.length === 0 ? 'No workspace holds this folder' : 'More than one workspace holds this folder' }
+      const file = resolve(cwd, path)
+      if (file === hits[0].path || !holds(hits[0].path, file)) return { ok: false, error: 'File is outside this workspace' }
+      await orca.host.call('editor.open', { workspaceId: hits[0].id, path: relative(hits[0].path, file) })
+      return { ok: true }
+    } catch (e) {
+      log(`open: ${message(e)}`)
       return { ok: false, error: message(e) }
     }
   })

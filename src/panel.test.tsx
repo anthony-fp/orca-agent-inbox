@@ -232,6 +232,61 @@ test('Copy on a row writes its Markdown block, or a task\'s terminal commands, t
   await clean(view)
 })
 
+test('Open shows only on rows with a path, after Explain and before Copy, and asks the worker to open the file', async () => {
+  const opened: { sessionId: string; path: string }[] = []
+  let finish = (_out: { ok: true } | { ok: false; error: string }) => {}
+  const host = mockHost({
+    requests: {
+      'inbox.view': () => ({
+        ...ONE_AGENT,
+        sections: [section(1, { questions: [row('q1', 'Keep the old parser?', { path: 'src/parse.ts' })], tasks: [row('t1', 'Run the migration')] })],
+      }),
+      'inbox.openFile': (input: { sessionId: string; path: string }) => (opened.push(input), new Promise(r => (finish = r))),
+    },
+  })
+  const view = await mount(panel, { host })
+  assert.deepEqual(texts(view, 'Button'), ['Reply', 'Explain', 'Open', 'Copy', 'Dismiss', 'Done', 'Reply', 'Explain', 'Copy'])
+  const pressing = view.press({ type: 'Button', text: 'Open' })
+  await new Promise(r => setTimeout(r, 0))
+  assert.ok(view.find({ text: 'Opening parse.ts…' }))
+  finish({ ok: true })
+  await pressing
+  assert.deepEqual(opened, [{ sessionId: 'session-1', path: 'src/parse.ts' }])
+  assert.equal(view.find({ text: '✓ Opened parse.ts' })?.props.tone, 'success')
+  await clean(view)
+})
+
+test('an Open the worker cannot do shows its error in red on the row', async () => {
+  const host = mockHost({
+    requests: {
+      'inbox.view': () => ({ ...ONE_AGENT, sections: [section(1, { tasks: [row('t1', 'Fix the parser', { path: '/etc/hosts' })] })] }),
+      'inbox.openFile': () => ({ ok: false, error: 'File is outside this workspace' }),
+    },
+  })
+  const view = await mount(panel, { host })
+  await view.press({ type: 'Button', text: 'Open' })
+  assert.equal(view.find({ text: 'File is outside this workspace' })?.props.tone, 'danger')
+  await clean(view)
+})
+
+test('an open step opens the file through the worker, and copies nothing', async () => {
+  const opened: string[] = []
+  const copied: string[] = []
+  const host = mockHost({
+    requests: {
+      'inbox.view': () => ({ ...ONE_AGENT, sections: [section(1, { tasks: [row('t1', 'Read the parser', { helps: [{ kind: 'open', path: 'src/parse.ts' }] })] })] }),
+      'inbox.openFile': (input: { path: string }) => (opened.push(input.path), { ok: true }),
+      'inbox.copy': (input: { text: string }) => (copied.push(input.text), { ok: true }),
+    },
+  })
+  const view = await mount(panel, { host })
+  await view.press({ type: 'Button', text: 'Open parse.ts' })
+  assert.deepEqual(opened, ['src/parse.ts'])
+  assert.deepEqual(copied, [])
+  assert.ok(view.find({ text: '✓ Opened parse.ts' }))
+  await clean(view)
+})
+
 test('a Copy the worker cannot do shows why in red on the row, and the text to select', async () => {
   const { view, copied } = await withCopy(ONE_AGENT, { ok: false, error: 'no clipboard tool worked (tried wl-copy, xclip, xsel)' })
   const [copy] = rowCopies(view)
@@ -372,10 +427,10 @@ test('findings: Issues and Opportunities after Tasks, each row with its mark, de
   assert.ok(view.find({ text: 'Each retry fires at once, so a down server gets a flood.' }))
   assert.ok(view.find({ text: 'Relevant file: fetch.ts' }))
   assert.ok(view.find({ text: '✦' }))
-  // The inbox's actionsOf (hooks/view.ts) less Discuss: Fix or Do it, File issue, Reply, Explain, Dismiss.
+  // The inbox's actionsOf (hooks/view.ts) less Discuss: Fix or Do it, File issue, Reply, Explain, Dismiss. Open only on the row with a path.
   assert.deepEqual(texts(view, 'Button'), [
     'Done', 'Reply', 'Explain', 'Copy',
-    'Fix', 'File issue', 'Reply', 'Explain', 'Copy', 'Dismiss',
+    'Fix', 'File issue', 'Reply', 'Explain', 'Open', 'Copy', 'Dismiss',
     'Do it', 'File issue', 'Reply', 'Explain', 'Copy', 'Dismiss',
   ])
   assert.equal(view.find({ type: 'Button', text: 'Fix' })?.props.variant, 'solid')

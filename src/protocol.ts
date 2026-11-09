@@ -36,6 +36,9 @@ export type OtherAgent = { key: string; title: string; agent?: string; reason?: 
 /** What a Copy did: the worker wrote the clipboard, or why it could not, so the panel shows the text to select. */
 export type CopyOutcome = { ok: true } | { ok: false; error: string }
 
+/** What an Open did: the worker opened the file in Orca's editor, or why it could not. */
+export type OpenOutcome = CopyOutcome
+
 export type InboxView = {
   sections: InboxSection[]
   /** Agents without a tracked section, drawn under their own titles. They count in no other field. */
@@ -54,6 +57,8 @@ declare module 'orca' {
     'inbox.press': { input: PressInput; output: PressOutcome }
     /** Writes the text to the clipboard (`pbcopy` on macOS). */
     'inbox.copy': { input: { text: string }; output: CopyOutcome }
+    /** Opens a row's file in Orca's editor. The path is as the agent gave it, relative to the session's folder or absolute. */
+    'inbox.openFile': { input: { sessionId: string; path: string }; output: OpenOutcome }
   }
   interface PluginPanelEvents {
     /** Posted after each saved change: ask for `inbox.view` again. */

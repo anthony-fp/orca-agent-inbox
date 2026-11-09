@@ -25,7 +25,7 @@ import {
 } from 'orca'
 import { rowCopyText, type ClosedGroup, type CopySource, type Step } from './core/now'
 import { planLines, type PlanLine } from './core/plan'
-import type { CopyOutcome, InboxSection, InboxView, OtherAgent } from './protocol'
+import type { CopyOutcome, InboxSection, InboxView, OpenOutcome, OtherAgent } from './protocol'
 import type { LabelledFinding, LabelledRow, PressInput, RowLabel } from './presses'
 
 type Loaded = { is: 'loading' } | { is: 'error'; message: string } | { is: 'ready'; view: InboxView }
@@ -125,20 +125,29 @@ async function copyText(text: string): Promise<string | null> {
   }
 }
 
+/** Asks the worker to open the file in Orca's editor. Null when it did, else why not. */
+async function openFile(s: InboxSection, path: string): Promise<string | null> {
+  try {
+    const out: OpenOutcome = await plugin.request('inbox.openFile', { sessionId: s.sessionId, path })
+    return out.ok ? null : out.error
+  } catch (e) {
+    return message(e)
+  }
+}
+
 /**
- * A local step, as the inbox's `stepEffects` does it where Orca allows: a link opens in the browser, and the worker
- * copies a snippet, a command or a path (Orca cannot open a local file from a panel). Where the copy fails, the text
- * shows to select.
+ * A local step, as the inbox's `stepEffects` does it where Orca allows: a link opens in the browser, the worker opens
+ * a file in Orca's editor, and the worker copies a snippet or a command. Where a copy or an open fails, the text shows
+ * to select.
  */
 async function localStep(s: InboxSection, row: LabelledRow, step: Step): Promise<void> {
   const key = rowKey(s, row.id)
-  const texts = step.helps.flatMap(h => (h.kind === 'copy' ? [h.text] : h.kind === 'terminal' ? [h.command] : h.kind === 'open' ? [h.path] : []))
+  const texts = step.helps.flatMap(h => (h.kind === 'copy' ? [h.text] : h.kind === 'terminal' ? [h.command] : []))
   if (texts.length > 0) update(stepResults, m => ({ ...m, [key]: { text: 'Copying…', tone: 'muted', copy: null } }))
   const isCopied = texts.length > 0 && (await copyText(texts.join('\n'))) === null
   const parts: string[] = []
   const copies: string[] = []
   let failed = false
-  let isOpen = false
   for (const h of step.helps) {
     if (h.kind === 'link') {
       const name = h.name ?? h.url
@@ -159,16 +168,15 @@ async function localStep(s: InboxSection, row: LabelledRow, step: Step): Promise
       if (!isCopied) copies.push(h.command)
       parts.push(isCopied ? `Copied ${name}. Run it in Terminal.` : `Select ${name} below to copy it, then run it in Terminal`)
     } else if (h.kind === 'open') {
-      isOpen = true
-      if (!isCopied) copies.push(h.path)
-      parts.push(
-        isCopied
-          ? `Copied the path of ${baseName(h.path)}: Orca cannot open it from a panel`
-          : `Orca cannot open ${baseName(h.path)} from a panel: select its path below to copy it`,
-      )
+      const why = await openFile(s, h.path)
+      if (why !== null) {
+        failed = true
+        copies.push(h.path)
+      }
+      parts.push(why === null ? `Opened ${baseName(h.path)}` : `Could not open ${baseName(h.path)}: ${why}`)
     }
   }
-  const isDone = copies.length === 0 && !failed && !isOpen
+  const isDone = copies.length === 0 && !failed
   const label: RowLabel = {
     text: `${isDone ? '✓ ' : ''}${parts.join(' · ')}`,
     tone: failed ? 'danger' : isDone ? 'success' : 'muted',
@@ -190,6 +198,26 @@ async function copyRow(s: InboxSection, row: Pressable, source: CopySource): Pro
   const label: RowLabel = error === null ? { text: '✓ Copied', tone: 'success', copy: null } : { text: `Could not copy: ${error}`, tone: 'danger', copy: text }
   update(stepResults, m => ({ ...m, [key]: label }))
   if (error !== null) update(shown, m => ({ ...m, [`step:${key}`]: true }))
+}
+
+/** A row's Open: the worker opens its file in Orca's editor. The row reads "Opening x…", then "✓ Opened x" or the error in red. */
+async function openRow(s: InboxSection, row: Pressable, path: string): Promise<void> {
+  const key = rowKey(s, row.id)
+  const name = baseName(path)
+  update(stepResults, m => ({ ...m, [key]: { text: `Opening ${name}…`, tone: 'muted', copy: null } }))
+  const error = await openFile(s, path)
+  const label: RowLabel = error === null ? { text: `✓ Opened ${name}`, tone: 'success', copy: null } : { text: error, tone: 'danger', copy: null }
+  update(stepResults, m => ({ ...m, [key]: label }))
+}
+
+/** Open on a row with a path, after Explain and before Copy. */
+function OpenButton({ section, row, path, busy }: { section: InboxSection; row: Pressable; path: string | null; busy: boolean }) {
+  if (path === null) return null
+  return (
+    <Button size="sm" variant="outline" disabled={busy} onPress={() => openRow(section, row, path)}>
+      Open
+    </Button>
+  )
 }
 
 /** Copy on any row, after Explain (and Open, when a row has it) and before Hand off, Snooze and Dismiss. */
@@ -350,7 +378,7 @@ function RowHead({ row }: { row: LabelledRow }) {
 /**
  * A question, with buttons in the inbox's order (`rowActions` and `rowKeyPlan` in `hooks/view.ts`): each option, the
  * recommended one first; "All N options" after the fourth when there are more than five; its steps; then Reply,
- * Explain, Copy and Dismiss.
+ * Explain, Open (with a path), Copy and Dismiss.
  */
 function Question({ section, row }: { section: InboxSection; row: LabelledRow }) {
   const { key, label, busy } = rowState(section, row)
@@ -382,6 +410,7 @@ function Question({ section, row }: { section: InboxSection; row: LabelledRow })
           Reply
         </Button>
         <ExplainButton section={section} row={row} busy={busy} />
+        <OpenButton section={section} row={row} path={row.path} busy={busy} />
         <CopyButton section={section} row={row} source={{ kind: 'question', title: row.text, path: row.path }} busy={busy} />
         <Button size="sm" variant="ghost" disabled={busy} onPress={() => press(section, row, { action: 'dismiss' })}>
           Dismiss
@@ -402,7 +431,7 @@ function ExplainButton({ section, row, busy }: { section: InboxSection; row: Lab
   )
 }
 
-/** A task: its whole text with its age, then its steps, Done, Reply (`rowActions` in `hooks/view.ts`), Explain and Copy. */
+/** A task: its whole text with its age, then its steps, Done, Reply (`rowActions` in `hooks/view.ts`), Explain, Open (with a path) and Copy. */
 function Task({ section, row }: { section: InboxSection; row: LabelledRow }) {
   const { key, label, busy } = rowState(section, row)
   return (
@@ -417,6 +446,7 @@ function Task({ section, row }: { section: InboxSection; row: LabelledRow }) {
           Reply
         </Button>
         <ExplainButton section={section} row={row} busy={busy} />
+        <OpenButton section={section} row={row} path={row.path} busy={busy} />
         <CopyButton section={section} row={row} source={{ kind: 'task', title: row.text, steps: row.steps, path: row.path }} busy={busy} />
       </Row>
       {read(replying)[key] === true && (
@@ -466,7 +496,7 @@ const FINDING_TONES = { issue: 'warning', opportunity: 'success' } as const
 
 /**
  * An issue or opportunity: its mark and title with the age on the right, its detail and file, then the inbox's
- * finding buttons (`actionsOf` in `hooks/view.ts`) less Discuss: Fix or Do it, File issue, Reply, Explain, Copy, Dismiss.
+ * finding buttons (`actionsOf` in `hooks/view.ts`) less Discuss: Fix or Do it, File issue, Reply, Explain, Open (with a path), Copy, Dismiss.
  */
 function Finding({ section, row }: { section: InboxSection; row: LabelledFinding }) {
   const { key, label, busy } = rowState(section, row)
@@ -500,6 +530,7 @@ function Finding({ section, row }: { section: InboxSection; row: LabelledFinding
           Reply
         </Button>
         <ExplainButton section={section} row={row} busy={busy} />
+        <OpenButton section={section} row={row} path={row.path} busy={busy} />
         <CopyButton section={section} row={row} source={{ kind: 'finding', title: row.title, detail: row.detail, path: row.path }} busy={busy} />
         <Button size="sm" variant="ghost" disabled={busy} onPress={() => press(section, row, { action: 'dismiss' })}>
           Dismiss

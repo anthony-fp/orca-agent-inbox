@@ -39,7 +39,8 @@ Loading grants the plugin its access, so read the manifest and the sections belo
 | `agent:read` | Lists the agents in the focused workspace, to draw a section for each one and to count the agents it does not track. |
 | `terminal:send` | Types your answer, reply or hand-off into the agent's terminal when you press a button, including while the agent is working. |
 | `storage:own` | Keeps one ledger (questions, tasks, findings, press labels) per agent session in the plugin's own storage. |
-| `workspace:read` | Unused. The plugin finds each transcript by its session id, so it needs no workspace list. A later version drops it. |
+| `workspace:read` | Lists the workspaces when you press Open, to find the one on this machine that holds the agent's folder. |
+| `workspace:write` | Opens a row's file in Orca's editor when you press Open. |
 
 ## What it adds to each tracked `claude` launch
 

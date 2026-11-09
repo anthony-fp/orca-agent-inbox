@@ -37,7 +37,7 @@ const openLedger = () => {
   return applyUpdate(EMPTY, u, 0, 1)
 }
 
-async function setup(opts: { state?: State; files?: Record<string, string>; unreadable?: string[]; agents?: unknown[]; copyFails?: boolean; list?: unknown[]; socket?: string; clockAt?: number; codexRollout?: (home: string, threadId: string) => Promise<{ path: string; cwd: string } | null> } = {}) {
+async function setup(opts: { state?: State; files?: Record<string, string>; unreadable?: string[]; agents?: unknown[]; copyFails?: boolean; list?: unknown[]; truncated?: boolean; socket?: string; clockAt?: number; codexRollout?: (home: string, threadId: string) => Promise<{ path: string; cwd: string } | null> } = {}) {
   const time = fakeClock(opts.clockAt ?? 100 * DAY)
   const files = new Map(Object.entries(opts.files ?? {}))
   const reads: string[] = []
@@ -46,7 +46,8 @@ async function setup(opts: { state?: State; files?: Record<string, string>; unre
   const host = mockHost({
     storage: opts.state ? { state: opts.state } : {},
     results: {
-      'workspace.list': { workspaces: opts.list ?? [WS], truncated: false },
+      'workspace.list': { workspaces: opts.list ?? [WS], truncated: opts.truncated ?? false },
+      'editor.open': { opened: true },
       'agents.list': { agents: opts.agents ?? [] },
       'terminal.sendText': { accepted: true },
     },
@@ -824,6 +825,34 @@ test('inbox.copy writes the clipboard, and says why when it cannot', async () =>
   const failing = await setup({ copyFails: true })
   assert.deepEqual(await failing.worker.request('inbox.copy', { text: 'x' }), { ok: false, error: 'no clipboard command on this system' })
   await failing.worker.deactivate()
+})
+
+test('inbox.openFile opens the file in the one local workspace that holds the folder, by its path relative to it', async () => {
+  /** Opens `path` for a session in `cwd`, and gives the outcome and the editor.open calls. */
+  const openIn = async (cwd: string, path: string, opts: { list?: unknown[]; truncated?: boolean } = {}) => {
+    const state: State = { version: 1, terminals: {}, sessions: { [S]: { ...emptySession(100 * DAY), cwd } } }
+    const t = await setup({ state, ...opts })
+    const out = await t.worker.request('inbox.openFile', { sessionId: S, path })
+    const calls = t.host.callsOf('editor.open')
+    await t.worker.deactivate()
+    return { out, calls }
+  }
+  const sub = `${WS.path}/pkg`
+  assert.deepEqual(await openIn(sub, 'src/a.ts'), { out: { ok: true }, calls: [{ workspaceId: WS.id, path: 'pkg/src/a.ts' }] })
+  assert.deepEqual((await openIn(sub, `${WS.path}/README.md`)).calls, [{ workspaceId: WS.id, path: 'README.md' }], 'an absolute path inside')
+  const remote = { ...WS, id: 'ws-remote', hostId: 'ssh:box' }
+  assert.deepEqual((await openIn(sub, 'a.ts', { list: [remote, WS] })).calls, [{ workspaceId: WS.id, path: 'pkg/a.ts' }], 'the same path on another host is not this one')
+  const B = { ...WS, id: 'ws-b', path: '/a/b' }
+  const BC = { ...WS, id: 'ws-bc', path: '/a/bc', hostId: 'local' }
+  assert.deepEqual((await openIn('/a/bc', 'x.ts', { list: [B, BC] })).calls, [{ workspaceId: 'ws-bc', path: 'x.ts' }], '/a/b does not hold /a/bc')
+
+  const fails = async (cwd: string, path: string, error: string, opts: { list?: unknown[]; truncated?: boolean } = {}) =>
+    assert.deepEqual(await openIn(cwd, path, opts), { out: { ok: false, error }, calls: [] })
+  await fails(sub, '../../../etc/hosts', 'File is outside this workspace')
+  await fails(sub, '/etc/hosts', 'File is outside this workspace')
+  await fails('/a/bc', 'x.ts', 'No workspace holds this folder', { list: [B, remote] })
+  await fails(sub, 'a.ts', 'More than one workspace holds this folder', { list: [WS, { ...WS, id: 'ws-2', hostId: 'local' }] })
+  await fails(sub, 'a.ts', 'Orca listed only some workspaces', { truncated: true })
 })
 
 // The live check (docs/live-check.md): the launch gives `<repoId>::<path>`, workspace.list gives `identity:<key>`.
