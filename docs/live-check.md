@@ -140,3 +140,18 @@ Dev plugin from commit `51a4fe5`, Orca's Codex 0.166.0, Claude Code 2.1.319. Two
 States not seen: sub-agent threads, a press while Codex works, the panel in the dark theme, `/new` in a pane.
 
 Found: a person who also has the inbox repo's Codex plugin installed gets both `inbox` and `orca-inbox` tools in an Orca Codex launch. The agents here used `orca-inbox` in every tracked turn.
+
+## Row buttons and goal line (0.4.0) — 2026-11-09
+
+Dev plugin from commit `5f7c9d0`, loaded from the dev folder and enabled with `orca plugin enable local.agent-inbox`. Buttons pressed by the person in the live panel; results as the person reported them.
+
+| Check | Result |
+|---|---|
+| Goal line | Pass. The first `## ` heading of the session's plan file shows under the title. At `0e55b92` it was cut off with "…"; `5f7c9d0` wraps it, and the person confirmed the full text shows. |
+| Open | Pass (reported). |
+| Snooze | Pass (reported). |
+| Hand off | Pass (reported). |
+| Copy | Pass (reported). |
+| Explain | Pass (reported). |
+
+States not seen by the agent: each button's labels, the Snooze menu, a red error, a partial or uncertain hand-off, a snooze ending, the Open match when a folder and its worktree both hold the cwd, and which `hostId` Orca gives this machine (`'local'` or null).
