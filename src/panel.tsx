@@ -774,7 +774,7 @@ function Section({ section }: { section: InboxSection }) {
   return (
     <Stack gap="sm">
       <Heading level={3}>{section.title}</Heading>
-      {section.goal !== null && <Text muted size="sm" truncate>{section.goal}</Text>}
+      {section.goal !== null && <Text muted size="sm">{section.goal}</Text>}
       {section.trustHook && <Text muted size="sm">Trust the Agent Inbox hook in Codex to send answers</Text>}
       {!section.tools && (
         <Text muted size="sm">

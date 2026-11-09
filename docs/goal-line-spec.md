@@ -14,8 +14,8 @@ Each agent's section in the Agent Inbox panel shows one line under the agent's t
 
 ## Drawing
 
-- One line, in the muted text style, under the agent's title and above its first section.
-- A heading longer than the panel's width ends in "…". The full text shows on hover where Orca supports a title.
+- The goal, in the muted text style, under the agent's title and above its first section.
+- The line wraps to as many lines as it needs. No text is cut off.
 - No plan file, or a plan file with no `## ` heading: no line, and no empty space.
 - The line updates when the plan file changes, as plan tasks do now.
 

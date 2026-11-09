@@ -662,11 +662,11 @@ test('plan: groups keep source order across completion and reopening, with Compl
   await clean(view)
 })
 
-test('goal line: one muted, truncated line right under the title; none when the plan has no goal', async () => {
+test('goal line: one muted line that wraps, right under the title; none when the plan has no goal', async () => {
   const view = await open({ sections: [section(1, { goal: 'Fix the parser', plan: parsePlan('## Fix the parser\n- [~] a') }), section(2)], others: [], untracked: 0, unread: 0 })
   const goal = view.find({ text: 'Fix the parser', type: 'Text' })
   assert.equal(goal?.props.muted, true)
-  assert.equal(goal?.props.truncate, true)
+  assert.equal(goal?.props.truncate, undefined, 'the goal wraps; no text is cut off')
   const tree = JSON.stringify(view.tree())
   assert.ok(tree.includes('"children":["Agent 1"]},{"type":"Text"'), 'the goal is the next element after the title')
   assert.ok(tree.indexOf('Fix the parser') < tree.indexOf('PLAN'), 'the goal is above the plan')

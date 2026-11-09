@@ -90,7 +90,7 @@ This task changes text a model reads.
 ## T8. Goal line
 
 - Spec: [goal-line-spec.md](goal-line-spec.md).
-- Files: `src/core/plan.ts` (`planGoal`: the first `## ` heading, beside `parsePlan`), `src/worker.ts` (`readPlan` keeps `goal` with the plan), `src/protocol.ts` (`InboxSection.goal`), `src/panel.tsx` (one muted, truncated line under the title), `src/panel-views.ts`.
+- Files: `src/core/plan.ts` (`planGoal`: the first `## ` heading, beside `parsePlan`), `src/worker.ts` (`readPlan` keeps `goal` with the plan), `src/protocol.ts` (`InboxSection.goal`), `src/panel.tsx` (one muted line under the title that wraps, never truncated), `src/panel-views.ts`.
 - Dependency check: schema consumers are the panel, `panel-views.ts` and the worker tests; no saved state changes. Identity: the goal is the session's, read from `planPath(cwd, sessionId)`. Recovery: the goal lives in memory only and is read again from the file after a restart. `planNote` does not change, so no text a model reads changes.
 - Tests:
   - `src/core/plan.test.ts`: the first `## ` wins; `### ` and `#` do not count; no heading gives null; spaces trim.
