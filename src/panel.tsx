@@ -25,7 +25,7 @@ import {
 } from 'orca'
 import { rowCopyText, type ClosedGroup, type CopySource, type Step } from './core/now'
 import { planLines, type PlanLine } from './core/plan'
-import type { CopyOutcome, InboxSection, InboxView, OpenOutcome, OtherAgent, SnoozeOutcome } from './protocol'
+import type { CopyOutcome, HandoffOutcome, InboxSection, InboxView, OpenOutcome, OtherAgent, SnoozeOutcome } from './protocol'
 import type { LabelledFinding, LabelledRow, PressInput, RowLabel } from './presses'
 
 type Loaded = { is: 'loading' } | { is: 'error'; message: string } | { is: 'ready'; view: InboxView }
@@ -235,6 +235,42 @@ function OpenButton({ section, row, path, busy }: { section: InboxSection; row: 
   return (
     <Button size="sm" variant="outline" disabled={busy} onPress={() => openRow(section, row, path)}>
       Open
+    </Button>
+  )
+}
+
+const HANDING_OFF: RowLabel = { text: 'Handing off…', tone: 'muted', copy: null }
+
+/**
+ * A row's Hand off: the worker gives the row to a new agent in a child worktree. The row reads "Handing off…", then the
+ * worker's label, or Orca's error in red with Hand off kept.
+ */
+async function handOffRow(s: InboxSection, row: Pressable): Promise<void> {
+  const key = rowKey(s, row.id)
+  update(local, m => ({ ...m, [key]: { label: HANDING_OFF, pending: true } }))
+  let out: HandoffOutcome
+  try {
+    out = await plugin.request('inbox.handoff', { sessionId: s.sessionId, id: row.id })
+  } catch (e) {
+    out = { ok: false, error: message(e) }
+  }
+  update(local, m => {
+    const { [key]: _, ...rest } = m
+    return out.ok ? { ...rest, [key]: { label: out.label, pending: false } } : rest
+  })
+  update(stepResults, m => {
+    const { [key]: _, ...rest } = m
+    return out.ok ? rest : { ...rest, [key]: { text: out.error, tone: 'danger', copy: null } }
+  })
+  await load()
+}
+
+/** Hand off on a finding or task, after Copy and before Snooze. A row with a hand-off receipt has none. */
+function HandOffButton({ section, row, busy }: { section: InboxSection; row: LabelledRow | LabelledFinding; busy: boolean }) {
+  if (row.handedOff) return null
+  return (
+    <Button size="sm" variant="outline" disabled={busy} onPress={() => handOffRow(section, row)}>
+      Hand off
     </Button>
   )
 }
@@ -502,7 +538,7 @@ function ExplainButton({ section, row, busy }: { section: InboxSection; row: Lab
   )
 }
 
-/** A task: its whole text with its age, then its steps, Done, Reply (`rowActions` in `hooks/view.ts`), Explain, Open (with a path), Copy and Snooze. */
+/** A task: its whole text with its age, then its steps, Done, Reply (`rowActions` in `hooks/view.ts`), Explain, Open (with a path), Copy, Hand off and Snooze. */
 function Task({ section, row }: { section: InboxSection; row: LabelledRow }) {
   const { key, label, busy } = rowState(section, row)
   return (
@@ -519,6 +555,7 @@ function Task({ section, row }: { section: InboxSection; row: LabelledRow }) {
         <ExplainButton section={section} row={row} busy={busy} />
         <OpenButton section={section} row={row} path={row.path} busy={busy} />
         <CopyButton section={section} row={row} source={{ kind: 'task', title: row.text, steps: row.steps, path: row.path }} busy={busy} />
+        <HandOffButton section={section} row={row} busy={busy} />
         <SnoozeButton rowKey={key} busy={busy} />
       </Row>
       <SnoozeMenu section={section} row={row} busy={busy} />
@@ -569,7 +606,7 @@ const FINDING_TONES = { issue: 'warning', opportunity: 'success' } as const
 
 /**
  * An issue or opportunity: its mark and title with the age on the right, its detail and file, then the inbox's
- * finding buttons (`actionsOf` in `hooks/view.ts`) less Discuss: Fix or Do it, File issue, Reply, Explain, Open (with a path), Copy, Snooze, Dismiss.
+ * finding buttons (`actionsOf` in `hooks/view.ts`) less Discuss: Fix or Do it, File issue, Reply, Explain, Open (with a path), Copy, Hand off, Snooze, Dismiss.
  */
 function Finding({ section, row }: { section: InboxSection; row: LabelledFinding }) {
   const { key, label, busy } = rowState(section, row)
@@ -605,6 +642,7 @@ function Finding({ section, row }: { section: InboxSection; row: LabelledFinding
         <ExplainButton section={section} row={row} busy={busy} />
         <OpenButton section={section} row={row} path={row.path} busy={busy} />
         <CopyButton section={section} row={row} source={{ kind: 'finding', title: row.title, detail: row.detail, path: row.path }} busy={busy} />
+        <HandOffButton section={section} row={row} busy={busy} />
         <SnoozeButton rowKey={key} busy={busy} />
         <Button size="sm" variant="ghost" disabled={busy} onPress={() => press(section, row, { action: 'dismiss' })}>
           Dismiss

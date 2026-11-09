@@ -1,7 +1,7 @@
 // The panel <-> worker contract, declared once: src/panel.tsx and src/worker.ts both read it.
 import type { NowGroups } from './core/now'
 import type { PlanView } from './core/plan'
-import type { LabelledFindings, LabelledRow, PressInput, PressOutcome } from './presses'
+import type { LabelledFindings, LabelledRow, PressInput, PressOutcome, RowLabel } from './presses'
 
 /** One tracked agent in the focused workspace. */
 export type InboxSection = {
@@ -44,6 +44,12 @@ export type OpenOutcome = CopyOutcome
 /** What a Snooze did: the worker saved it, or why it could not. */
 export type SnoozeOutcome = CopyOutcome
 
+/**
+ * What a Hand off did: the row's new label, which is the saved receipt, or why Orca made nothing. After an error the
+ * row keeps its Hand off button.
+ */
+export type HandoffOutcome = { ok: true; label: RowLabel } | { ok: false; error: string }
+
 export type InboxView = {
   sections: InboxSection[]
   /** Agents without a tracked section, drawn under their own titles. They count in no other field. */
@@ -66,6 +72,8 @@ declare module 'orca' {
     'inbox.openFile': { input: { sessionId: string; path: string }; output: OpenOutcome }
     /** Hides a row in the panel until `until` (ms). The agent still sees the row open. */
     'inbox.snooze': { input: { sessionId: string; id: string; until: number }; output: SnoozeOutcome }
+    /** Gives a finding or task to a new agent of the same kind in a child worktree, through the `orca` CLI. Sends nothing to this agent. */
+    'inbox.handoff': { input: { sessionId: string; id: string }; output: HandoffOutcome }
   }
   interface PluginPanelEvents {
     /** Posted after each saved change: ask for `inbox.view` again. */

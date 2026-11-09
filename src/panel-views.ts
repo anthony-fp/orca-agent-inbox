@@ -43,10 +43,11 @@ export function row(
     label?: LabelledRow['label']
     explained?: boolean
     path?: string | null
+    handedOff?: boolean
   } = {},
 ): LabelledRow {
-  const { options = [], rec = null, helps = [], handle = '', age = '2h', label = null, explained = false, path = null } = over
-  return { id, handle, text, age, rec, choices: choices({ options, rec }), steps: stepsOf(helps), label, explained, path }
+  const { options = [], rec = null, helps = [], handle = '', age = '2h', label = null, explained = false, path = null, handedOff = false } = over
+  return { id, handle, text, age, rec, choices: choices({ options, rec }), steps: stepsOf(helps), label, explained, path, handedOff }
 }
 
 /** A finding as the worker sends it. */
@@ -54,11 +55,11 @@ export function finding(
   id: string,
   kind: Finding['kind'],
   title: string,
-  over: { detail?: string; path?: string | null; label?: LabelledFinding['label']; explained?: boolean } = {},
+  over: { detail?: string; path?: string | null; label?: LabelledFinding['label']; explained?: boolean; handedOff?: boolean } = {},
 ): LabelledFinding {
-  const { detail = 'Found while working on the task.', path = null, label = null, explained = false } = over
+  const { detail = 'Found while working on the task.', path = null, label = null, explained = false, handedOff = false } = over
   const fileName = path === null ? null : (path.split('/').pop() ?? path)
-  return { id, kind, mark: FINDING_GROUPS[kind].mark, title, detail, path, fileName, age: '1h', fix: fixLabel({ kind }), label, explained }
+  return { id, kind, mark: FINDING_GROUPS[kind].mark, title, detail, path, fileName, age: '1h', fix: fixLabel({ kind }), label, explained, handedOff }
 }
 
 export const EMPTY_VIEW: InboxView = { sections: [], others: [], untracked: 0, unread: 0 }

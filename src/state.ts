@@ -62,10 +62,10 @@ export type PressLabel = {
   state: 'sending' | 'answered' | 'held' | 'undelivered'
   /**
    * What the press sent: a question's option, typed words on any row, a step that asks the agent to run a command,
-   * a finding's Fix or File issue, or Explain on any row. Only an option closes its row when its turn runs. A label
-   * saved before presses kept this is an answer.
+   * a finding's Fix or File issue, Explain on any row, or Hand off on a finding or task, which sends nothing here. Only
+   * an option closes its row when its turn runs. A label saved before presses kept this is an answer.
    */
-  kind: 'answer' | 'reply' | 'step' | 'fix' | 'issue' | 'explain'
+  kind: 'answer' | 'reply' | 'step' | 'fix' | 'issue' | 'explain' | 'handoff'
   /** The option or words the person gave, for the row's close when the answering turn runs, or the button's label. */
   answer: string
   /** The message typed into the terminal, or that Copy copies. */
@@ -77,7 +77,15 @@ export type PressLabel = {
   turnId?: string
   /** Codex pane that received this press, for rejecting it in a later /new thread. */
   paneKey?: string
+  /**
+   * The row's hand-off receipt: the worktree's name, Orca's operation id, and how far it got. A later press on the row
+   * keeps it, so the row never offers Hand off again.
+   */
+  handoff?: Handoff
 }
+
+/** running: the CLI is out. started: worktree, agent and prompt all done. made: the worktree only. uncertain: no answer. */
+export type Handoff = { worktree: string; operationId: string | null; outcome: 'running' | 'started' | 'made' | 'uncertain' }
 
 type StateBody = {
   /** Each tracked terminal's session. A terminal goes when its session is pruned. */
@@ -116,7 +124,15 @@ function upgradeTurn(raw: unknown): Turn[] {
 }
 
 const LABEL_STATES: PressLabel['state'][] = ['sending', 'answered', 'held', 'undelivered']
-const LABEL_KINDS: PressLabel['kind'][] = ['answer', 'reply', 'step', 'fix', 'issue', 'explain']
+const LABEL_KINDS: PressLabel['kind'][] = ['answer', 'reply', 'step', 'fix', 'issue', 'explain', 'handoff']
+const HANDOFF_OUTCOMES: Handoff['outcome'][] = ['running', 'started', 'made', 'uncertain']
+
+/** A hand-off saved while its CLI run was out is uncertain: the run ended with the worker. */
+function upgradeHandoff(raw: unknown): Handoff | null {
+  if (!isObject(raw) || typeof raw.worktree !== 'string' || !HANDOFF_OUTCOMES.includes(raw.outcome as Handoff['outcome'])) return null
+  const outcome = raw.outcome === 'running' ? 'uncertain' : (raw.outcome as Handoff['outcome'])
+  return { worktree: raw.worktree, operationId: typeof raw.operationId === 'string' ? raw.operationId : null, outcome }
+}
 
 /** A label saved while its send was out reads "Not delivered": the watch that would confirm it ended with the worker. */
 function upgradeLabel(raw: unknown): PressLabel[] {
@@ -131,6 +147,8 @@ function upgradeLabel(raw: unknown): PressLabel[] {
   if (typeof raw.from === 'number') label.from = raw.from
   if (typeof raw.turnId === 'string') label.turnId = raw.turnId
   if (typeof raw.paneKey === 'string') label.paneKey = raw.paneKey
+  const handoff = upgradeHandoff(raw.handoff)
+  if (handoff) label.handoff = handoff
   return [label]
 }
 

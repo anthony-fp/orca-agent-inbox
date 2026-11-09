@@ -9,14 +9,15 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { OrcaWorkerApi } from 'orca/worker'
 
 import { copyToClipboard } from './clipboard'
+import { launchOf, runOrca, type OrcaReply } from './orca-cli'
 import { parsePlan, planNote, planPath, type PlanView } from './core/plan'
 import { codexResumeStart, codexToolTurn, readCodexTurn, rolloutFor } from './core/codex-transcript'
 import { tagLaunch, tokenize } from './launch'
 import { runInboxModel } from './model'
-import { createPresses, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
-import type { CopyOutcome, InboxSection, InboxView, OpenOutcome, OtherAgent, SnoozeOutcome } from './protocol'
+import { createPresses, drawnToken, handoffText, labelledRows, rowLabel, setLabel, type PressInput, type TerminalStatus } from './presses'
+import type { CopyOutcome, HandoffOutcome, InboxSection, InboxView, OpenOutcome, OtherAgent, SnoozeOutcome } from './protocol'
 import { binPaths, createAnswerer, listen, socketPath, stableBinPaths } from './socket'
-import { emptySession } from './state'
+import { emptySession, type Handoff, type PressLabel } from './state'
 import { cwdOf, promptsBefore, wholeLinesEnd } from './transcript'
 import { createTracker, type Clock, type TrackerDeps } from './turns'
 
@@ -36,6 +37,8 @@ export type WorkerDeps = {
   tools: { socketPath: string; mcpServer: string; promptHook: string } | null
   /** Writes the text to the system clipboard; throws when it cannot. Orca gives a panel no clipboard. */
   copy(text: string): Promise<void>
+  /** Runs `orca <args> --json` (src/orca-cli.ts). It never throws. */
+  orca(args: string[]): Promise<OrcaReply>
 }
 
 type PlanRead = { plan: PlanView | null; error: string | null }
@@ -86,6 +89,11 @@ type Snoozes = Record<string, number>
 function holds(folder: string, path: string): boolean {
   const rel = relative(folder, path)
   return rel === '' || (rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel))
+}
+
+/** A worktree name from a row's text: lower case words joined by `-`, at most 40 characters. */
+export function slug(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40).replace(/^-+|-+$/g, '') || 'handoff'
 }
 
 /** `workspace.list` gives no local marker: Orca's own code names this machine `local`, and a folder may give null. */
@@ -603,6 +611,73 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
     }
   })
 
+  /** Rows with a hand-off out, by `<sessionId>:<rowId>`: one at a time per row. */
+  const handingOff = new Set<string>()
+
+  /**
+   * A row's Hand off (spec "Hand off"): one `orca worktree create` that makes a child worktree of the session's folder
+   * and starts the same agent kind there with the row's text. The receipt is saved on the row before the run, so a
+   * restart mid-run reads "may have started". Only a clean error leaves the row as it was. Nothing is ever retried.
+   */
+  async function handOff(sessionId: string, id: string): Promise<HandoffOutcome> {
+    await ready
+    const s = tracker.state().sessions[sessionId]
+    const row = s?.ledger.findings.find(f => f.id === id) ?? s?.ledger.items.find(i => i.id === id && i.kind === 'task')
+    if (!s || !row) return { ok: false, error: 'Only an open finding or task can be handed off' }
+    if (s.presses[id]?.handoff) return { ok: false, error: 'Handed off already' }
+    const cwd = await dirOf(sessionId)
+    if (!cwd) return { ok: false, error: "The agent's folder is not known" }
+    const name = slug('ask' in row ? row.ask : row.title)
+    const before = s.presses[id]
+    const at = deps.clock.now()
+    const label = (handoff: Handoff): PressLabel =>
+      ({ state: handoff.outcome === 'running' ? 'sending' : handoff.outcome === 'started' ? 'answered' : 'undelivered', kind: 'handoff', answer: handoff.worktree, text: '', at, handoff })
+    await tracker.edit(sessionId, cur => setLabel(cur, id, label({ worktree: name, operationId: null, outcome: 'running' })))
+    const reply = await deps.orca([
+      'worktree', 'create', '--name', name, '--repo', `path:${cwd}`, '--parent-worktree', `path:${cwd}`,
+      '--agent', s.agent, '--prompt', handoffText(row),
+    ])
+    if (reply.kind === 'error') {
+      log(`handoff: ${reply.error}`)
+      // Orca made nothing: the row goes back to its label before the press, and keeps Hand off.
+      await tracker.edit(sessionId, cur => {
+        if (cur.presses[id]?.at !== at) return cur
+        const { [id]: _, ...rest } = cur.presses
+        return { ...cur, presses: before ? { ...rest, [id]: before } : rest }
+      })
+      return { ok: false, error: reply.error }
+    }
+    let receipt: Handoff
+    if (reply.kind === 'uncertain') {
+      log(`handoff: may have started: ${reply.error}`)
+      receipt = { worktree: name, operationId: reply.operationId, outcome: 'uncertain' }
+    } else {
+      const launch = launchOf(reply.result)
+      receipt = launch.worktree === null
+        ? { worktree: name, operationId: launch.operationId, outcome: 'uncertain' }
+        : { worktree: launch.worktree, operationId: launch.operationId, outcome: launch.started ? 'started' : 'made' }
+    }
+    const saved = label(receipt)
+    await tracker.edit(sessionId, cur => (cur.presses[id]?.at === at ? setLabel(cur, id, saved) : cur))
+    return { ok: true, label: rowLabel(saved) }
+  }
+
+  orca.panels.handle('inbox.handoff', async ({ sessionId, id }: { sessionId: string; id: string }): Promise<HandoffOutcome> => {
+    if (typeof sessionId !== 'string' || typeof id !== 'string') return { ok: false, error: 'Not a hand-off' }
+    const key = `${sessionId}:${id}`
+    // Taken before any wait, so a second press in the same moment finds it.
+    if (handingOff.has(key)) return { ok: false, error: 'A hand-off for this row is already running' }
+    handingOff.add(key)
+    try {
+      return await handOff(sessionId, id)
+    } catch (e) {
+      log(`handoff: ${message(e)}`)
+      return { ok: false, error: message(e) }
+    } finally {
+      handingOff.delete(key)
+    }
+  })
+
   orca.panels.handle('inbox.press', async (input: PressInput) => {
     await ready
     return presses.press(input)
@@ -639,6 +714,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     readFile: readOrNull,
     listDirs,
     copy: text => copyToClipboard(text),
+    orca: args => runOrca(args),
     tools: liveTools(process.env),
   })
 }

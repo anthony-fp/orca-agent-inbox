@@ -9,7 +9,7 @@
 import { closeFinding, closeItem } from './core/ledger'
 import { findingRows, fixLabel, nowRows, stepsOf, type FindingGroups, type FindingRow, type NowGroups, type NowRow } from './core/now'
 import type { Finding, Item, Ledger } from './core/types'
-import type { PressLabel, SessionState, State } from './state'
+import type { Handoff, PressLabel, SessionState, State } from './state'
 import { codexPromptAfter } from './core/codex-transcript'
 import { promptAfter } from './transcript'
 import type { Clock } from './turns'
@@ -24,9 +24,12 @@ export type TerminalStatus = 'working' | 'blocked' | 'waiting' | 'done'
 /** What the panel shows on a row after a press. `copy` is the text a Copy button copies. */
 export type RowLabel = { text: string; tone: 'muted' | 'success' | 'danger'; copy: string | null }
 
-/** `explained`: the row's last press was Explain, so its Explain button reads "Explain again". */
-export type LabelledRow = NowRow & { label: RowLabel | null; explained: boolean }
-export type LabelledFinding = FindingRow & { label: RowLabel | null; explained: boolean }
+/**
+ * `explained`: the row's last press was Explain, so its Explain button reads "Explain again". `handedOff`: the row has a
+ * hand-off receipt, so it has no Hand off button.
+ */
+export type LabelledRow = NowRow & { label: RowLabel | null; explained: boolean; handedOff: boolean }
+export type LabelledFinding = FindingRow & { label: RowLabel | null; explained: boolean; handedOff: boolean }
 export type LabelledFindings = Omit<FindingGroups, 'issues' | 'opportunities'> & {
   issues: LabelledFinding[]
   opportunities: LabelledFinding[]
@@ -111,12 +114,21 @@ export const ISSUE_LABEL = 'File issue'
 export const EXPLAIN_LABEL = 'Explain'
 
 /** `findingBody` in `hooks/presses.ts`. */
-function findingBody(finding: Finding): string[] {
+export function findingBody(finding: Finding): string[] {
   return [
     `${finding.kind === 'issue' ? 'Issue' : 'Opportunity'}: ${finding.title}`,
     finding.detail,
     ...(finding.path ? [`File: ${finding.path}`] : []),
   ]
+}
+
+/**
+ * A Hand off's prompt: the row's text as `findingBody` builds it, on one line. A task gives its ask and its file, as a
+ * finding gives its title and file.
+ */
+export function handoffText(row: Finding | Item): string {
+  const body = 'ask' in row ? [row.ask, ...(row.path ? [`File: ${row.path}`] : [])] : findingBody(row)
+  return oneLine(body.join('\n'))
 }
 
 /** The inbox mod's message for a finding (`messages.finding` in `hooks/presses.ts`, less Discuss), on one line. */
@@ -174,9 +186,19 @@ const DONE_TEXT: Record<PressLabel['kind'], (label: PressLabel) => string> = {
   fix: () => '✓ Handed off',
   issue: () => '✓ Asked to file',
   explain: () => '✓ Explained',
+  handoff: label => `✓ Handed off to ${label.handoff?.worktree ?? ''}`,
+}
+
+/** A hand-off's row text by its outcome (spec "Hand off"). */
+const HANDOFF_TEXT: Record<Handoff['outcome'], (h: Handoff) => RowLabel> = {
+  running: () => ({ text: 'Handing off…', tone: 'muted', copy: null }),
+  started: h => ({ text: `✓ Handed off to ${h.worktree}`, tone: 'success', copy: null }),
+  made: h => ({ text: `Worktree ${h.worktree} made, agent not started`, tone: 'danger', copy: null }),
+  uncertain: h => ({ text: `Hand off may have started: check worktree ${h.worktree}`, tone: 'danger', copy: null }),
 }
 
 export function rowLabel(label: PressLabel): RowLabel {
+  if (label.kind === 'handoff' && label.handoff) return HANDOFF_TEXT[label.handoff.outcome](label.handoff)
   switch (label.state) {
     case 'sending':
       return { text: label.kind === 'explain' ? 'Explaining…' : 'Sending…', tone: 'muted', copy: null }
@@ -203,8 +225,9 @@ export function labelledRows(
   const found = findingRows(s.ledger, now, fixesSent)
   const label = (id: string) => (s.presses[id] && s.presses[id].state !== 'held' ? rowLabel(s.presses[id]) : null)
   const explained = (id: string) => s.presses[id]?.kind === 'explain'
-  const add = (r: NowRow): LabelledRow => ({ ...r, label: label(r.id), explained: explained(r.id) })
-  const addFinding = (r: FindingRow): LabelledFinding => ({ ...r, label: label(r.id), explained: explained(r.id) })
+  const handedOff = (id: string) => s.presses[id]?.handoff !== undefined
+  const add = (r: NowRow): LabelledRow => ({ ...r, label: label(r.id), explained: explained(r.id), handedOff: handedOff(r.id) })
+  const addFinding = (r: FindingRow): LabelledFinding => ({ ...r, label: label(r.id), explained: explained(r.id), handedOff: handedOff(r.id) })
   return {
     questions: questions.map(add),
     tasks: tasks.map(add),
@@ -239,8 +262,10 @@ function closeAsker(s: SessionState, findingId: string, now: number): SessionSta
   return { ...s, ledger: closeItem(s.ledger, asker, { how: 'update', outcome: `fix sent for ${findingId}` }, now) }
 }
 
-function setLabel(s: SessionState, id: string, label: PressLabel): SessionState {
-  return { ...s, presses: { ...s.presses, [id]: label } }
+/** Sets a row's label. A hand-off receipt already on the row stays on the new label. */
+export function setLabel(s: SessionState, id: string, label: PressLabel): SessionState {
+  const handoff = label.handoff ?? s.presses[id]?.handoff
+  return { ...s, presses: { ...s.presses, [id]: handoff ? { ...label, handoff } : label } }
 }
 
 export function createPresses(deps: PressDeps) {

@@ -2,6 +2,8 @@
 import { assert, mockHost, mountWorker, test } from 'orca/testing'
 import { EMPTY, applyUpdate, parseReply } from './core/ledger'
 import type { ModelResult } from './model'
+import type { OrcaReply } from './orca-cli'
+import type { Finding, Item } from './core/types'
 import { planPath } from './core/plan'
 import { drawnToken } from './presses'
 import { emptySession, type CurrentState, type State } from './state'
@@ -37,12 +39,13 @@ const openLedger = () => {
   return applyUpdate(EMPTY, u, 0, 1)
 }
 
-async function setup(opts: { state?: State; storage?: Record<string, unknown>; files?: Record<string, string>; unreadable?: string[]; agents?: unknown[]; copyFails?: boolean; list?: unknown[]; truncated?: boolean; socket?: string; clockAt?: number; codexRollout?: (home: string, threadId: string) => Promise<{ path: string; cwd: string } | null> } = {}) {
+async function setup(opts: { state?: State; storage?: Record<string, unknown>; files?: Record<string, string>; unreadable?: string[]; agents?: unknown[]; copyFails?: boolean; list?: unknown[]; truncated?: boolean; socket?: string; clockAt?: number; orca?: (args: string[]) => Promise<OrcaReply>; codexRollout?: (home: string, threadId: string) => Promise<{ path: string; cwd: string } | null> } = {}) {
   const time = fakeClock(opts.clockAt ?? 100 * DAY)
   const files = new Map(Object.entries(opts.files ?? {}))
   const reads: string[] = []
   const models: string[] = []
   const copied: string[] = []
+  const orcaRuns: string[][] = []
   const host = mockHost({
     storage: { ...(opts.state ? { state: opts.state } : {}), ...opts.storage },
     results: {
@@ -59,6 +62,10 @@ async function setup(opts: { state?: State; storage?: Record<string, unknown>; f
     copy: async (text: string) => {
       if (opts.copyFails) throw new Error('no clipboard command on this system')
       copied.push(text)
+    },
+    orca: async (args: string[]): Promise<OrcaReply> => {
+      orcaRuns.push(args)
+      return opts.orca ? opts.orca(args) : { kind: 'error', error: 'no orca in this test' }
     },
     model: async (p: string): Promise<ModelResult> => {
       models.push(p)
@@ -82,7 +89,7 @@ async function setup(opts: { state?: State; storage?: Record<string, unknown>; f
   await made?.listening
   await time.run()
   const saved = () => (host.data() as { storage: Record<string, CurrentState> }).storage.state
-  return { worker, host, time, files, reads, models, saved, copied, close: () => made?.close() }
+  return { worker, host, time, files, reads, models, saved, copied, orcaRuns, close: () => made?.close() }
 }
 
 const launch = (command: string, over: Record<string, unknown> = {}) => ({
@@ -627,6 +634,7 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
             path: null,
             label: null,
             explained: false,
+            handedOff: false,
           },
         ],
         tasks: [],
@@ -984,4 +992,113 @@ test('the hook is registered before the state loads: a launch while storage neve
 test("a worker that orca plugin check or test starts gets no socket, so it never replaces the live worker's", () => {
   assert.equal(liveTools({ ORCA_PLUGIN_TEST_ROOT: '/some/plugin' }), null)
   assert.match(liveTools({})?.socketPath ?? '', /worker\.sock$/)
+})
+
+const HANDOFF_ISSUE: Finding = { id: 'i7', kind: 'issue', title: 'The retry loop never backs off!', detail: 'Each retry fires at once.', path: 'src/fetch.ts', at: 0 }
+const HANDOFF_TASK: Item = { id: 't3', kind: 'task', label: null, ask: 'Rotate the API key', options: [], rec: null, helps: [], turn: 1, at: 0, from: 'record', path: null }
+const HANDOFF_QUESTION: Item = { ...HANDOFF_TASK, id: 'q4', kind: 'question', ask: 'Ship it?', options: ['Yes', 'No'] }
+
+/** A session in WS.path with an open issue, task and question, and a worker whose `orca` answers with `reply`. */
+async function handoffSetup(reply: (args: string[]) => Promise<OrcaReply>, state?: State) {
+  const ledger = { ...EMPTY, items: [HANDOFF_TASK, HANDOFF_QUESTION], findings: [HANDOFF_ISSUE] }
+  const fresh: State = { version: 3, terminals: { 'term-1': { sessionId: S } }, panes: {}, paneLaunches: {}, sessions: { [S]: { ...emptySession(100 * DAY), ledger, cwd: WS.path } } }
+  const agents = [{ terminalId: 'term-1', title: 'Agent', agent: 'claude', state: 'done', stateStartedAt: 1 }]
+  const t = await setup({ state: state ?? fresh, agents, orca: reply })
+  const view = async () => (await t.worker.request('inbox.view', undefined)).sections[0]
+  return { ...t, view }
+}
+
+const created = (prompt: string, over: Record<string, unknown> = {}): OrcaReply => ({
+  kind: 'ok',
+  result: {
+    worktree: { displayName: 'the-retry-loop-never-backs-off', path: '/w/the-retry-loop-never-backs-off' },
+    launch: { outcome: { kind: 'terminal', handle: 'term_9' }, prompt: { delivery: 'submit', outcome: prompt }, operationId: 'op-1', ...over },
+  },
+})
+
+test('Hand off runs one orca worktree create with the row text, reads "✓ Handed off to <name>", keeps the receipt across a restart, and sends the agent nothing', async () => {
+  const t = await handoffSetup(async () => created('handed-to-terminal'))
+  const out = await t.worker.request('inbox.handoff', { sessionId: S, id: 'i7' })
+  assert.deepEqual(out, { ok: true, label: { text: '✓ Handed off to the-retry-loop-never-backs-off', tone: 'success', copy: null } })
+  assert.deepEqual(t.orcaRuns, [[
+    'worktree', 'create', '--name', 'the-retry-loop-never-backs-off', '--repo', `path:${WS.path}`, '--parent-worktree', `path:${WS.path}`,
+    '--agent', 'claude', '--prompt', 'Issue: The retry loop never backs off! Each retry fires at once. File: src/fetch.ts',
+  ]])
+  assert.deepEqual(t.saved().sessions[S].presses.i7.handoff, { worktree: 'the-retry-loop-never-backs-off', operationId: 'op-1', outcome: 'started' })
+  const row = (await t.view()).findings.issues[0]
+  assert.equal(row.handedOff, true, 'the row has no Hand off')
+  assert.equal(row.label?.text, '✓ Handed off to the-retry-loop-never-backs-off')
+  assert.equal(t.host.callsOf('terminal.sendText').length, 0, 'no text goes to the agent')
+  assert.deepEqual(await t.worker.request('inbox.handoff', { sessionId: S, id: 'i7' }), { ok: false, error: 'Handed off already' })
+  assert.equal(t.orcaRuns.length, 1)
+
+  // A task gives its ask; a question cannot be handed off.
+  await t.worker.request('inbox.handoff', { sessionId: S, id: 't3' })
+  assert.deepEqual(t.orcaRuns[1].slice(3, 4), ['rotate-the-api-key'])
+  assert.equal(t.orcaRuns[1].at(-1), 'Rotate the API key')
+  assert.deepEqual(await t.worker.request('inbox.handoff', { sessionId: S, id: 'q4' }), { ok: false, error: 'Only an open finding or task can be handed off' })
+  assert.equal(t.orcaRuns.length, 2)
+  await t.worker.deactivate()
+
+  const restarted = await handoffSetup(async () => created('handed-to-terminal'), t.saved())
+  const again = (await restarted.view()).findings.issues[0]
+  assert.equal(again.handedOff, true, 'the receipt survives a restart')
+  assert.equal(again.label?.text, '✓ Handed off to the-retry-loop-never-backs-off')
+  assert.deepEqual(restarted.saved().sessions[S].presses.i7.handoff?.operationId, 'op-1')
+  await restarted.worker.deactivate()
+})
+
+test('each Hand off outcome gives its label; after any outcome but a clean error the row has no Hand off; nothing is retried', async () => {
+  const cases: { reply: OrcaReply; text: string; handedOff: boolean; ok: boolean }[] = [
+    { reply: created('not-delivered'), text: 'Worktree the-retry-loop-never-backs-off made, agent not started', handedOff: true, ok: true },
+    { reply: created('handed-to-terminal', { outcome: undefined }), text: 'Worktree the-retry-loop-never-backs-off made, agent not started', handedOff: true, ok: true },
+    { reply: { kind: 'uncertain', error: 'no answer in 60 s', operationId: null }, text: 'Hand off may have started: check worktree the-retry-loop-never-backs-off', handedOff: true, ok: true },
+    { reply: { kind: 'uncertain', error: 'unknown', operationId: 'op-2' }, text: 'Hand off may have started: check worktree the-retry-loop-never-backs-off', handedOff: true, ok: true },
+    { reply: { kind: 'error', error: 'No repo at path' }, text: 'No repo at path', handedOff: false, ok: false },
+  ]
+  for (const c of cases) {
+    const t = await handoffSetup(async () => c.reply)
+    const out = await t.worker.request('inbox.handoff', { sessionId: S, id: 'i7' })
+    assert.deepEqual(out, c.ok ? { ok: true, label: { text: c.text, tone: 'danger', copy: null } } : { ok: false, error: c.text })
+    const row = (await t.view()).findings.issues[0]
+    assert.equal(row.handedOff, c.handedOff, c.text)
+    if (c.ok) assert.equal(row.label?.text, c.text)
+    else assert.equal(row.label, null, 'a clean error leaves the row as it was')
+    assert.equal(t.orcaRuns.length, 1, 'no automatic retry')
+    assert.equal(t.host.callsOf('terminal.sendText').length, 0)
+    await t.worker.deactivate()
+  }
+})
+
+test('two Hand off presses at once start one hand-off', async () => {
+  const waiting: ((reply: OrcaReply) => void)[] = []
+  const t = await handoffSetup(() => new Promise(resolve => waiting.push(resolve)))
+  const first = t.worker.request('inbox.handoff', { sessionId: S, id: 'i7' })
+  const second = t.worker.request('inbox.handoff', { sessionId: S, id: 'i7' })
+  await t.time.run()
+  for (const finish of waiting) finish(created('handed-to-terminal'))
+  const outs = await Promise.all([first, second])
+  assert.equal(t.orcaRuns.length, 1, 'one orca run')
+  assert.equal(outs.filter(o => o.ok).length, 1)
+  await t.worker.deactivate()
+})
+
+test('a hand-off saved while its run was out reads "may have started" after a restart, and a later press keeps the receipt', async () => {
+  let finish: (reply: OrcaReply) => void = () => {}
+  const t = await handoffSetup(() => new Promise(resolve => (finish = resolve)))
+  const out = t.worker.request('inbox.handoff', { sessionId: S, id: 't3' })
+  await t.time.run()
+  assert.equal(t.saved().sessions[S].presses.t3.handoff?.outcome, 'running')
+  const mid = t.saved()
+  finish(created('handed-to-terminal'))
+  await out
+  await t.worker.deactivate()
+
+  const restarted = await handoffSetup(async () => created('handed-to-terminal'), mid)
+  const row = (await restarted.view()).tasks[0]
+  assert.equal(row.label?.text, 'Hand off may have started: check worktree rotate-the-api-key')
+  assert.equal(row.handedOff, true)
+  await restarted.worker.request('inbox.press', { terminalId: 'term-1', sessionId: S, drawn: '', id: 't3', action: 'explain' })
+  assert.equal((await restarted.view()).tasks[0].handedOff, true, 'Explain replaces the label but keeps the receipt')
+  await restarted.worker.deactivate()
 })

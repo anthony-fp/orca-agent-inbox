@@ -53,7 +53,7 @@ test('one agent: its title, then Questions and Tasks with their counts and butto
   assert.ok(view.find({ text: '5m' }))
   // The inbox's rowActions (hooks/view.ts), then Explain and Copy before Dismiss: question options, Reply, Explain,
   // Copy, Dismiss; task Done, Reply, Explain, Copy. No field until Reply.
-  assert.deepEqual(texts(view, 'Button'), ['Yes', 'No', 'Reply', 'Explain', 'Copy', 'Snooze', 'Dismiss', 'Done', 'Reply', 'Explain', 'Copy', 'Snooze'])
+  assert.deepEqual(texts(view, 'Button'), ['Yes', 'No', 'Reply', 'Explain', 'Copy', 'Snooze', 'Dismiss', 'Done', 'Reply', 'Explain', 'Copy', 'Hand off', 'Snooze'])
   assert.equal(view.find({ type: 'Input' }), null)
   await clean(view)
 })
@@ -86,6 +86,7 @@ test("steps come after a question's options and before a task's Done, as the inb
     'Reply',
     'Explain',
     'Copy',
+    'Hand off',
     'Snooze',
   ])
   await clean(view)
@@ -248,7 +249,7 @@ test('Open shows only on rows with a path, after Explain and before Copy, and as
     },
   })
   const view = await mount(panel, { host })
-  assert.deepEqual(texts(view, 'Button'), ['Reply', 'Explain', 'Open', 'Copy', 'Snooze', 'Dismiss', 'Done', 'Reply', 'Explain', 'Copy', 'Snooze'])
+  assert.deepEqual(texts(view, 'Button'), ['Reply', 'Explain', 'Open', 'Copy', 'Snooze', 'Dismiss', 'Done', 'Reply', 'Explain', 'Copy', 'Hand off', 'Snooze'])
   const pressing = view.press({ type: 'Button', text: 'Open' })
   await new Promise(r => setTimeout(r, 0))
   assert.ok(view.find({ text: 'Opening parse.ts…' }))
@@ -441,6 +442,45 @@ test('"Tomorrow 9am" is 09:00 local on the next calendar day, at 23:30 and at 08
   }
 })
 
+test('Hand off shows on findings and tasks, not on questions; it reads "Handing off…", then the worker label, and goes once the row has a receipt', async () => {
+  const handed: { sessionId: string; id: string }[] = []
+  let current: InboxView = { ...FINDINGS, sections: FINDINGS.sections.map(s => ({ ...s, questions: ONE_AGENT.sections[0].questions })) }
+  let answer: (out: { ok: true; label: { text: string; tone: 'success'; copy: null } }) => void = () => {}
+  const host = mockHost({
+    requests: {
+      'inbox.view': () => current,
+      'inbox.handoff': (input: { sessionId: string; id: string }) => (handed.push(input), new Promise(r => (answer = r))),
+    },
+  })
+  const view = await mount(panel, { host })
+  // The question, the task, the issue and the opportunity: Hand off after Copy and before Snooze, never on the question.
+  assert.equal(view.findAll({ type: 'Button', text: 'Hand off' }).length, 3)
+  assert.deepEqual(texts(view, 'Button').slice(0, 7), ['Yes', 'No', 'Reply', 'Explain', 'Copy', 'Snooze', 'Dismiss'])
+  const pressing = view.press({ type: 'Button', text: 'Hand off' })
+  await new Promise(r => setTimeout(r, 0))
+  assert.ok(view.find({ text: 'Handing off…' }))
+  assert.deepEqual(handed, [{ sessionId: 'session-1', id: 't1' }])
+  const label = { text: '✓ Handed off to run-the-migration-on-staging', tone: 'success' as const, copy: null }
+  const s = current.sections[0]
+  current = { ...current, sections: [{ ...s, tasks: s.tasks.map(r => ({ ...r, handedOff: true, label })) }] }
+  answer({ ok: true, label })
+  await pressing
+  await view.settled()
+  assert.ok(view.find({ text: '✓ Handed off to run-the-migration-on-staging' }))
+  assert.equal(view.findAll({ type: 'Button', text: 'Hand off' }).length, 2, 'the task has no Hand off now')
+  await clean(view)
+})
+
+test('a Hand off that Orca refuses shows the error in red, and the row keeps Hand off', async () => {
+  const host = mockHost({ requests: { 'inbox.view': () => FINDINGS, 'inbox.handoff': () => ({ ok: false as const, error: 'No repo at path' }) } })
+  const view = await mount(panel, { host })
+  await view.press({ type: 'Button', text: 'Hand off' })
+  await view.settled()
+  assert.equal(view.find({ text: 'No repo at path' })?.props.tone, 'danger')
+  assert.equal(view.findAll({ type: 'Button', text: 'Hand off' }).length, 3)
+  await clean(view)
+})
+
 test('inbox.changed asks for the view again', async () => {
   let current: InboxView = EMPTY_VIEW
   const host = mockHost({ requests: { 'inbox.view': () => current } })
@@ -484,9 +524,9 @@ test('findings: Issues and Opportunities after Tasks, each row with its mark, de
   assert.ok(view.find({ text: '✦' }))
   // The inbox's actionsOf (hooks/view.ts) less Discuss: Fix or Do it, File issue, Reply, Explain, Dismiss. Open only on the row with a path.
   assert.deepEqual(texts(view, 'Button'), [
-    'Done', 'Reply', 'Explain', 'Copy', 'Snooze',
-    'Fix', 'File issue', 'Reply', 'Explain', 'Open', 'Copy', 'Snooze', 'Dismiss',
-    'Do it', 'File issue', 'Reply', 'Explain', 'Copy', 'Snooze', 'Dismiss',
+    'Done', 'Reply', 'Explain', 'Copy', 'Hand off', 'Snooze',
+    'Fix', 'File issue', 'Reply', 'Explain', 'Open', 'Copy', 'Hand off', 'Snooze', 'Dismiss',
+    'Do it', 'File issue', 'Reply', 'Explain', 'Copy', 'Hand off', 'Snooze', 'Dismiss',
   ])
   assert.equal(view.find({ type: 'Button', text: 'Fix' })?.props.variant, 'solid')
   assert.deepEqual(view.findAll({ type: 'Collapsible' }).map(c => c.props.title), ['1 closed'])
@@ -671,7 +711,7 @@ test('a tracked Codex agent uses the same rows and buttons as Claude', async () 
   assert.deepEqual(texts(view, 'Heading'), ['Codex'])
   assert.ok(view.find({ text: '1) Rename the folder to tools?' }))
   assert.ok(view.find({ text: 'Run the migration on staging' }))
-  assert.deepEqual(texts(view, 'Button'), ['Yes', 'No', 'Reply', 'Explain', 'Copy', 'Snooze', 'Dismiss', 'Done', 'Reply', 'Explain', 'Copy', 'Snooze'])
+  assert.deepEqual(texts(view, 'Button'), ['Yes', 'No', 'Reply', 'Explain', 'Copy', 'Snooze', 'Dismiss', 'Done', 'Reply', 'Explain', 'Copy', 'Hand off', 'Snooze'])
   assert.equal(view.find({ text: UNTRACKED_CODEX }), null)
   await clean(view)
 })
