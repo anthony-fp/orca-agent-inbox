@@ -26,6 +26,8 @@ export type Item = {
    * mod kept this reads as 'update'.
    */
   from: 'record' | 'update'
+  /** The file it is about, as the agent gave it; null when none or saved before the plugin kept it. */
+  path: string | null
 }
 
 /**

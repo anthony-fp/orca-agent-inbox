@@ -382,7 +382,7 @@ function Question({ section, row }: { section: InboxSection; row: LabelledRow })
           Reply
         </Button>
         <ExplainButton section={section} row={row} busy={busy} />
-        <CopyButton section={section} row={row} source={{ kind: 'question', title: row.text }} busy={busy} />
+        <CopyButton section={section} row={row} source={{ kind: 'question', title: row.text, path: row.path }} busy={busy} />
         <Button size="sm" variant="ghost" disabled={busy} onPress={() => press(section, row, { action: 'dismiss' })}>
           Dismiss
         </Button>
@@ -417,7 +417,7 @@ function Task({ section, row }: { section: InboxSection; row: LabelledRow }) {
           Reply
         </Button>
         <ExplainButton section={section} row={row} busy={busy} />
-        <CopyButton section={section} row={row} source={{ kind: 'task', title: row.text, steps: row.steps }} busy={busy} />
+        <CopyButton section={section} row={row} source={{ kind: 'task', title: row.text, steps: row.steps, path: row.path }} busy={busy} />
       </Row>
       {read(replying)[key] === true && (
         <ReplyField section={section} row={row} hint={`Your reply to ${section.agent === 'codex' ? 'Codex' : 'Claude'}`} busy={busy} />

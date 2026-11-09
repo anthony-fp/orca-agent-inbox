@@ -54,7 +54,7 @@
         },
         "path": {
           "type": "string",
-          "description": "For a finding: the file it is about, if one."
+          "description": "For a finding, a question or a task: the file it is about, if one."
         }
       },
       "required": [

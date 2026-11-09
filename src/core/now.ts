@@ -29,6 +29,8 @@ export type NowRow = {
   rec: string | null
   choices: Choice[]
   steps: Step[]
+  /** The file it is about, as the agent gave it, or null. */
+  path: string | null
 }
 
 /** One closed item, as the inbox's closed list shows it. */
@@ -123,7 +125,7 @@ export function nowRows(ledger: Ledger, now = 0): NowGroups {
       .sort((a, b) => b.turn - a.turn)
       .map(i => {
         const n = numbers.get(i.id)
-        return { id: i.id, handle: n === undefined ? '' : `${n})`, text: i.ask, age: age(i.at), rec: i.rec, choices: choices(i), steps: stepsOf(i.helps) }
+        return { id: i.id, handle: n === undefined ? '' : `${n})`, text: i.ask, age: age(i.at), rec: i.rec, choices: choices(i), steps: stepsOf(i.helps), path: i.path }
       })
   const closed = (kind: Item['kind']): ClosedGroup => {
     const all = ledger.closed.filter(c => c.kind === kind).reverse()

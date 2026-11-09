@@ -80,6 +80,7 @@ function upgradeItem(item: Item): Item {
     at: item.at ?? null,
     rec: recommendedOption(item.options, item.rec),
     from: item.from ?? 'update',
+    path: item.path ?? null,
   }
 }
 
@@ -136,7 +137,7 @@ const PERSON_ONLY_REASON =
 export type Update = {
   card: Card
   closed: { id: string; outcome: string }[]
-  added: (Omit<Item, 'id' | 'turn' | 'at' | 'helps' | 'from'> & { helps: Help[] })[]
+  added: (Omit<Item, 'id' | 'turn' | 'at' | 'helps' | 'from' | 'path'> & { helps: Help[] })[]
   helped: { id: string; help: Help }[]
   /** New options or a new recommendation for open questions. Null keeps what the question has. */
   updated: { id: string; options: string[] | null; rec: string | null }[]
@@ -701,7 +702,7 @@ export function applyUpdate(
       addedIds.push(null)
       continue
     }
-    items.push({ ...a, id: `i${nextId}`, turn, at: now, from: 'update' })
+    items.push({ ...a, id: `i${nextId}`, turn, at: now, from: 'update', path: null })
     addedIds.push(`i${nextId}`)
     created.add(`i${nextId}`)
     nextId += 1
@@ -720,7 +721,7 @@ export function applyUpdate(
       ledger.findings.some(f => restates(f.title, work)) ||
       repeatsClosed(ledger.closed, { ...todo, helps: [] }, promptAt)
     if (isKnown) continue
-    items.push({ ...todo, helps: [], id: `i${nextId}`, turn, at: now, from: 'update' })
+    items.push({ ...todo, helps: [], id: `i${nextId}`, turn, at: now, from: 'update', path: null })
     nextId += 1
     added += 1
   }
@@ -812,7 +813,7 @@ export type AgentItemResult =
  */
 export function addAgentItem(
   ledger: Ledger,
-  entry: Pick<Item, 'kind' | 'ask' | 'options' | 'rec' | 'helps'>,
+  entry: Pick<Item, 'kind' | 'ask' | 'options' | 'rec' | 'helps' | 'path'>,
   now: number,
 ): AgentItemResult {
   const candidate = { ...entry, label: null }

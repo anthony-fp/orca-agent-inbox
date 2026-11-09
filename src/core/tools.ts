@@ -44,7 +44,7 @@ const RECORD_SCHEMA = {
       type: 'string',
       description: 'For a finding: why it matters and what you would do, in one or two sentences.',
     },
-    path: { type: 'string', description: 'For a finding: the file it is about, if one.' },
+    path: { type: 'string', description: 'For a finding, a question or a task: the file it is about, if one.' },
   },
   required: ['kind'],
 }
@@ -124,8 +124,9 @@ export function recordItem(
   if (recInput !== '' && rec === null) return { ledger, result: 'Not recorded: rec must be one of the options.' }
   const steps = input.kind === 'task' ? list(input.steps, MAX_STEPS + 3, 4000) : []
   const helps = steps.flatMap(step => stepHelp(step) ?? []).slice(0, MAX_STEPS)
+  const path = cut(input.path, 300) || null
 
-  const r = addAgentItem(ledger, { kind: input.kind, ask, options, rec, helps }, now)
+  const r = addAgentItem(ledger, { kind: input.kind, ask, options, rec, helps, path }, now)
   if (r.is === 'open') return { ledger, result: 'Already open.' }
   if (r.is === 'closed')
     return { ledger, result: `Not recorded: ${closedHow(r.record)}. Ask it again only if they bring it up.` }

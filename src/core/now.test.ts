@@ -33,11 +33,12 @@ test('open questions keep their options and rec, number and age, and tasks come 
         { option: 'No', label: 'No', isRec: false, isFolded: false },
       ],
       steps: [],
+      path: null,
     },
-    { id: 'i2', handle: '2)', text: 'Cut CHANGELOG.md down to this release?', age: '2h', rec: null, choices: [], steps: [] },
+    { id: 'i2', handle: '2)', text: 'Cut CHANGELOG.md down to this release?', age: '2h', rec: null, choices: [], steps: [], path: null },
   ])
   assert.deepEqual(tasks, [
-    { id: 'i3', handle: '', text: 'Test pinch zoom on your Mac', age: '2h', rec: null, choices: [], steps: [] },
+    { id: 'i3', handle: '', text: 'Test pinch zoom on your Mac', age: '2h', rec: null, choices: [], steps: [], path: null },
   ])
 })
 
@@ -113,6 +114,13 @@ test('Copy on a finding writes its title in bold, its detail and its file as Mar
 
 test('Copy on a question with only its ask writes the ask in bold and nothing else', () => {
   assert.equal(rowCopyText({ kind: 'question', title: 'Rename greet.mjs to hello.mjs?' }), '**Rename greet.mjs to hello.mjs?**')
+})
+
+test('Copy on a question with a path writes the File line, and the row keeps the whole path', () => {
+  const item = { id: 'i1', kind: 'question' as const, label: null, ask: 'Keep the retry?', options: ['Yes'], rec: null, helps: [], turn: 0, at: 0, from: 'record' as const, path: '/repo/src/fetch.ts' }
+  const row = nowRows({ ...EMPTY, items: [item] }, 0).questions[0]!
+  assert.equal(row.path, '/repo/src/fetch.ts')
+  assert.equal(rowCopyText({ kind: 'question', title: row.text, path: row.path }), '**Keep the retry?**\n\nFile: `/repo/src/fetch.ts`')
 })
 
 test("Copy on a task with terminal steps writes only their commands, one per line; other steps don't count", () => {

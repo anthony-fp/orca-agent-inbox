@@ -623,6 +623,7 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
               { option: 'No', label: 'No', isRec: false, isFolded: false },
             ],
             steps: [],
+            path: null,
             label: null,
             explained: false,
           },

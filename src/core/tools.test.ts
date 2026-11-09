@@ -28,6 +28,7 @@ describe('items the agent recorded', () => {
     options: ['Redis', 'Memcached'],
     rec: null,
     helps: [],
+    path: null,
   }
   const recorded = (turn = 1) => addAgentItem({ ...EMPTY, turn }, ask, 1000).ledger
 
@@ -47,6 +48,16 @@ describe('items the agent recorded', () => {
     ] as const
     for (const [closing, result] of refusals)
       expect(recordItem(CLAUDE_CODE, closeItem(recorded(), 'i1', closing, 1500), ask, 2000).result).toStartWith(result)
+  })
+
+  test('a recorded question and task keep the file they are about, cut at 300 characters', () => {
+    const question = { kind: 'question', ask: 'Keep the retry in fetch.ts?', options: ['Yes', 'No'], path: ' src/fetch.ts ' }
+    const asked = recordItem(ORCA, EMPTY, question, 1000).ledger
+    const task = { kind: 'task', ask: 'Sign in to the registry', path: `src/${'a'.repeat(400)}.ts` }
+    const both = recordItem(ORCA, asked, task, 2000).ledger
+    assert.deepEqual(both.items.map(i => i.path), ['src/fetch.ts', `src/${'a'.repeat(296)}`])
+    const none = recordItem(ORCA, EMPTY, { ...question, path: undefined }, 1000).ledger
+    assert.equal(none.items[0]?.path, null)
   })
 })
 

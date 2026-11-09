@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
 import { buildPrompt, latestBatch } from './model-text'
-import { EMPTY, addAgentItem, applyExchangeUpdate, applyUpdate, closeItem, parseReply } from './ledger'
+import { EMPTY, addAgentItem, applyExchangeUpdate, applyUpdate, closeItem, parseReply, upgradeLedger } from './ledger'
 
 /** Drops undefined fields, as the source suite's toEqual ignores them. */
 function plain(value: unknown): unknown {
@@ -134,7 +134,7 @@ describe('applyUpdate', () => {
   })
 
   test('questions in the same frame from one batch are all added, and a later turn restating one is not', () => {
-    const question = (ask: string) => ({ kind: 'question' as const, ask, options: [], rec: null, helps: [] })
+    const question = (ask: string) => ({ kind: 'question' as const, ask, options: [], rec: null, helps: [], path: null })
     const license = addAgentItem(EMPTY, question('Which license do you prefer for greet?'), 1).ledger
     const both = addAgentItem(license, question('Which minimum Node version do you prefer for greet?'), 2)
     expect(both.is).toBe('added')
@@ -209,7 +209,7 @@ describe('applyUpdate', () => {
     })
 
   test('a follow-up to an answered question is recorded, and a rewording of a dismissed one is not', () => {
-    const question = (ask: string) => ({ kind: 'question' as const, ask, options: [], rec: null, helps: [] })
+    const question = (ask: string) => ({ kind: 'question' as const, ask, options: [], rec: null, helps: [], path: null })
     const asked = addAgentItem({ ...EMPTY, turn: 1 }, question('Which cache should the product API use?'), 1).ledger
     const followUp = question('Which cache size should the product API use?')
     const answered = closeItem(asked, 'i1', { how: 'answered', outcome: 'In-memory' }, 2)
@@ -221,7 +221,7 @@ describe('applyUpdate', () => {
   })
 
   test('the inbox model can add a question again with choices after the person answered it with List the choices', () => {
-    const question = { kind: 'question' as const, ask: 'Where should the job run?', options: [], rec: null, helps: [] }
+    const question = { kind: 'question' as const, ask: 'Where should the job run?', options: [], rec: null, helps: [], path: null }
     const asked = addAgentItem({ ...EMPTY, turn: 1 }, question, 1).ledger
     const reply = parseReply('NEW: decide | - | Where should the job run? | Nightly / Hourly | Nightly')!
     const listed = closeItem(asked, 'i1', { how: 'answered', outcome: 'List the choices' }, 2)
@@ -278,7 +278,7 @@ describe('applyExchangeUpdate', () => {
 
   // The person typed "1" for an earlier question; during the reply the agent recorded the Snooze question, with a
   // turn stamp 2 above the exchange's (subagent hand-backs raise the active turn, not the person-prompt count).
-  const snooze = { kind: 'question' as const, ask: 'How long should a snoozed row stay hidden?', options: ['1 hour', 'Until tomorrow 9am', 'Pick 1 hour or tomorrow'], rec: null, helps: [] }
+  const snooze = { kind: 'question' as const, ask: 'How long should a snoozed row stay hidden?', options: ['1 hour', 'Until tomorrow 9am', 'Pick 1 hour or tomorrow'], rec: null, helps: [], path: null }
   const recordedDuring = (startedAt: number) => {
     const recorded = addAgentItem({ ...EMPTY, turn: 8 }, snooze, 5000).ledger
     const ledger = { ...recorded, turn: 6 }
@@ -327,4 +327,15 @@ describe('buildPrompt', () => {
     expect(prompt).toContain('edited file-399.ts')
     expect(prompt).toContain('…[cut]')
   })
+})
+
+test('an item saved before items kept a path upgrades to path null, open and closed', () => {
+  const question = (ask: string) => ({ kind: 'question' as const, ask, options: ['Yes'], rec: null, helps: [], path: null })
+  const two = addAgentItem(addAgentItem(EMPTY, question('Keep the cache?'), 1).ledger, question('Ship it now?'), 2).ledger
+  const saved = closeItem(two, 'i1', { how: 'answered', outcome: 'Yes' }, 3)
+  const old = JSON.parse(JSON.stringify(saved, (key, value) => (key === 'path' ? undefined : value)))
+  assert.equal(old.items[0].path, undefined)
+  const upgraded = upgradeLedger(old)
+  assert.deepEqual(upgraded.items.map(i => i.path), [null])
+  assert.deepEqual(upgraded.closed.map(c => c.item?.path), [null])
 })
