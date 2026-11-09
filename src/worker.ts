@@ -1,7 +1,6 @@
 // The plugin's worker. Orca transpiles this file when it loads: no build step.
 // It tags each Claude Code launch, feeds the turn tracker from status changes, answers the panel's requests
 // (src/protocol.ts), runs presses (src/presses.ts) and answers the agent's tools and prompt hook (src/socket.ts).
-import { spawn } from 'node:child_process'
 import { readFile, readdir } from 'node:fs/promises'
 import type { Server } from 'node:net'
 import { homedir } from 'node:os'
@@ -9,6 +8,7 @@ import { dirname, join } from 'node:path'
 
 import type { OrcaWorkerApi } from 'orca/worker'
 
+import { copyToClipboard } from './clipboard'
 import { parsePlan, planNote, planPath, type PlanView } from './core/plan'
 import { codexResumeStart, codexToolTurn, readCodexTurn, rolloutFor } from './core/codex-transcript'
 import { tagLaunch, tokenize } from './launch'
@@ -58,17 +58,6 @@ async function listDirs(path: string): Promise<string[]> {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return []
     throw e
   }
-}
-
-/** `pbcopy` on macOS. Elsewhere there is no clipboard command, so the panel shows the text to select. */
-function copyToClipboard(text: string): Promise<void> {
-  if (process.platform !== 'darwin') return Promise.reject(new Error('no clipboard command on this system'))
-  return new Promise((resolve, reject) => {
-    const child = spawn('pbcopy', [], { stdio: ['pipe', 'ignore', 'ignore'] })
-    child.on('error', reject)
-    child.on('close', code => (code === 0 ? resolve() : reject(new Error(`pbcopy exited with ${code}`))))
-    child.stdin.end(text)
-  })
 }
 
 /** `agent` is Orca's name for the agent, such as `claude` or `codex`; an older Orca may leave it out. */
@@ -574,7 +563,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     model: (prompt, source, codexHome) => runInboxModel(prompt, { source, ...(codexHome === undefined ? {} : { codexHome }) }),
     readFile: readOrNull,
     listDirs,
-    copy: copyToClipboard,
+    copy: text => copyToClipboard(text),
     tools: liveTools(process.env),
   })
 }

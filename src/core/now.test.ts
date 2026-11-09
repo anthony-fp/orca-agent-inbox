@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import { EMPTY, applyUpdate, closeItem, parseReply } from './ledger'
-import { OPTIONS_FOLD_AT, choices, findingRows, nowRows, shortAgo, stepsOf } from './now'
+import { OPTIONS_FOLD_AT, choices, findingRows, nowRows, rowCopyText, shortAgo, stepsOf } from './now'
 
 const REPLY = [
   'NEW: decide | 1 | Rename greet.mjs to hello.mjs? | Yes / No | yes',
@@ -102,4 +102,28 @@ test('a Fix sent for a finding a question had asked about reads the fix label on
   const asked = { id: 'f90', kind: 'issue' as const, title: 'Retry', detail: 'No delay.', path: null, at, askedAs: 'i2' }
   const rows = findingRows({ ...EMPTY, findings: [asked], closedFindings: [] }, at, { f90: at })
   assert.deepEqual(rows.closed.issues.shown.map(f => [f.id, f.outcome]), [['f90', 'Fix']])
+})
+
+test('Copy on a finding writes its title in bold, its detail and its file as Markdown', () => {
+  const text = rowCopyText({ kind: 'finding', title: 'The retry loop never backs off', detail: 'Each retry fires at once.', path: 'src/fetch.ts' })
+  assert.equal(text, '**The retry loop never backs off**\n\nEach retry fires at once.\n\nFile: `src/fetch.ts`')
+  const open = findingRows({ ...EMPTY, findings: [{ id: 'f1', kind: 'issue', title: 'T', detail: 'D', path: '/repo/src/a.ts', at: 0 }] }, 0, {})
+  assert.deepEqual([open.issues[0]?.path, open.issues[0]?.fileName], ['/repo/src/a.ts', 'a.ts'], 'a finding row keeps its whole path for Copy')
+})
+
+test('Copy on a question with only its ask writes the ask in bold and nothing else', () => {
+  assert.equal(rowCopyText({ kind: 'question', title: 'Rename greet.mjs to hello.mjs?' }), '**Rename greet.mjs to hello.mjs?**')
+})
+
+test("Copy on a task with terminal steps writes only their commands, one per line; other steps don't count", () => {
+  const steps = stepsOf([
+    { kind: 'terminal', command: 'npm run migrate', name: 'migration' },
+    { kind: 'link', url: 'https://example.com/runbook', name: 'runbook' },
+    { kind: 'terminal', command: 'npm run seed', name: null },
+  ])
+  assert.equal(rowCopyText({ kind: 'task', title: 'Migrate staging', steps }), 'npm run migrate\nnpm run seed')
+  const noTerminal = stepsOf([{ kind: 'run', command: 'npm test', name: null }])
+  assert.equal(rowCopyText({ kind: 'task', title: 'Run the tests', steps: noTerminal }), '**Run the tests**')
+  // Only a task copies commands: a question with a terminal step copies its Markdown block.
+  assert.equal(rowCopyText({ kind: 'question', title: 'Migrate now?', steps }), '**Migrate now?**')
 })

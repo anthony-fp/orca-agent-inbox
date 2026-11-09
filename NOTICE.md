@@ -25,3 +25,5 @@ Codex transcript code was copied from `github.com/anthony-fp/inbox` at commit `a
 | `src/core/codex-conversation.ts` | `hooks/conversation.ts` | The `Turn` type and `flattenConversation` only |
 | `src/core/codex-activity.ts` | `codex/src/core.ts` | The `activityOf` and `patchFiles` helpers only |
 | `src/core/model-text.ts` | `codex/src/texts.ts` | Added the `ORCA_CODEX` host with Orca tool names |
+
+`src/clipboard.ts` adapts the clipboard table, `pipeTo` and `copyText` from `src/worker.ts` in [felix-lj-ct/orca-agent-inbox](https://github.com/felix-lj-ct/orca-agent-inbox), under its MIT license, Copyright (c) 2026 Felix Li.

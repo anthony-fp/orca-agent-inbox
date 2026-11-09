@@ -2,7 +2,7 @@
 import { assert, mockHost, mount, test } from 'orca/testing'
 import * as panel from './panel'
 import { parsePlan } from './core/plan'
-import { CLOSED_FINDINGS, CODEX_ONLY, EMPTY_VIEW, FINDINGS, MANY_OPTIONS, MIXED, ONE_AGENT, PLAN, STEPS, THREE_AGENTS, section } from './panel-views'
+import { CLOSED_FINDINGS, CODEX_ONLY, EMPTY_VIEW, FINDINGS, MANY_OPTIONS, MIXED, ONE_AGENT, PLAN, STEPS, THREE_AGENTS, row, section } from './panel-views'
 import type { InboxView } from './protocol'
 import type { PressInput, PressOutcome } from './presses'
 
@@ -13,6 +13,10 @@ async function open(view: InboxView, press?: (input: PressInput) => PressOutcome
   const host = mockHost({ requests: { 'inbox.view': () => view, ...(press ? { 'inbox.press': press } : {}) } })
   return mount(panel, { host })
 }
+
+/** A label's Copy, which copies the text a press left: an extra-small button, unlike each row's own Copy. */
+const labelCopies = (view: Awaited<ReturnType<typeof mount>>) =>
+  view.findAll({ type: 'Button', text: 'Copy' }).filter(b => b.props.size === 'xs')
 
 const NO_TOOLS = /^No tools: /
 const UNTRACKED_CODEX = 'Started before Agent Inbox; not tracked.'
@@ -46,9 +50,9 @@ test('one agent: its title, then Questions and Tasks with their counts and butto
   assert.ok(view.find({ text: '2h' }))
   assert.ok(view.find({ text: 'Run the migration on staging' }))
   assert.ok(view.find({ text: '5m' }))
-  // The inbox's rowActions (hooks/view.ts), then Explain before Dismiss: question options, Reply, Explain, Dismiss;
-  // task Done, Reply, Explain. No field until Reply.
-  assert.deepEqual(texts(view, 'Button'), ['Yes', 'No', 'Reply', 'Explain', 'Dismiss', 'Done', 'Reply', 'Explain'])
+  // The inbox's rowActions (hooks/view.ts), then Explain and Copy before Dismiss: question options, Reply, Explain,
+  // Copy, Dismiss; task Done, Reply, Explain, Copy. No field until Reply.
+  assert.deepEqual(texts(view, 'Button'), ['Yes', 'No', 'Reply', 'Explain', 'Copy', 'Dismiss', 'Done', 'Reply', 'Explain', 'Copy'])
   assert.equal(view.find({ type: 'Input' }), null)
   await clean(view)
 })
@@ -56,11 +60,11 @@ test('one agent: its title, then Questions and Tasks with their counts and butto
 test('the recommended option comes first, marked, and options past five fold behind "All N options"', async () => {
   const view = await open(MANY_OPTIONS)
   const order = ['Bun (recommended)', 'Node 20', 'Node 22', 'Deno']
-  assert.deepEqual(texts(view, 'Button'), [...order, 'All 6 options', 'Reply', 'Explain', 'Dismiss'])
+  assert.deepEqual(texts(view, 'Button'), [...order, 'All 6 options', 'Reply', 'Explain', 'Copy', 'Dismiss'])
   assert.equal(view.find({ type: 'Button', text: 'Bun (recommended)' })?.props.variant, 'solid')
   assert.equal(view.find({ type: 'Button', text: 'Node 20' })?.props.variant, 'outline')
   await view.press({ type: 'Button', text: 'All 6 options' })
-  assert.deepEqual(texts(view, 'Button'), [...order, 'Workers', 'Lambda', 'Reply', 'Explain', 'Dismiss'])
+  assert.deepEqual(texts(view, 'Button'), [...order, 'Workers', 'Lambda', 'Reply', 'Explain', 'Copy', 'Dismiss'])
   await clean(view)
 })
 
@@ -72,12 +76,14 @@ test("steps come after a question's options and before a task's Done, as the inb
     'Copy env line',
     'Reply',
     'Explain',
+    'Copy',
     'Dismiss',
     'Run Friday check query',
     'Open runbook',
     'Done',
     'Reply',
     'Explain',
+    'Copy',
   ])
   await clean(view)
 })
@@ -151,7 +157,7 @@ test('three agents: one section each, newest first, with the labels the worker g
   assert.ok(view.find({ text: '✓ Answered' }))
   assert.deepEqual(texts(view, 'Button').slice(0, 2), ['Drop it (recommended)', 'Keep it'])
   // Copy shows only on the labels that carry text to copy.
-  assert.equal(view.findAll({ type: 'Button', text: 'Copy' }).length, 2)
+  assert.equal(labelCopies(view).length, 2)
   await clean(view)
 })
 
@@ -167,7 +173,7 @@ test('Copy writes the clipboard through the worker and reads "✓ Copied"', asyn
     },
   })
   const view = await mount(panel, { host })
-  const [first] = view.findAll({ type: 'Button', text: 'Copy' })
+  const [first] = labelCopies(view)
   assert.ok(first)
   await view.press(first)
   assert.deepEqual(copied, ['Re "Which port should the dev server use?": 4000'])
@@ -179,13 +185,63 @@ test('Copy writes the clipboard through the worker and reads "✓ Copied"', asyn
 test('a Copy the worker cannot do shows the answer text to select, and Hide closes it', async () => {
   const host = mockHost({ requests: { 'inbox.view': () => THREE_AGENTS, 'inbox.copy': () => ({ ok: false, error: 'no clipboard command on this system' }) } })
   const view = await mount(panel, { host })
-  await view.press({ type: 'Button', text: 'Copy' })
+  const [first] = labelCopies(view)
+  assert.ok(first)
+  await view.press(first)
   assert.equal(view.find({ text: '✓ Copied' }), null)
   const code = view.find({ type: 'CodeView' })
   assert.equal(code?.props.code, 'Re "Which port should the dev server use?": 4000')
   assert.equal(code?.props.label, 'Could not copy: select the text to copy it')
   await view.press({ type: 'Button', text: 'Hide' })
   assert.equal(view.find({ type: 'CodeView' }), null)
+  await clean(view)
+})
+
+/** Mounts a view whose `inbox.copy` records each text and answers with `answer`. */
+async function withCopy(view: InboxView, answer: { ok: true } | { ok: false; error: string } = { ok: true }) {
+  const copied: string[] = []
+  const host = mockHost({ requests: { 'inbox.view': () => view, 'inbox.copy': (input: { text: string }) => (copied.push(input.text), answer) } })
+  return { view: await mount(panel, { host }), copied }
+}
+
+/** Each row kind's own Copy: a small outline button, unlike a label's extra-small one. */
+const rowCopies = (view: Awaited<ReturnType<typeof mount>>) =>
+  view.findAll({ type: 'Button', text: 'Copy' }).filter(b => b.props.size === 'sm')
+
+test('Copy on a row writes its Markdown block, or a task\'s terminal commands, through the worker and reads "✓ Copied"', async () => {
+  const commands = row('t2', 'Migrate staging', {
+    helps: [
+      { kind: 'terminal', command: 'npm run migrate', name: 'migration' },
+      { kind: 'terminal', command: 'npm run seed', name: 'seed' },
+    ],
+  })
+  const [s] = FINDINGS.sections
+  const { view, copied } = await withCopy({ ...FINDINGS, sections: [{ ...s, questions: [row('q1', 'Keep the old parser?')], tasks: [commands] }] })
+  const copies = rowCopies(view)
+  assert.equal(copies.length, 4, 'a question, a task and two findings each have Copy')
+  for (const button of copies) await view.press(button)
+  assert.deepEqual(copied, [
+    '**Keep the old parser?**',
+    'npm run migrate\nnpm run seed',
+    '**The retry loop never backs off**\n\nEach retry fires at once, so a down server gets a flood.\n\nFile: `src/fetch.ts`',
+    '**Cache the parsed config**\n\nFound while working on the task.',
+  ])
+  const done = view.findAll({ text: '✓ Copied' })
+  assert.equal(done.length, 4, 'each row reads it')
+  assert.equal(done[0]?.props.tone, 'success')
+  await clean(view)
+})
+
+test('a Copy the worker cannot do shows why in red on the row, and the text to select', async () => {
+  const { view, copied } = await withCopy(ONE_AGENT, { ok: false, error: 'no clipboard tool worked (tried wl-copy, xclip, xsel)' })
+  const [copy] = rowCopies(view)
+  assert.ok(copy)
+  await view.press(copy)
+  assert.deepEqual(copied, ['**Rename the folder to tools?**'])
+  assert.equal(view.find({ text: '✓ Copied' }), null)
+  const why = view.find({ text: 'Could not copy: no clipboard tool worked (tried wl-copy, xclip, xsel)' })
+  assert.equal(why?.props.tone, 'danger')
+  assert.equal(view.find({ type: 'CodeView' })?.props.code, '**Rename the folder to tools?**')
   await clean(view)
 })
 
@@ -218,7 +274,7 @@ test('an option press shows Sending… at once, sends the drawn row, then shows 
     { terminalId: 'terminal-1', sessionId: 'session-1', drawn: 'drawn-1', id: 'q1', action: 'answer', answer: 'Yes' },
   ])
   assert.ok(view.find({ text: 'Waits for the agent' }))
-  assert.ok(view.find({ type: 'Button', text: 'Copy' }))
+  assert.equal(labelCopies(view).length, 1)
   await clean(view)
 })
 
@@ -318,9 +374,9 @@ test('findings: Issues and Opportunities after Tasks, each row with its mark, de
   assert.ok(view.find({ text: '✦' }))
   // The inbox's actionsOf (hooks/view.ts) less Discuss: Fix or Do it, File issue, Reply, Explain, Dismiss.
   assert.deepEqual(texts(view, 'Button'), [
-    'Done', 'Reply', 'Explain',
-    'Fix', 'File issue', 'Reply', 'Explain', 'Dismiss',
-    'Do it', 'File issue', 'Reply', 'Explain', 'Dismiss',
+    'Done', 'Reply', 'Explain', 'Copy',
+    'Fix', 'File issue', 'Reply', 'Explain', 'Copy', 'Dismiss',
+    'Do it', 'File issue', 'Reply', 'Explain', 'Copy', 'Dismiss',
   ])
   assert.equal(view.find({ type: 'Button', text: 'Fix' })?.props.variant, 'solid')
   assert.deepEqual(view.findAll({ type: 'Collapsible' }).map(c => c.props.title), ['1 closed'])
@@ -505,7 +561,7 @@ test('a tracked Codex agent uses the same rows and buttons as Claude', async () 
   assert.deepEqual(texts(view, 'Heading'), ['Codex'])
   assert.ok(view.find({ text: '1) Rename the folder to tools?' }))
   assert.ok(view.find({ text: 'Run the migration on staging' }))
-  assert.deepEqual(texts(view, 'Button'), ['Yes', 'No', 'Reply', 'Explain', 'Dismiss', 'Done', 'Reply', 'Explain'])
+  assert.deepEqual(texts(view, 'Button'), ['Yes', 'No', 'Reply', 'Explain', 'Copy', 'Dismiss', 'Done', 'Reply', 'Explain', 'Copy'])
   assert.equal(view.find({ text: UNTRACKED_CODEX }), null)
   await clean(view)
 })

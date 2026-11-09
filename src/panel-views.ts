@@ -52,10 +52,11 @@ export function finding(
   id: string,
   kind: Finding['kind'],
   title: string,
-  over: { detail?: string; fileName?: string | null; label?: LabelledFinding['label']; explained?: boolean } = {},
+  over: { detail?: string; path?: string | null; label?: LabelledFinding['label']; explained?: boolean } = {},
 ): LabelledFinding {
-  const { detail = 'Found while working on the task.', fileName = null, label = null, explained = false } = over
-  return { id, kind, mark: FINDING_GROUPS[kind].mark, title, detail, fileName, age: '1h', fix: fixLabel({ kind }), label, explained }
+  const { detail = 'Found while working on the task.', path = null, label = null, explained = false } = over
+  const fileName = path === null ? null : (path.split('/').pop() ?? path)
+  return { id, kind, mark: FINDING_GROUPS[kind].mark, title, detail, path, fileName, age: '1h', fix: fixLabel({ kind }), label, explained }
 }
 
 export const EMPTY_VIEW: InboxView = { sections: [], others: [], untracked: 0, unread: 0 }
@@ -162,7 +163,7 @@ export const FINDINGS: InboxView = {
       tasks: [row('t1', 'Run the migration on staging')],
       findings: {
         issues: [
-          finding('i4', 'issue', 'The retry loop never backs off', { detail: 'Each retry fires at once, so a down server gets a flood.', fileName: 'fetch.ts' }),
+          finding('i4', 'issue', 'The retry loop never backs off', { detail: 'Each retry fires at once, so a down server gets a flood.', path: 'src/fetch.ts' }),
         ],
         opportunities: [finding('i5', 'opportunity', 'Cache the parsed config')],
         closed: {

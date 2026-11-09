@@ -23,7 +23,7 @@ import {
   Text,
   update,
 } from 'orca'
-import type { ClosedGroup, Step } from './core/now'
+import { rowCopyText, type ClosedGroup, type CopySource, type Step } from './core/now'
 import { planLines, type PlanLine } from './core/plan'
 import type { CopyOutcome, InboxSection, InboxView, OtherAgent } from './protocol'
 import type { LabelledFinding, LabelledRow, PressInput, RowLabel } from './presses'
@@ -178,6 +178,29 @@ async function localStep(s: InboxSection, row: LabelledRow, step: Step): Promise
   if (label.copy !== null) update(shown, m => ({ ...m, [`step:${key}`]: true }))
 }
 
+/**
+ * A row's Copy: the worker writes the row's text to the clipboard (`rowCopyText`), and the row reads "✓ Copied", or
+ * in red why it could not, with the text to select.
+ */
+async function copyRow(s: InboxSection, row: Pressable, source: CopySource): Promise<void> {
+  const key = rowKey(s, row.id)
+  const text = rowCopyText(source)
+  update(stepResults, m => ({ ...m, [key]: { text: 'Copying…', tone: 'muted', copy: null } }))
+  const error = await copyText(text)
+  const label: RowLabel = error === null ? { text: '✓ Copied', tone: 'success', copy: null } : { text: `Could not copy: ${error}`, tone: 'danger', copy: text }
+  update(stepResults, m => ({ ...m, [key]: label }))
+  if (error !== null) update(shown, m => ({ ...m, [`step:${key}`]: true }))
+}
+
+/** Copy on any row, after Explain (and Open, when a row has it) and before Hand off, Snooze and Dismiss. */
+function CopyButton({ section, row, source, busy }: { section: InboxSection; row: Pressable; source: CopySource; busy: boolean }) {
+  return (
+    <Button size="sm" variant="outline" disabled={busy} onPress={() => copyRow(section, row, source)}>
+      Copy
+    </Button>
+  )
+}
+
 /** A row's step buttons: a run step goes to the agent through the send check; any other step runs here. */
 function StepButtons({ section, row, busy }: { section: InboxSection; row: LabelledRow; busy: boolean }) {
   return (
@@ -327,7 +350,7 @@ function RowHead({ row }: { row: LabelledRow }) {
 /**
  * A question, with buttons in the inbox's order (`rowActions` and `rowKeyPlan` in `hooks/view.ts`): each option, the
  * recommended one first; "All N options" after the fourth when there are more than five; its steps; then Reply,
- * Explain and Dismiss.
+ * Explain, Copy and Dismiss.
  */
 function Question({ section, row }: { section: InboxSection; row: LabelledRow }) {
   const { key, label, busy } = rowState(section, row)
@@ -359,6 +382,7 @@ function Question({ section, row }: { section: InboxSection; row: LabelledRow })
           Reply
         </Button>
         <ExplainButton section={section} row={row} busy={busy} />
+        <CopyButton section={section} row={row} source={{ kind: 'question', title: row.text }} busy={busy} />
         <Button size="sm" variant="ghost" disabled={busy} onPress={() => press(section, row, { action: 'dismiss' })}>
           Dismiss
         </Button>
@@ -378,7 +402,7 @@ function ExplainButton({ section, row, busy }: { section: InboxSection; row: Lab
   )
 }
 
-/** A task: its whole text with its age, then its steps, Done, Reply (`rowActions` in `hooks/view.ts`) and Explain. */
+/** A task: its whole text with its age, then its steps, Done, Reply (`rowActions` in `hooks/view.ts`), Explain and Copy. */
 function Task({ section, row }: { section: InboxSection; row: LabelledRow }) {
   const { key, label, busy } = rowState(section, row)
   return (
@@ -393,6 +417,7 @@ function Task({ section, row }: { section: InboxSection; row: LabelledRow }) {
           Reply
         </Button>
         <ExplainButton section={section} row={row} busy={busy} />
+        <CopyButton section={section} row={row} source={{ kind: 'task', title: row.text, steps: row.steps }} busy={busy} />
       </Row>
       {read(replying)[key] === true && (
         <ReplyField section={section} row={row} hint={`Your reply to ${section.agent === 'codex' ? 'Codex' : 'Claude'}`} busy={busy} />
@@ -441,7 +466,7 @@ const FINDING_TONES = { issue: 'warning', opportunity: 'success' } as const
 
 /**
  * An issue or opportunity: its mark and title with the age on the right, its detail and file, then the inbox's
- * finding buttons (`actionsOf` in `hooks/view.ts`) less Discuss: Fix or Do it, File issue, Reply, Explain, Dismiss.
+ * finding buttons (`actionsOf` in `hooks/view.ts`) less Discuss: Fix or Do it, File issue, Reply, Explain, Copy, Dismiss.
  */
 function Finding({ section, row }: { section: InboxSection; row: LabelledFinding }) {
   const { key, label, busy } = rowState(section, row)
@@ -475,6 +500,7 @@ function Finding({ section, row }: { section: InboxSection; row: LabelledFinding
           Reply
         </Button>
         <ExplainButton section={section} row={row} busy={busy} />
+        <CopyButton section={section} row={row} source={{ kind: 'finding', title: row.title, detail: row.detail, path: row.path }} busy={busy} />
         <Button size="sm" variant="ghost" disabled={busy} onPress={() => press(section, row, { action: 'dismiss' })}>
           Dismiss
         </Button>

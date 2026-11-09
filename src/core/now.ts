@@ -153,6 +153,8 @@ export type FindingRow = {
   mark: string
   title: string
   detail: string
+  /** The file it is about, as the agent gave it, or null. */
+  path: string | null
   /** The file's name, as `baseName` gives it, or null. */
   fileName: string | null
   age: string
@@ -189,6 +191,7 @@ export function findingRows(ledger: Ledger, now = 0, fixesSent: Record<string, n
         mark: FINDING_GROUPS[kind].mark,
         title: f.title,
         detail: f.detail,
+        path: f.path,
         fileName: f.path ? baseName(f.path) : null,
         age: shortAgo(now - f.at),
         fix: fixLabel(f),
@@ -207,4 +210,21 @@ export function findingRows(ledger: Ledger, now = 0, fixesSent: Record<string, n
   }
 
   return { issues: open('issue'), opportunities: open('opportunity'), closed: { issues: closed('issue'), opportunities: closed('opportunity') } }
+}
+
+/** What a row's Copy press copies: its title, ask or text, and its detail and file when it has them. */
+export type CopySource = { kind: 'question' | 'task' | 'finding'; title: string; detail?: string; path?: string | null; steps?: Step[] }
+
+/**
+ * The text a row's Copy writes. A task with `terminal` steps copies their commands, one per line, and nothing else.
+ * Every other row copies a Markdown block: its title in bold, then its detail and its file when it has them.
+ */
+export function rowCopyText(row: CopySource): string {
+  if (row.kind === 'task') {
+    const commands = (row.steps ?? []).flatMap(s => s.helps.flatMap(h => (h.kind === 'terminal' ? [h.command] : [])))
+    if (commands.length > 0) return commands.join('\n')
+  }
+  return [`**${row.title}**`, row.detail || null, row.path ? `File: \`${row.path}\`` : null]
+    .filter(part => part !== null)
+    .join('\n\n')
 }
