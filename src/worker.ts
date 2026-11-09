@@ -103,7 +103,7 @@ function untaggedReason(agent: string, command: string): string {
   return 'unparseable'
 }
 
-export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): Promise<void> } {
+export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening: Promise<void>; close(): Promise<void> } {
   const log = (m: string) => orca.log(m)
   const launchTools = deps.tools
     ? stableBinPaths(deps.tools.socketPath, dirname(deps.tools.mcpServer)).then(paths => ({ ...deps.tools!, ...paths }))
@@ -545,6 +545,8 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { close(): 
   })
 
   return {
+    /** Settles once the socket file answers, or once listening failed. */
+    listening: server.then(() => undefined),
     /** Closes the socket and removes its file. */
     async close(): Promise<void> {
       const s = await server

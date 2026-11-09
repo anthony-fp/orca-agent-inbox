@@ -77,6 +77,8 @@ async function setup(opts: { state?: State; files?: Record<string, string>; unre
   }
   let made: ReturnType<typeof createWorker> | null = null
   const worker = await mountWorker({ default: (orca: Parameters<typeof createWorker>[0]) => (made = createWorker(orca, deps)) }, { host })
+  // listen() does real file work, so the fake clock's ticks may end before the socket file exists.
+  await made?.listening
   await time.run()
   const saved = () => (host.data() as { storage: Record<string, CurrentState> }).storage.state
   return { worker, host, time, files, reads, models, saved, copied, close: () => made?.close() }
