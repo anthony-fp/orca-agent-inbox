@@ -24,8 +24,9 @@ export type TerminalStatus = 'working' | 'blocked' | 'waiting' | 'done'
 /** What the panel shows on a row after a press. `copy` is the text a Copy button copies. */
 export type RowLabel = { text: string; tone: 'muted' | 'success' | 'danger'; copy: string | null }
 
-export type LabelledRow = NowRow & { label: RowLabel | null }
-export type LabelledFinding = FindingRow & { label: RowLabel | null }
+/** `explained`: the row's last press was Explain, so its Explain button reads "Explain again". */
+export type LabelledRow = NowRow & { label: RowLabel | null; explained: boolean }
+export type LabelledFinding = FindingRow & { label: RowLabel | null; explained: boolean }
 export type LabelledFindings = Omit<FindingGroups, 'issues' | 'opportunities'> & {
   issues: LabelledFinding[]
   opportunities: LabelledFinding[]
@@ -41,9 +42,10 @@ export type PressInput = {
   /**
    * `answer` sends a question's option, which closes the row when its turn runs. `reply` sends typed words on any
    * row; the row stays open and the inbox model decides, as the inbox does. `step` asks the agent to run a step's
-   * command. `fix` and `issue` hand a finding to the agent.
+   * command. `fix` and `issue` hand a finding to the agent. `explain` asks the agent what a row is about; the row
+   * stays open on the turn that explains it.
    */
-  action: 'answer' | 'reply' | 'done' | 'dismiss' | 'step' | 'fix' | 'issue'
+  action: 'answer' | 'reply' | 'done' | 'dismiss' | 'step' | 'fix' | 'issue' | 'explain'
   /** The option, for `answer`, or the typed words, for `reply`. */
   answer?: string
   /** For `step`: its place among the row's steps and its label, which must still match. */
@@ -87,6 +89,16 @@ export function answerText(item: Item, answer: string): string {
   return oneLine(item.kind === 'task' ? `Re the task you left for me, "${item.ask}": ${answer}` : `Re "${item.ask}": ${answer}`)
 }
 
+/** The inbox mod's message for an Explain press on a question or task (`messages.explain` in `hooks/presses.ts`), on one line. */
+export function explainText(item: Item): string {
+  const what =
+    item.kind === 'task'
+      ? 'this task you left for me is about: why it came up, and what each choice would mean'
+      : 'this question you asked me is about: why it came up, what each choice would mean, and which you would pick'
+  const options = item.options.length > 0 ? `\nOptions: ${item.options.join(' / ')}` : ''
+  return oneLine(`Remind me what ${what}. Don't act on it yet.\n"${item.ask}"${options}`)
+}
+
 /** The inbox mod's message for a step's command (`messages.run` in `hooks/presses.ts`), on one line. */
 export function runText(item: Item, command: string): string {
   return oneLine(`For "${item.ask}", run this:\n\`\`\`\n${command}\n\`\`\``)
@@ -94,6 +106,9 @@ export function runText(item: Item, command: string): string {
 
 /** `ISSUE_LABEL` in the inbox repo's `hooks/presses.ts`. */
 export const ISSUE_LABEL = 'File issue'
+
+/** The Explain button's label. */
+export const EXPLAIN_LABEL = 'Explain'
 
 /** `findingBody` in `hooks/presses.ts`. */
 function findingBody(finding: Finding): string[] {
@@ -104,14 +119,16 @@ function findingBody(finding: Finding): string[] {
   ]
 }
 
-/** The inbox mod's message for a finding (`messages.finding` in `hooks/presses.ts`, less Explain and Discuss), on one line. */
-export function findingText(finding: Finding, how: 'address' | 'issue' | 'typed', words = ''): string {
+/** The inbox mod's message for a finding (`messages.finding` in `hooks/presses.ts`, less Discuss), on one line. */
+export function findingText(finding: Finding, how: 'address' | 'issue' | 'explain' | 'typed', words = ''): string {
   const opening =
     how === 'address'
       ? 'Please address this finding you recorded:'
       : how === 'issue'
         ? "Please file an issue for this finding you recorded, in the issue tracker you have tools for. First check whether one already exists, and if it does, use it instead of filing a duplicate. Then close the finding with the issue's key or number as the reason, and give me its link. If you have no tools for an issue tracker, say so and leave the finding open."
-        : 'About this finding you recorded:'
+        : how === 'explain'
+          ? "Remind me what this finding you recorded is about: why it matters, what fixing it would involve, and whether you would fix it now. Don't act on it yet."
+          : 'About this finding you recorded:'
   return oneLine([opening, ...findingBody(finding), ...(how === 'typed' ? ['', words] : [])].join('\n'))
 }
 
@@ -121,6 +138,7 @@ type Send = { kind: PressLabel['kind']; answer: string; text: string }
 function findingSend(finding: Finding, p: PressInput): Send | null {
   if (p.action === 'fix') return { kind: 'fix', answer: fixLabel(finding), text: findingText(finding, 'address') }
   if (p.action === 'issue') return { kind: 'issue', answer: ISSUE_LABEL, text: findingText(finding, 'issue') }
+  if (p.action === 'explain') return { kind: 'explain', answer: EXPLAIN_LABEL, text: findingText(finding, 'explain') }
   const words = p.action === 'reply' ? (p.answer?.trim() ?? '') : ''
   return words ? { kind: 'reply', answer: words, text: findingText(finding, 'typed', words) } : null
 }
@@ -137,6 +155,7 @@ function sendOf(ledger: Ledger, p: PressInput): Send | null {
     const run = step.helps.find(h => h.kind === 'run')
     return run ? { kind: 'step', answer: step.label, text: runText(item, run.command) } : null
   }
+  if (p.action === 'explain') return { kind: 'explain', answer: EXPLAIN_LABEL, text: explainText(item) }
   const words = p.answer?.trim() ?? ''
   // An option must still be one of the question's options, as the inbox's `applyPress` checks.
   if (p.action === 'answer') return item.kind === 'question' && item.options.includes(words) ? { kind: 'answer', answer: words, text: answerText(item, words) } : null
@@ -154,12 +173,13 @@ const DONE_TEXT: Record<PressLabel['kind'], (label: PressLabel) => string> = {
   step: label => `✓ Handed off: ${label.answer}`,
   fix: () => '✓ Handed off',
   issue: () => '✓ Asked to file',
+  explain: () => '✓ Explained',
 }
 
 export function rowLabel(label: PressLabel): RowLabel {
   switch (label.state) {
     case 'sending':
-      return { text: 'Sending…', tone: 'muted', copy: null }
+      return { text: label.kind === 'explain' ? 'Explaining…' : 'Sending…', tone: 'muted', copy: null }
     case 'answered':
       return { text: DONE_TEXT[label.kind](label), tone: 'success', copy: null }
     case 'held':
@@ -182,8 +202,9 @@ export function labelledRows(
   )
   const found = findingRows(s.ledger, now, fixesSent)
   const label = (id: string) => (s.presses[id] && s.presses[id].state !== 'held' ? rowLabel(s.presses[id]) : null)
-  const add = (r: NowRow): LabelledRow => ({ ...r, label: label(r.id) })
-  const addFinding = (r: FindingRow): LabelledFinding => ({ ...r, label: label(r.id) })
+  const explained = (id: string) => s.presses[id]?.kind === 'explain'
+  const add = (r: NowRow): LabelledRow => ({ ...r, label: label(r.id), explained: explained(r.id) })
+  const addFinding = (r: FindingRow): LabelledFinding => ({ ...r, label: label(r.id), explained: explained(r.id) })
   return {
     questions: questions.map(add),
     tasks: tasks.map(add),

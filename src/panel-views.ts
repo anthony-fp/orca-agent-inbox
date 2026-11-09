@@ -40,10 +40,11 @@ export function row(
     handle?: string
     age?: string | null
     label?: LabelledRow['label']
+    explained?: boolean
   } = {},
 ): LabelledRow {
-  const { options = [], rec = null, helps = [], handle = '', age = '2h', label = null } = over
-  return { id, handle, text, age, rec, choices: choices({ options, rec }), steps: stepsOf(helps), label }
+  const { options = [], rec = null, helps = [], handle = '', age = '2h', label = null, explained = false } = over
+  return { id, handle, text, age, rec, choices: choices({ options, rec }), steps: stepsOf(helps), label, explained }
 }
 
 /** A finding as the worker sends it. */
@@ -51,10 +52,10 @@ export function finding(
   id: string,
   kind: Finding['kind'],
   title: string,
-  over: { detail?: string; fileName?: string | null; label?: LabelledFinding['label'] } = {},
+  over: { detail?: string; fileName?: string | null; label?: LabelledFinding['label']; explained?: boolean } = {},
 ): LabelledFinding {
-  const { detail = 'Found while working on the task.', fileName = null, label = null } = over
-  return { id, kind, mark: FINDING_GROUPS[kind].mark, title, detail, fileName, age: '1h', fix: fixLabel({ kind }), label }
+  const { detail = 'Found while working on the task.', fileName = null, label = null, explained = false } = over
+  return { id, kind, mark: FINDING_GROUPS[kind].mark, title, detail, fileName, age: '1h', fix: fixLabel({ kind }), label, explained }
 }
 
 export const EMPTY_VIEW: InboxView = { sections: [], others: [], untracked: 0, unread: 0 }

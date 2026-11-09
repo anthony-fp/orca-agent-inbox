@@ -80,12 +80,14 @@ function openLabels(ledger: Ledger, presses: Record<string, PressLabel>): Record
 }
 
 /**
- * The press a turn answers: the option whose prompt has the turn's id. Typed words, a step or a finding's press is
- * no answer: its row stays open, and the model reads the turn and decides, as the inbox's does.
+ * The press a turn answers: the option or Explain whose prompt has the turn's id. An option closes its row. An
+ * Explain keeps its row open on that turn: the ledger drops the model's close of it. Typed words, a step or a
+ * finding's Fix or File issue is no press here: its row stays open, and the model reads the turn and decides, as the
+ * inbox's does.
  */
 function pressFor(s: SessionState, turnId: string): { press: Press; answer: string } | null {
-  const hit = Object.entries(s.presses).find(([, l]) => l.turnId === turnId && l.kind === 'answer')
-  return hit ? { press: { id: hit[0], action: 'answer' }, answer: hit[1].answer } : null
+  const hit = Object.entries(s.presses).find(([, l]) => l.turnId === turnId && (l.kind === 'answer' || l.kind === 'explain'))
+  return hit ? { press: { id: hit[0], action: hit[1].kind === 'explain' ? 'explain' : 'answer' }, answer: hit[1].answer } : null
 }
 
 /** Where the next turn starts: after the last queued turn, else at the saved offset. */
@@ -159,7 +161,7 @@ export function createTracker(deps: TrackerDeps) {
         // closes it at the press. The commit write saves the close.
         const answered = pressFor(s, turn.turnId)
         const exchange: Exchange = { ...turn.exchange, press: answered?.press ?? turn.exchange.press }
-        if (answered && s.ledger.items.some(i => i.id === answered.press.id)) {
+        if (answered?.press.action === 'answer' && s.ledger.items.some(i => i.id === answered.press.id)) {
           update(sessionId, cur => ({ ...cur, ledger: closeItem(cur.ledger, answered.press.id, { how: 'answered', outcome: answered.answer }, clock.now()) }))
         }
         const ledgerNow = state.sessions[sessionId].ledger

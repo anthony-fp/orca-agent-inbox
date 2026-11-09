@@ -624,6 +624,7 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
             ],
             steps: [],
             label: null,
+            explained: false,
           },
         ],
         tasks: [],

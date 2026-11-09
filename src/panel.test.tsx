@@ -46,8 +46,9 @@ test('one agent: its title, then Questions and Tasks with their counts and butto
   assert.ok(view.find({ text: '2h' }))
   assert.ok(view.find({ text: 'Run the migration on staging' }))
   assert.ok(view.find({ text: '5m' }))
-  // The inbox's rowActions (hooks/view.ts): question options, Reply, Dismiss; task Done, Reply. No field until Reply.
-  assert.deepEqual(texts(view, 'Button'), ['Yes', 'No', 'Reply', 'Dismiss', 'Done', 'Reply'])
+  // The inbox's rowActions (hooks/view.ts), then Explain before Dismiss: question options, Reply, Explain, Dismiss;
+  // task Done, Reply, Explain. No field until Reply.
+  assert.deepEqual(texts(view, 'Button'), ['Yes', 'No', 'Reply', 'Explain', 'Dismiss', 'Done', 'Reply', 'Explain'])
   assert.equal(view.find({ type: 'Input' }), null)
   await clean(view)
 })
@@ -55,11 +56,11 @@ test('one agent: its title, then Questions and Tasks with their counts and butto
 test('the recommended option comes first, marked, and options past five fold behind "All N options"', async () => {
   const view = await open(MANY_OPTIONS)
   const order = ['Bun (recommended)', 'Node 20', 'Node 22', 'Deno']
-  assert.deepEqual(texts(view, 'Button'), [...order, 'All 6 options', 'Reply', 'Dismiss'])
+  assert.deepEqual(texts(view, 'Button'), [...order, 'All 6 options', 'Reply', 'Explain', 'Dismiss'])
   assert.equal(view.find({ type: 'Button', text: 'Bun (recommended)' })?.props.variant, 'solid')
   assert.equal(view.find({ type: 'Button', text: 'Node 20' })?.props.variant, 'outline')
   await view.press({ type: 'Button', text: 'All 6 options' })
-  assert.deepEqual(texts(view, 'Button'), [...order, 'Workers', 'Lambda', 'Reply', 'Dismiss'])
+  assert.deepEqual(texts(view, 'Button'), [...order, 'Workers', 'Lambda', 'Reply', 'Explain', 'Dismiss'])
   await clean(view)
 })
 
@@ -70,11 +71,13 @@ test("steps come after a question's options and before a task's Done, as the inb
     '8080',
     'Copy env line',
     'Reply',
+    'Explain',
     'Dismiss',
     'Run Friday check query',
     'Open runbook',
     'Done',
     'Reply',
+    'Explain',
   ])
   await clean(view)
 })
@@ -313,11 +316,36 @@ test('findings: Issues and Opportunities after Tasks, each row with its mark, de
   assert.ok(view.find({ text: 'Each retry fires at once, so a down server gets a flood.' }))
   assert.ok(view.find({ text: 'Relevant file: fetch.ts' }))
   assert.ok(view.find({ text: '✦' }))
-  // The inbox's actionsOf (hooks/view.ts) less Explain and Discuss: Fix or Do it, File issue, Reply, Dismiss.
-  assert.deepEqual(texts(view, 'Button'), ['Done', 'Reply', 'Fix', 'File issue', 'Reply', 'Dismiss', 'Do it', 'File issue', 'Reply', 'Dismiss'])
+  // The inbox's actionsOf (hooks/view.ts) less Discuss: Fix or Do it, File issue, Reply, Explain, Dismiss.
+  assert.deepEqual(texts(view, 'Button'), [
+    'Done', 'Reply', 'Explain',
+    'Fix', 'File issue', 'Reply', 'Explain', 'Dismiss',
+    'Do it', 'File issue', 'Reply', 'Explain', 'Dismiss',
+  ])
   assert.equal(view.find({ type: 'Button', text: 'Fix' })?.props.variant, 'solid')
   assert.deepEqual(view.findAll({ type: 'Collapsible' }).map(c => c.props.title), ['1 closed'])
   await clean(view)
+})
+
+test('Explain goes to the worker with the row\'s id, reads "Explaining…" while out, and reads "Explain again" on an explained row', async () => {
+  const inputs: PressInput[] = []
+  const view = await open(FINDINGS, input => {
+    inputs.push(input)
+    return { ok: true, label: { text: 'Explaining…', tone: 'muted', copy: null } }
+  })
+  for (const button of view.findAll({ type: 'Button', text: 'Explain' })) await view.press(button)
+  assert.deepEqual(inputs.map(i => [i.id, i.action]), [['t1', 'explain'], ['i4', 'explain'], ['i5', 'explain']])
+  assert.ok(view.find({ text: 'Explaining…' }))
+  await clean(view)
+
+  const [s] = FINDINGS.sections
+  const explained: InboxView = {
+    ...FINDINGS,
+    sections: [{ ...s, tasks: s.tasks.map(r => ({ ...r, explained: true })), findings: { ...s.findings, issues: s.findings.issues.map(f => ({ ...f, explained: true })) } }],
+  }
+  const again = await open(explained)
+  assert.deepEqual(texts(again, 'Button').filter(t => t.startsWith('Explain')), ['Explain again', 'Explain again', 'Explain'])
+  await clean(again)
 })
 
 test('findings with only closed ones: both groups show their empty lines and "N closed"', async () => {
@@ -477,7 +505,7 @@ test('a tracked Codex agent uses the same rows and buttons as Claude', async () 
   assert.deepEqual(texts(view, 'Heading'), ['Codex'])
   assert.ok(view.find({ text: '1) Rename the folder to tools?' }))
   assert.ok(view.find({ text: 'Run the migration on staging' }))
-  assert.deepEqual(texts(view, 'Button'), ['Yes', 'No', 'Reply', 'Dismiss', 'Done', 'Reply'])
+  assert.deepEqual(texts(view, 'Button'), ['Yes', 'No', 'Reply', 'Explain', 'Dismiss', 'Done', 'Reply', 'Explain'])
   assert.equal(view.find({ text: UNTRACKED_CODEX }), null)
   await clean(view)
 })

@@ -5,7 +5,7 @@ import { describe, test } from 'node:test'
 import { EMPTY, applyUpdate, parseReply } from './core/ledger'
 import { readFileSync } from 'node:fs'
 import type { ModelResult } from './model'
-import { CONFIRM_MS, answerText, createPresses, findingText, runText, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
+import { CONFIRM_MS, answerText, createPresses, explainText, findingText, runText, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
 import type { Finding, Help } from './core/types'
 import { upgradeState } from './state'
 import { fakeClock } from './test-clock'
@@ -24,14 +24,14 @@ const codexPrompt = (id: string, text: string) =>
   JSON.stringify({ type: 'event_msg', payload: { type: 'task_started', turn_id: id } }) + '\n' +
   JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] } }) + '\n'
 
-const okModel = (calls: string[]) => async (p: string): Promise<ModelResult> => {
+const okModel = (calls: string[], text = 'NEW: decide | 2 | Rename the folder to tools? | Yes / No | yes') => async (p: string): Promise<ModelResult> => {
   calls.push(p)
-  const update = parseReply('NEW: decide | 2 | Rename the folder to tools? | Yes / No | yes')
+  const update = parseReply(text)
   assert.ok(update)
   return { ok: true, update, text: '', ms: 1 }
 }
 
-async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?: Help[]; findings?: Finding[]; codex?: boolean; hookSeen?: boolean } = {}) {
+async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?: Help[]; findings?: Finding[]; codex?: boolean; hookSeen?: boolean; modelReply?: string } = {}) {
   const time = fakeClock(1000)
   const saved = new Map<string, unknown>()
   const storage = { get: async (k: string) => saved.get(k) ?? null, set: async (k: string, v: unknown) => void saved.set(k, structuredClone(v)) }
@@ -45,7 +45,7 @@ async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?:
     onRead = null
     return Buffer.from(file.text)
   }
-  const tracker = createTracker({ storage, clock: time.clock, read, model: okModel(modelCalls) })
+  const tracker = createTracker({ storage, clock: time.clock, read, model: okModel(modelCalls, opts.modelReply) })
   await tracker.track(T, S, opts.codex ? { pane: { key: 'pane-1', codexHome: '/codex', promptHookSeen: opts.hookSeen !== false } } : {})
   const update = parseReply(opts.kind === 'do' ? `NEW: do | - | ${TASK} | - | -` : `NEW: decide | 1 | ${ASK} | Yes / No | yes`)
   assert.ok(update)
@@ -389,6 +389,47 @@ describe('presses', () => {
       findingText(IDEA, 'typed', 'Do it\nnow'),
       'About this finding you recorded: Opportunity: Cache the config It is parsed on each call. Do it now',
     )
+  })
+
+  test('Explain on a question, a task and a finding sends the explain text, reads "Explaining…", then "✓ Explained", and marks the row explained', async () => {
+    const cases = [
+      { kind: 'decide', finding: undefined, text: `Remind me what this question you asked me is about: why it came up, what each choice would mean, and which you would pick. Don't act on it yet. "${ASK}" Options: Yes / No` },
+      { kind: 'do', finding: undefined, text: `Remind me what this task you left for me is about: why it came up, and what each choice would mean. Don't act on it yet. "${TASK}"` },
+      { kind: 'decide', finding: ISSUE, text: findingText(ISSUE, 'explain') },
+    ] as const
+    for (const c of cases) {
+      const t = await setup({ kind: c.kind, findings: c.finding ? [c.finding] : [] })
+      const id = c.finding?.id ?? t.item.id
+      if (!c.finding) assert.equal(explainText(t.item), c.text)
+      const out = await t.presses.press(t.input({ id, action: 'explain', answer: undefined }))
+      assert.deepEqual(out, { ok: true, label: { text: 'Explaining…', tone: 'muted', copy: null } })
+      assert.deepEqual(t.sent, [{ terminalId: T, text: c.text }])
+      t.file.text += prompt('p-2', c.text)
+      await t.time.run(t.time.now() + 2000)
+      assert.deepEqual(t.labelOf(id), { text: '✓ Explained', tone: 'success', copy: null })
+      const rows = labelledRows(t.s())
+      const row = [...rows.questions, ...rows.tasks, ...rows.findings.issues].find(r => r.id === id)
+      assert.equal(row?.explained, true, 'the Explain button reads "Explain again"')
+    }
+    assert.equal(
+      findingText(ISSUE, 'explain'),
+      "Remind me what this finding you recorded is about: why it matters, what fixing it would involve, and whether you would fix it now. Don't act on it yet. Issue: The retry loop never backs off Each retry fires at once. File: src/fetch.ts",
+    )
+  })
+
+  test('the turn an Explain press starts keeps its row open when the model closes it; a reply turn lets it close', async () => {
+    for (const action of ['explain', 'reply'] as const) {
+      const t = await setup({ modelReply: 'CLOSED: i1 | yes' })
+      assert.equal(t.item.id, 'i1')
+      await t.presses.press(t.input({ action, answer: action === 'reply' ? 'Why?' : undefined }))
+      t.file.text += prompt('p-2', t.sent[0].text)
+      await t.time.run(t.time.now() + 2000)
+      t.file.text += reply('a-2', 'It came up because the folder name clashes.')
+      void t.tracker.done(T)
+      await t.time.run()
+      assert.equal(t.modelCalls.length, 1)
+      assert.equal(t.s().ledger.items.some(i => i.id === 'i1'), action === 'explain', `${action}: row open after the turn`)
+    }
   })
 
   test('a Fix closes the question that asks about its finding as it sends, and moves the finding to the closed list once delivered', async () => {

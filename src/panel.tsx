@@ -60,6 +60,7 @@ const PENDING: Record<PressInput['action'], RowLabel> = {
   step: SENDING,
   fix: SENDING,
   issue: SENDING,
+  explain: { text: 'Explaining…', tone: 'muted', copy: null },
   done: { text: '✓ Done', tone: 'muted', copy: null },
   dismiss: { text: 'Dismissed', tone: 'muted', copy: null },
 }
@@ -325,8 +326,8 @@ function RowHead({ row }: { row: LabelledRow }) {
 
 /**
  * A question, with buttons in the inbox's order (`rowActions` and `rowKeyPlan` in `hooks/view.ts`): each option, the
- * recommended one first; "All N options" after the fourth when there are more than five; its steps; then Reply and
- * Dismiss.
+ * recommended one first; "All N options" after the fourth when there are more than five; its steps; then Reply,
+ * Explain and Dismiss.
  */
 function Question({ section, row }: { section: InboxSection; row: LabelledRow }) {
   const { key, label, busy } = rowState(section, row)
@@ -357,6 +358,7 @@ function Question({ section, row }: { section: InboxSection; row: LabelledRow })
         <Button size="sm" variant="outline" disabled={busy} onPress={() => update(replying, m => ({ ...m, [key]: true }))}>
           Reply
         </Button>
+        <ExplainButton section={section} row={row} busy={busy} />
         <Button size="sm" variant="ghost" disabled={busy} onPress={() => press(section, row, { action: 'dismiss' })}>
           Dismiss
         </Button>
@@ -367,7 +369,16 @@ function Question({ section, row }: { section: InboxSection; row: LabelledRow })
   )
 }
 
-/** A task: its whole text with its age, then its steps, Done and Reply (`rowActions` in `hooks/view.ts`). */
+/** Explain on any row. It reads "Explain again" once the row's last press was Explain. */
+function ExplainButton({ section, row, busy }: { section: InboxSection; row: LabelledRow | LabelledFinding; busy: boolean }) {
+  return (
+    <Button size="sm" variant="outline" disabled={busy} onPress={() => press(section, row, { action: 'explain' })}>
+      {section.trustHook ? 'Copy explain request' : row.explained ? 'Explain again' : 'Explain'}
+    </Button>
+  )
+}
+
+/** A task: its whole text with its age, then its steps, Done, Reply (`rowActions` in `hooks/view.ts`) and Explain. */
 function Task({ section, row }: { section: InboxSection; row: LabelledRow }) {
   const { key, label, busy } = rowState(section, row)
   return (
@@ -381,6 +392,7 @@ function Task({ section, row }: { section: InboxSection; row: LabelledRow }) {
         <Button size="sm" variant="outline" disabled={busy} onPress={() => update(replying, m => ({ ...m, [key]: true }))}>
           Reply
         </Button>
+        <ExplainButton section={section} row={row} busy={busy} />
       </Row>
       {read(replying)[key] === true && (
         <ReplyField section={section} row={row} hint={`Your reply to ${section.agent === 'codex' ? 'Codex' : 'Claude'}`} busy={busy} />
@@ -429,7 +441,7 @@ const FINDING_TONES = { issue: 'warning', opportunity: 'success' } as const
 
 /**
  * An issue or opportunity: its mark and title with the age on the right, its detail and file, then the inbox's
- * finding buttons (`actionsOf` in `hooks/view.ts`) less Explain and Discuss: Fix or Do it, File issue, Reply, Dismiss.
+ * finding buttons (`actionsOf` in `hooks/view.ts`) less Discuss: Fix or Do it, File issue, Reply, Explain, Dismiss.
  */
 function Finding({ section, row }: { section: InboxSection; row: LabelledFinding }) {
   const { key, label, busy } = rowState(section, row)
@@ -462,6 +474,7 @@ function Finding({ section, row }: { section: InboxSection; row: LabelledFinding
         <Button size="sm" variant="outline" disabled={busy} onPress={() => update(replying, m => ({ ...m, [key]: true }))}>
           Reply
         </Button>
+        <ExplainButton section={section} row={row} busy={busy} />
         <Button size="sm" variant="ghost" disabled={busy} onPress={() => press(section, row, { action: 'dismiss' })}>
           Dismiss
         </Button>

@@ -62,10 +62,10 @@ export type PressLabel = {
   state: 'sending' | 'answered' | 'held' | 'undelivered'
   /**
    * What the press sent: a question's option, typed words on any row, a step that asks the agent to run a command,
-   * or a finding's Fix or File issue. Only an option closes its row when its turn runs. A label saved before presses
-   * kept this is an answer.
+   * a finding's Fix or File issue, or Explain on any row. Only an option closes its row when its turn runs. A label
+   * saved before presses kept this is an answer.
    */
-  kind: 'answer' | 'reply' | 'step' | 'fix' | 'issue'
+  kind: 'answer' | 'reply' | 'step' | 'fix' | 'issue' | 'explain'
   /** The option or words the person gave, for the row's close when the answering turn runs, or the button's label. */
   answer: string
   /** The message typed into the terminal, or that Copy copies. */
@@ -116,7 +116,7 @@ function upgradeTurn(raw: unknown): Turn[] {
 }
 
 const LABEL_STATES: PressLabel['state'][] = ['sending', 'answered', 'held', 'undelivered']
-const LABEL_KINDS: PressLabel['kind'][] = ['answer', 'reply', 'step', 'fix', 'issue']
+const LABEL_KINDS: PressLabel['kind'][] = ['answer', 'reply', 'step', 'fix', 'issue', 'explain']
 
 /** A label saved while its send was out reads "Not delivered": the watch that would confirm it ended with the worker. */
 function upgradeLabel(raw: unknown): PressLabel[] {
