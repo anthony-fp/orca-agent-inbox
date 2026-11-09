@@ -228,3 +228,21 @@ export const MIXED: InboxView = {
 
 /** A workspace with only a Codex agent. */
 export const CODEX_ONLY: InboxView = { sections: [], others: [{ key: 'terminal-9', title: 'Codex', agent: 'codex' }], untracked: 0, unread: 0 }
+
+/** Every row kind with a file, under a goal line: each row has Open and Snooze, the task and the finding have Hand off. */
+export const ROW_BUTTONS: InboxView = {
+  sections: [
+    section(1, {
+      goal: 'Make the fetch client retry safely',
+      questions: [row('q1', 'Keep the old retry flag?', { options: ['Yes', 'No'], path: 'src/fetch.ts' })],
+      tasks: [row('t1', 'Review the backoff limits', { path: 'src/config.ts' })],
+      findings: {
+        ...NO_FINDINGS,
+        issues: [finding('i4', 'issue', 'The retry loop never backs off', { path: 'src/fetch.ts' })],
+      },
+    }),
+  ],
+  others: [],
+  untracked: 0,
+  unread: 0,
+}

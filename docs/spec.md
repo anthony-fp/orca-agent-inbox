@@ -19,6 +19,7 @@ An Orca plugin that adds an inbox icon to Orca's right sidebar. The panel shows 
 - `agent.status.changed` fires on each `working` → `done` change, with `workspaceId`, `terminalId`, `paneKey` and `title`. It does not carry the reply text or the agent's session id.
 - The worker can list the agents in the focused workspace. It cannot tell which terminal has focus.
 - `terminal:send` lets the plugin type into an agent's terminal.
+- `workspace.list` (`workspace:read`) lists the workspaces with their paths and hosts, and `editor.open` (`workspace:write`) opens a file, by a path relative to its workspace, in Orca's editor. The plugin API has no call that creates a worktree, so Hand off runs the `orca` CLI as a child process.
 - A prompt a person types is never hooked, so the plugin cannot add text to it.
 
 ## How it works
@@ -46,10 +47,11 @@ An Orca plugin that adds an inbox icon to Orca's right sidebar. The panel shows 
    - `press`: the last press the plugin sent to this terminal, if the turn is the answer to it.
    - The build plan tests the adapter against real saved transcripts before any panel work.
 4. **Run the inbox model.** The plugin runs `claude -p --model sonnet --no-session-persistence --strict-mcp-config --setting-sources ""` with `systemText` and `buildPrompt`, then applies the answer with `applyExchangeUpdate`. One run per terminal at a time; a turn that ends during a run waits for it.
-5. **Draw the panel.** The panel shows one section per tracked agent in the focused workspace, newest activity first. Each section has its questions and tasks, as in the Now tab. An agent that is not Claude Code, such as Codex, gets a short section with its title and "Agent Inbox supports Claude Code only for now. Codex support is coming soon."
+5. **Draw the panel.** The panel shows one section per tracked agent in the focused workspace, newest activity first. Each section has the goal line from its plan file ([goal-line-spec.md](goal-line-spec.md)), then its questions and tasks, as in the Now tab. An agent the plugin does not track gets a short section with its title and the reason it is not tracked.
 6. **Act on a press.** Each press shows its result on its row at once, as the inbox's press rules say.
    - Answer or choose an option: the plugin sends the answer with `terminal:send` when pressed, including while the agent is working. The row reads "Sending…" until the transcript shows the answer as a new prompt, then "✓ Answered". If no new prompt shows within 10 seconds after the agent is done, the row reads, in red, "Not delivered" with Copy. Old saved held labels show normal press buttons again.
    - Done or dismiss: the plugin closes the row in its own state. Nothing goes to the agent.
+   - Explain, Open, Copy, Hand off and Snooze: see [row-buttons-spec.md](row-buttons-spec.md). Open, Copy, Hand off and Snooze send nothing to the agent.
 
 ## The agent's tools (findings)
 
@@ -106,7 +108,7 @@ Codex risks, each probed first in the build plan:
 
 ## Access the plugin asks for
 
-`agent:read`, `terminal:send`, `storage:own`, `workspace:read`, `workspace:write`, and the `agent.launch.before` hook. Its README says that the hook adds a session id to each new `claude` session and changes nothing else. It also says what each is for, and that the plugin runs `claude -p` on your account after each agent turn. For Codex, it says that the hook adds `-c` flags for `notify`, the `orca-inbox` tools and the guidance, and that the plugin runs `codex exec` on that Codex account after each turn.
+`agent:read`, `terminal:send`, `storage:own`, `workspace:read`, `workspace:write`, and the `agent.launch.before` hook. Its README says that the hook adds a session id to each new `claude` session and changes nothing else. It also says what each is for, that the plugin runs `claude -p` on your account after each agent turn, and that Hand off runs the `orca` CLI. For Codex, it says that the hook adds `-c` flags for `notify`, the `orca-inbox` tools and the guidance, and that the plugin runs `codex exec` on that Codex account after each turn.
 
 ## Out of scope for version 1
 

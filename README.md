@@ -9,7 +9,9 @@ An Orca plugin that adds an inbox icon to Orca's right sidebar. The panel shows 
 
 Every question, task and finding also has Explain and Copy. Explain asks the agent to explain the row in its terminal. Copy puts the row on the clipboard as Markdown, with its file when the agent gave one. A task with commands to run copies only the commands. Copy uses `pbcopy` on macOS, `wl-copy`, `xclip` or `xsel` on Linux, and PowerShell on Windows.
 
-The panel has one section per tracked agent, newest activity first.
+A row with a file has Open, which opens the file in Orca's editor. Every task and finding has Hand off: it makes a child worktree with the `orca` CLI and starts the same kind of agent there, with the row as its prompt. The row then reads "✓ Handed off to <worktree>" and has no Hand off button. Every row has Snooze, with "1 hour" and "Tomorrow 9am": it hides the row in the panel until then. The agent still sees a snoozed row as open.
+
+The panel has one section per tracked agent, newest activity first. Under each agent's title, the goal line shows the first `## ` heading of its plan file.
 
 ## Claude Code and Codex
 

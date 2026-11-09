@@ -15,7 +15,7 @@
 >
 > **Resolved 2026-11-09:** items 1 and 3 by moving snoozes to their own storage key with no early return (user dropped that rule), so the state version stays 3; item 2 in T6; item 4 in T4. Item 5 is in T5. Not re-audited.
 >
-> **Done 2026-11-09:** T1 (Explain), T2 (Copy) and T3 (path on questions and tasks) shipped in 0.3.0. T4, T5 and T6 are not built.
+> **Done 2026-11-09:** T1 (Explain), T2 (Copy) and T3 (path on questions and tasks) shipped in 0.3.0. T4 (Open), T5 (Snooze), T6 (Hand off) and T8 (goal line) shipped in 0.4.0. The T7 live check in Orca is not done.
 
 Spec: [row-buttons-spec.md](row-buttons-spec.md). Branch: `row-buttons`.
 
