@@ -548,8 +548,10 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
         truncated: boolean
       }
       if (truncated) return { ok: false, error: 'Orca listed only some workspaces' }
-      const hits = workspaces.filter(w => isLocal(w.hostId) && holds(w.path, cwd))
-      if (hits.length !== 1) return { ok: false, error: hits.length === 0 ? 'No workspace holds this folder' : 'More than one workspace holds this folder' }
+      // Every hit holds the cwd, so a longer path is a deeper one: the deepest wins, and only a tie at it fails.
+      const hits = workspaces.filter(w => isLocal(w.hostId) && holds(w.path, cwd)).sort((x, y) => resolve(y.path).length - resolve(x.path).length)
+      if (hits.length === 0) return { ok: false, error: 'No workspace holds this folder' }
+      if (hits.length > 1 && resolve(hits[0].path) === resolve(hits[1].path)) return { ok: false, error: 'More than one workspace holds this folder' }
       const file = resolve(cwd, path)
       if (file === hits[0].path || !holds(hits[0].path, file)) return { ok: false, error: 'File is outside this workspace' }
       await orca.host.call('editor.open', { workspaceId: hits[0].id, path: relative(hits[0].path, file) })

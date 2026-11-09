@@ -844,6 +844,9 @@ test('inbox.openFile opens the file in the one local workspace that holds the fo
   assert.deepEqual((await openIn(sub, 'a.ts', { list: [remote, WS] })).calls, [{ workspaceId: WS.id, path: 'pkg/a.ts' }], 'the same path on another host is not this one')
   const B = { ...WS, id: 'ws-b', path: '/a/b' }
   const BC = { ...WS, id: 'ws-bc', path: '/a/bc', hostId: 'local' }
+  const FOLDER = { ...WS, id: 'ws-a', kind: 'folder', path: '/a' }
+  const WT = { ...WS, id: 'ws-wt', path: '/a/wt', hostId: 'local' }
+  assert.deepEqual((await openIn('/a/wt/sub', 'x.ts', { list: [FOLDER, WT] })).calls, [{ workspaceId: 'ws-wt', path: 'sub/x.ts' }], 'the deepest workspace wins')
   assert.deepEqual((await openIn('/a/bc', 'x.ts', { list: [B, BC] })).calls, [{ workspaceId: 'ws-bc', path: 'x.ts' }], '/a/b does not hold /a/bc')
 
   const fails = async (cwd: string, path: string, error: string, opts: { list?: unknown[]; truncated?: boolean } = {}) =>
@@ -851,7 +854,7 @@ test('inbox.openFile opens the file in the one local workspace that holds the fo
   await fails(sub, '../../../etc/hosts', 'File is outside this workspace')
   await fails(sub, '/etc/hosts', 'File is outside this workspace')
   await fails('/a/bc', 'x.ts', 'No workspace holds this folder', { list: [B, remote] })
-  await fails(sub, 'a.ts', 'More than one workspace holds this folder', { list: [WS, { ...WS, id: 'ws-2', hostId: 'local' }] })
+  await fails(sub, 'a.ts', 'More than one workspace holds this folder', { list: [{ ...WS, path: '/work' }, WS, { ...WS, id: 'ws-2', hostId: 'local' }] })
   await fails(sub, 'a.ts', 'Orca listed only some workspaces', { truncated: true })
 })
 

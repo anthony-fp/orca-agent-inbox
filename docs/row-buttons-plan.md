@@ -50,10 +50,10 @@ This task changes text a model reads.
 
 ## T4. Open, part 2: the button
 
-- Audit fix: first confirm in `orca-host.d.ts` how `workspace.list` marks the local host. Keep local entries only, match by whole path parts, and fail on no match, more than one match, or `truncated`.
+- Audit fix: first confirm in `orca-host.d.ts` how `workspace.list` marks the local host. Keep local entries only, match by whole path parts, let the deepest local match win, and fail on no match, a tie at the deepest path (two local entries with the same path), or `truncated`.
 - Files: `orca-plugin.json` (add `workspace:write`), `src/worker.ts` (new `inbox.openFile` handler: `workspace.list`, local-host match on `SessionState.cwd`, resolve and relativize, `editor.open`), `src/protocol.ts`, `src/panel.tsx` (Open button; an `open` help step opens instead of copying, :129-166), `src/panel-views.ts`.
 - Tests:
-  - `src/worker.test.ts` with `mockHost` results for `workspace.list` and `editor.open`: a path inside opens with the relative path; a path outside shows "File is outside this workspace" and makes no call; no match, two matches (same path on two hosts) and a `truncated` list each show an error and make no call; `/a/b` does not match `/a/bc`. Pattern: `:815`.
+  - `src/worker.test.ts` with `mockHost` results for `workspace.list` and `editor.open`: a path inside opens with the relative path; a path outside shows "File is outside this workspace" and makes no call; no match, two local entries with the same path and a `truncated` list each show an error and make no call; the same path on another host is skipped; a folder `/a` and a worktree `/a/wt` both holding `/a/wt/sub` open in `/a/wt`; `/a/b` does not match `/a/bc`. Pattern: `:815`.
   - `src/panel.test.tsx`: Open shows on rows with a path only; reads "Opening x…", then "✓ Opened x".
 
 ## T5. Snooze
