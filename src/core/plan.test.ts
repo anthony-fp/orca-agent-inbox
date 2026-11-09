@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
-import { parsePlan, planLines, planNote, planPath } from './plan'
+import { parsePlan, planGoal, planLines, planNote, planPath } from './plan'
 
 function expect(actual: unknown) {
   return {
@@ -54,6 +54,22 @@ describe('parsePlan', () => {
 
   test('drops a heading with no steps', () => {
     expect(parsePlan('# Plan\n## A\n- [ ] one')?.tasks.map(t => t.title)).toEqual(['A'])
+  })
+})
+
+// Not from the inbox repo: the goal line (docs/goal-line-spec.md).
+describe('planGoal', () => {
+  test('gives the first `## ` heading, trimmed', () => {
+    assert.equal(planGoal('# Plan\n##  Fix the parser  \n- [ ] one\n## Ship it\n'), 'Fix the parser')
+  })
+  test('`### ` and `#` headings do not count', () => {
+    assert.equal(planGoal('# Plan\n### Detail\n####x\n## Goal\n'), 'Goal')
+    assert.equal(planGoal('# Plan\n### Detail\n- [ ] one\n'), null)
+  })
+  test('no heading gives null', () => {
+    assert.equal(planGoal('- [ ] one\n'), null)
+    assert.equal(planGoal(''), null)
+    assert.equal(planGoal('##    \n'), null)
   })
 })
 

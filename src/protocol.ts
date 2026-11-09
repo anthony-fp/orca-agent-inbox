@@ -28,6 +28,8 @@ export type InboxSection = {
   plan: PlanView | null
   /** The plan file's path when it exists but cannot be read or has text but no step: the section says so in one line. */
   planError: string | null
+  /** The text of the plan file's first `## ` heading, trimmed (docs/goal-line-spec.md), or null when there is none. */
+  goal: string | null
   /** Snoozed rows by id, each with the time (ms) its snooze ends. The panel hides each row until then. */
   snoozed: Record<string, number>
 }

@@ -662,6 +662,20 @@ test('plan: groups keep source order across completion and reopening, with Compl
   await clean(view)
 })
 
+test('goal line: one muted, truncated line right under the title; none when the plan has no goal', async () => {
+  const view = await open({ sections: [section(1, { goal: 'Fix the parser', plan: parsePlan('## Fix the parser\n- [~] a') }), section(2)], others: [], untracked: 0, unread: 0 })
+  const goal = view.find({ text: 'Fix the parser', type: 'Text' })
+  assert.equal(goal?.props.muted, true)
+  assert.equal(goal?.props.truncate, true)
+  const tree = JSON.stringify(view.tree())
+  assert.ok(tree.includes('"children":["Agent 1"]},{"type":"Text"'), 'the goal is the next element after the title')
+  assert.ok(tree.indexOf('Fix the parser') < tree.indexOf('PLAN'), 'the goal is above the plan')
+  assert.equal(view.findAll({ text: 'Fix the parser', type: 'Text' }).length, 1, 'only the section with a goal draws one')
+  assert.ok(tree.includes('"children":["Agent 2"]},{"type":"Text","props":{"muted":true,"size":"sm"},"children":["Nothing waits on you."]'), 'no goal line and no gap under a title without one')
+  assert.deepEqual(view.warnings, [])
+  await clean(view)
+})
+
 test("plan: a plan file that cannot be read shows the skill's one error line, in the danger tone", async () => {
   const view = await open({ sections: [section(1, { planError: '/work/.claude/plans/s.md' })], others: [], untracked: 0, unread: 0 })
   assert.equal(view.find({ text: 'Could not read the plan: /work/.claude/plans/s.md' })?.props.tone, 'danger')

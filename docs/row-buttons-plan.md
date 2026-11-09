@@ -86,3 +86,13 @@ This task changes text a model reads.
 
 - Files: `README.md` (access table :33-40, including the `workspace:read` row :40; feature text), `docs/spec.md` (:21, :107-109), `package.json`, `package-lock.json`, `orca-plugin.json` (version 0.3.0), `src/panel.check.ts` (one scenario with all new buttons).
 - Check: `orca plugin check .`, then a live session in Orca: press each button on each row kind, and record which states were not seen in `docs/live-check.md`.
+
+## T8. Goal line
+
+- Spec: [goal-line-spec.md](goal-line-spec.md).
+- Files: `src/core/plan.ts` (`planGoal`: the first `## ` heading, beside `parsePlan`), `src/worker.ts` (`readPlan` keeps `goal` with the plan), `src/protocol.ts` (`InboxSection.goal`), `src/panel.tsx` (one muted, truncated line under the title), `src/panel-views.ts`.
+- Dependency check: schema consumers are the panel, `panel-views.ts` and the worker tests; no saved state changes. Identity: the goal is the session's, read from `planPath(cwd, sessionId)`. Recovery: the goal lives in memory only and is read again from the file after a restart. `planNote` does not change, so no text a model reads changes.
+- Tests:
+  - `src/core/plan.test.ts`: the first `## ` wins; `### ` and `#` do not count; no heading gives null; spaces trim.
+  - `src/worker.test.ts`: the view carries the goal, and a changed plan file changes it.
+  - `src/panel.test.tsx`: the line draws under the title, and nothing draws when the goal is null.

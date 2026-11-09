@@ -10,7 +10,7 @@ const NO_FINDINGS: LabelledFindings = { issues: [], opportunities: [], closed: {
 
 export function section(
   n: number,
-  rows: Partial<Pick<InboxSection, 'questions' | 'tasks' | 'closed' | 'findings' | 'plan' | 'planError' | 'tools' | 'agent' | 'trustHook' | 'snoozed'>> = {},
+  rows: Partial<Pick<InboxSection, 'questions' | 'tasks' | 'closed' | 'findings' | 'plan' | 'planError' | 'goal' | 'tools' | 'agent' | 'trustHook' | 'snoozed'>> = {},
 ): InboxSection {
   return {
     terminalId: `terminal-${n}`,
@@ -24,6 +24,7 @@ export function section(
     findings: NO_FINDINGS,
     plan: null,
     planError: null,
+    goal: null,
     tools: true,
     snoozed: {},
     ...rows,

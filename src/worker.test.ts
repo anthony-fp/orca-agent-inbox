@@ -642,6 +642,7 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
         findings: NO_FINDINGS,
         plan: null,
         planError: null,
+        goal: null,
         tools: true,
         snoozed: {},
       },
@@ -657,6 +658,7 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
         findings: NO_FINDINGS,
         plan: null,
         planError: null,
+        goal: null,
         tools: true,
         snoozed: {},
       },
@@ -715,6 +717,24 @@ test('inbox.view gives each section its plan, read again at a done; a changed pl
   await t.worker.deactivate()
 })
 
+test("inbox.view gives each section its plan's goal line, read again when the plan file changes", async () => {
+  const state: State = { version: 1, terminals: { 'term-1': { sessionId: S } }, sessions: { [S]: { ...emptySession(100 * DAY), cwd: WS.path } } }
+  const agents = [{ terminalId: 'term-1', title: 'Fixer', agent: 'claude', state: 'done', stateStartedAt: 1 }]
+  const t = await setup({ state, agents, files: { [PLAN_FILE]: '# Plan\n##  Fix the parser \n- [~] Write the tests\n' } })
+  assert.equal((await t.worker.request('inbox.view', undefined)).sections[0].goal, 'Fix the parser')
+  const posts = t.worker.posts.length
+  t.files.set(PLAN_FILE, '## Ship 0.4.0\n- [~] Write the tests\n')
+  await t.worker.emit('agent.status.changed', status('done'))
+  await t.time.run()
+  assert.ok(t.worker.posts.slice(posts).some(p => p.event === 'inbox.changed'))
+  assert.equal((await t.worker.request('inbox.view', undefined)).sections[0].goal, 'Ship 0.4.0')
+  t.files.set(PLAN_FILE, '- [~] Write the tests\n')
+  await t.worker.emit('agent.status.changed', status('done'))
+  await t.time.run()
+  assert.equal((await t.worker.request('inbox.view', undefined)).sections[0].goal, null)
+  await t.worker.deactivate()
+})
+
 test("inbox.view: a plan file that cannot be read, or has text but no step, gives its path as the error; a missing one gives none", async () => {
   const state: State = { version: 1, terminals: { 'term-1': { sessionId: S } }, sessions: { [S]: { ...emptySession(100 * DAY), cwd: WS.path } } }
   const agents = [{ terminalId: 'term-1', title: 'Fixer', agent: 'claude', state: 'done', stateStartedAt: 1 }]
@@ -728,6 +748,16 @@ test("inbox.view: a plan file that cannot be read, or has text but no step, give
   assert.deepEqual(await planOf({ files: { [PLAN_FILE]: 'Notes, no checkbox step\n' } }), { plan: null, planError: PLAN_FILE })
   assert.deepEqual(await planOf({ files: { [PLAN_FILE]: '  \n' } }), { plan: null, planError: null })
   assert.deepEqual(await planOf({}), { plan: null, planError: null })
+})
+
+test('inbox.view: no plan file, or an unreadable one, gives no goal line', async () => {
+  const state: State = { version: 1, terminals: { 'term-1': { sessionId: S } }, sessions: { [S]: { ...emptySession(100 * DAY), cwd: WS.path } } }
+  const agents = [{ terminalId: 'term-1', title: 'Fixer', agent: 'claude', state: 'done', stateStartedAt: 1 }]
+  for (const opts of [{}, { unreadable: [PLAN_FILE] }]) {
+    const t = await setup({ state: structuredClone(state), agents, ...opts })
+    assert.equal((await t.worker.request('inbox.view', undefined)).sections[0].goal, null)
+    await t.worker.deactivate()
+  }
 })
 
 test('inbox.view: Codex agents without a seen launch get the untracked section', async () => {

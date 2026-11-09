@@ -44,6 +44,13 @@ export function parsePlan(text: string): PlanView | null {
   }
 }
 
+const GOAL = /^## (.*)$/m
+
+/** The plan's goal line: the text of its first `## ` heading, trimmed, or null when it has none. */
+export function planGoal(text: string): string | null {
+  return GOAL.exec(text)?.[1]!.trim() || null
+}
+
 /** Where a session's plan lives: one file per session, so sessions in one worktree never share a plan. */
 export function planPath(worktree: string, sessionId: string): string {
   return `${worktree}/.inbox/plans/${sessionId}.md`

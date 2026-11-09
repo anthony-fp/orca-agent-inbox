@@ -10,7 +10,7 @@ import type { OrcaWorkerApi } from 'orca/worker'
 
 import { copyToClipboard } from './clipboard'
 import { launchOf, runOrca, type OrcaReply } from './orca-cli'
-import { parsePlan, planNote, planPath, type PlanView } from './core/plan'
+import { parsePlan, planGoal, planNote, planPath, type PlanView } from './core/plan'
 import { codexResumeStart, codexToolTurn, readCodexTurn, rolloutFor } from './core/codex-transcript'
 import { tagLaunch, tokenize } from './launch'
 import { runInboxModel } from './model'
@@ -41,7 +41,7 @@ export type WorkerDeps = {
   orca(args: string[]): Promise<OrcaReply>
 }
 
-type PlanRead = { plan: PlanView | null; error: string | null }
+type PlanRead = { plan: PlanView | null; error: string | null; goal: string | null }
 
 const realClock: Clock = { now: () => Date.now(), sleep: ms => new Promise(r => setTimeout(r, ms)) }
 
@@ -276,14 +276,14 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
     const dir = await dirOf(sessionId)
     if (!dir) return null
     const path = planPath(dir, sessionId)
-    let read: PlanRead = { plan: null, error: null }
+    let read: PlanRead = { plan: null, error: null, goal: null }
     try {
       const text = (await deps.readFile(path))?.toString('utf8') ?? null
       const plan = text === null ? null : parsePlan(text)
-      read = { plan, error: plan === null && text !== null && text.trim() !== '' ? path : null }
+      read = { plan, error: plan === null && text !== null && text.trim() !== '' ? path : null, goal: text === null ? null : planGoal(text) }
     } catch (e) {
       log(`plan: could not read ${sessionId}: ${message(e)}`)
-      read = { plan: null, error: path }
+      read = { plan: null, error: path, goal: null }
     }
     const before = plans.get(sessionId)
     plans.set(sessionId, read)
@@ -527,7 +527,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
             sections.push({
               terminalId: agent.terminalId, sessionId: `codex-launch:${agent.terminalId}`,
               title: agent.title ?? 'Codex', agent: 'codex', trustHook: true,
-              drawn: '', lastActivity: launch.at, plan: null, planError: null, tools: true, snoozed: {},
+              drawn: '', lastActivity: launch.at, plan: null, planError: null, goal: null, tools: true, snoozed: {},
               ...labelledRows(blank, deps.clock.now()),
             })
           } else others.push({ key: agent.terminalId ?? `agent-${n}`, title: agent.title ?? 'Codex', agent: 'codex',
@@ -542,7 +542,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
       const mainState = agent.mainAgent?.state ?? agent.state
       if (!statuses.has(agent.terminalId) && STATES.includes(mainState)) statuses.set(agent.terminalId, mainState as TerminalStatus)
       unread += s.unread
-      const { plan, error: planError } = plans.get(sessionId) ?? (await readPlan(sessionId)) ?? { plan: null, error: null }
+      const { plan, error: planError, goal } = plans.get(sessionId) ?? (await readPlan(sessionId)) ?? { plan: null, error: null, goal: null }
       const pane = state.panes[state.terminals[agent.terminalId]?.paneKey ?? '']
       sections.push({
         terminalId: agent.terminalId,
@@ -553,6 +553,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
         lastActivity: s.touchedAt,
         plan,
         planError,
+        goal,
         tools: s.tools,
         snoozed: snoozedIn(sessionId),
         ...labelledRows(s, deps.clock.now()),
