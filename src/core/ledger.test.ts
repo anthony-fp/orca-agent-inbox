@@ -310,8 +310,8 @@ describe('applyExchangeUpdate', () => {
 
 describe('buildPrompt', () => {
   test('marks an open question the agent recorded after the person sent the message', () => {
-    const earlier = addAgentItem({ ...EMPTY, turn: 1 }, { kind: 'question', ask: 'Ship now?', options: ['Yes', 'No'], rec: null, helps: [] }, 1000).ledger
-    const ledger = addAgentItem({ ...earlier, turn: 2 }, { kind: 'question', ask: 'Snooze for how long?', options: ['1 hour'], rec: null, helps: [] }, 3000).ledger
+    const earlier = addAgentItem({ ...EMPTY, turn: 1 }, { kind: 'question', ask: 'Ship now?', options: ['Yes', 'No'], rec: null, helps: [], path: null }, 1000).ledger
+    const ledger = addAgentItem({ ...earlier, turn: 2 }, { kind: 'question', ask: 'Snooze for how long?', options: ['1 hour'], rec: null, helps: [], path: null }, 3000).ledger
     const ex = { person: '1', trigger: null, activity: [], reply: 'Snooze for how long?', turn: 2, startedAt: 2000, press: null, screen: '' }
     const rows = buildPrompt(ledger, ex).split('\n').filter(l => /^i\d/.test(l))
     expect(rows.map(r => r.endsWith(' | asked after <person>'))).toEqual([false, true])
