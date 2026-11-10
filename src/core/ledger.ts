@@ -28,7 +28,7 @@ const STALE_AFTER = 12
  */
 const UNFOUNDED_MOOT =
   /^no longer applies:.*(\b(not|never) (related|relevant|addressed|mentioned|discussed|answered|raised|part of)\b|\bunrelated\b|\b(still|stays) open\b|\boutside (the|this)\b|\bnothing\b.*\b(touch|address|mention|relate))/i
-const MAX_CLOSED = 12
+const MAX_CLOSED = 5
 const EXPIRED = 'expired, unanswered'
 const MAX_HELPS = 3
 const MAX_FINDINGS = 30
@@ -563,6 +563,19 @@ export function pruneClosed(ledger: Ledger, keep: ReadonlySet<string>): Ledger {
     records.filter((r, n) => n >= records.length - MAX_CLOSED || keep.has(r.id))
 
   return { ...ledger, closed: pruned(ledger.closed), closedFindings: pruned(ledger.closedFindings) }
+}
+
+/**
+ * The ids pruneClosed must keep: each closed finding asked as an item still open, so reopenAskedFindings finds it
+ * when that item closes, and each id with a press label.
+ */
+export function keepIds(ledger: Ledger, presses: Readonly<Record<string, unknown>>): Set<string> {
+  const open = new Set(ledger.items.map(i => i.id))
+
+  return new Set([
+    ...ledger.closedFindings.filter(f => f.askedAs !== undefined && open.has(f.askedAs)).map(f => f.id),
+    ...Object.keys(presses),
+  ])
 }
 
 function idNumber(id: string): number {

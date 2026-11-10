@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { describe, test } from 'node:test'
 
 import { buildPrompt, latestBatch } from './model-text'
-import { EMPTY, addAgentItem, applyExchangeUpdate, applyUpdate, closeItem, parseReply, upgradeLedger } from './ledger'
+import { EMPTY, addAgentItem, applyExchangeUpdate, applyUpdate, closeItem, keepIds, parseReply, pruneClosed, upgradeLedger } from './ledger'
 
 /** Drops undefined fields, as the source suite's toEqual ignores them. */
 function plain(value: unknown): unknown {
@@ -338,4 +338,24 @@ test('an item saved before items kept a path upgrades to path null, open and clo
   const upgraded = upgradeLedger(old)
   assert.deepEqual(upgraded.items.map(i => i.path), [null])
   assert.deepEqual(upgraded.closed.map(c => c.item?.path), [null])
+})
+
+describe('pruneClosed', () => {
+  const closed = (n: number) => ({ id: `i${n}`, kind: 'question' as const, ask: `Ask ${n}?`, outcome: 'yes', how: 'answered' as const, at: n })
+  const finding = (n: number, askedAs?: string) => ({
+    id: `f${n}`, kind: 'issue' as const, title: `Finding ${n}`, detail: '', path: null, at: n,
+    ...(askedAs ? { askedAs } : {}), how: 'update' as const, outcome: `asked as ${askedAs}`, closedAt: n,
+  })
+
+  test('keeps the newest 5 records, and an older record whose id is in keep', () => {
+    const ledger = { ...EMPTY, closed: Array.from({ length: 20 }, (_, n) => closed(n)) }
+    assert.deepEqual(pruneClosed(ledger, new Set()).closed.map(c => c.id), ['i15', 'i16', 'i17', 'i18', 'i19'])
+    assert.deepEqual(pruneClosed(ledger, new Set(['i2'])).closed.map(c => c.id), ['i2', 'i15', 'i16', 'i17', 'i18', 'i19'])
+  })
+
+  test('keepIds holds a closed finding asked as an open item, and each pressed id', () => {
+    const open = { id: 'i9', kind: 'question' as const, label: null, ask: 'Fix it?', options: [], rec: null, helps: [], turn: 1, at: 1, from: 'update' as const, path: null }
+    const ledger = { ...EMPTY, items: [open], closedFindings: [finding(1, 'i9'), finding(2, 'i8'), finding(3)] }
+    assert.deepEqual([...keepIds(ledger, { i4: {} })].sort(), ['f1', 'i4'])
+  })
 })

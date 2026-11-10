@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { describe, test } from 'node:test'
 
-import { EMPTY, parseReply } from './core/ledger'
+import { EMPTY, closeItem, parseReply } from './core/ledger'
 import { readCodexTurn } from './core/codex-transcript'
 import type { ModelResult } from './model'
 import { STATE_KEY, emptySession, upgradeState, type State } from './state'
@@ -352,6 +352,47 @@ describe('turn tracker', () => {
     assert.deepEqual(saved.sessions[S].queue, [])
     assert.equal(saved.sessions[S].offset, t.files.text.length)
     assert.equal(asks(saved).length, 1)
+  })
+})
+
+describe('save keeps the stored state small', () => {
+  const closed = (n: number) => ({ id: `i${n}`, kind: 'question' as const, ask: `Ask ${n}?`, outcome: 'yes', how: 'answered' as const, at: n })
+  const finding = (n: number, askedAs?: string) => ({
+    id: `f${n}`, kind: 'issue' as const, title: `Finding ${n}`, detail: '', path: null, at: n,
+    ...(askedAs ? { askedAs } : {}), how: 'update' as const, outcome: 'closed', closedAt: n,
+  })
+
+  test('a session with 20 closed records saves 5, and told keeps only those', async () => {
+    const ids = Array.from({ length: 20 }, (_, n) => `i${n}`)
+    const session = { ...emptySession(), ledger: { ...EMPTY, closed: ids.map((_, n) => closed(n)) }, told: { inbox: null, closed: ids } }
+    const t = setup({ storage: fakeStorage({ version: 3, terminals: {}, sessions: { [S]: session } }) })
+    await t.tracker.start()
+    await t.tracker.edit(S, s => s)
+    const saved = t.storage.saved().sessions[S]
+    assert.deepEqual(saved.ledger.closed.map(c => c.id), ['i15', 'i16', 'i17', 'i18', 'i19'])
+    assert.deepEqual(saved.told.closed, ['i15', 'i16', 'i17', 'i18', 'i19'])
+  })
+
+  test('a finding pruned past 5 still reopens when the open question it was asked as is dismissed', async () => {
+    const open = { id: 'i30', kind: 'question' as const, label: null, ask: 'Fix the leak?', options: [], rec: null, helps: [], turn: 1, at: 1, from: 'update' as const, path: null }
+    const ledger = { ...EMPTY, items: [open], closedFindings: [finding(1, 'i30'), ...[2, 3, 4, 5, 6, 7, 8].map(n => finding(n))] }
+    const t = setup({ storage: fakeStorage({ version: 3, terminals: {}, sessions: { [S]: { ...emptySession(), ledger } } }) })
+    await t.tracker.start()
+    await t.tracker.edit(S, s => s)
+    assert.deepEqual(t.storage.saved().sessions[S].ledger.closedFindings.map(f => f.id), ['f1', 'f4', 'f5', 'f6', 'f7', 'f8'])
+    await t.tracker.edit(S, s => ({ ...s, ledger: closeItem(s.ledger, 'i30', { how: 'dismissed', outcome: 'dismissed' }, 2) }))
+    assert.deepEqual(t.storage.saved().sessions[S].ledger.findings.map(f => f.id), ['f1'])
+  })
+
+  test('a stored state of a newer version is never overwritten', async () => {
+    const stored = { version: 4, sessions: {}, index: ['x'] }
+    const storage = fakeStorage(stored)
+    const logs: string[] = []
+    const tracker = createTracker({ storage, clock: fakeClock().clock, read: async () => null, model: fakeModel().model, log: m => logs.push(m) })
+    await tracker.start()
+    await tracker.markPaneLaunch('pane-1', 5)
+    assert.deepEqual(storage.saved(), stored)
+    assert.deepEqual(logs, ['turns: stored state version 4 is newer than this plugin'])
   })
 })
 

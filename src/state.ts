@@ -185,6 +185,11 @@ function upgradeTold(raw: unknown): Told {
   }
 }
 
+/** The version of a saved value newer than this plugin knows, which it must not overwrite; null otherwise. */
+export function newerVersion(raw: unknown): number | null {
+  return isObject(raw) && typeof raw.version === 'number' && raw.version > 3 ? raw.version : null
+}
+
 /**
  * Reads any saved value into the current state shape. A missing or unreadable value is the empty state.
  * `now` is the touch time for a session saved before sessions kept one.

@@ -10,13 +10,13 @@
 //   6. A failed model run keeps the turn for the next `done` or start. After 3 failures the turn is dropped
 //      and counted in `unread`.
 // The whole state is one storage value, so step 3 is one write and a crash leaves it all or nothing.
-import { EMPTY, applyExchangeUpdate, closeItem } from './core/ledger'
+import { EMPTY, applyExchangeUpdate, closeItem, keepIds, pruneClosed } from './core/ledger'
 import { type CodexTurnRead } from './core/codex-transcript'
 import { ORCA, buildPrompt, screenText } from './core/model-text'
 import { nowRows } from './core/now'
 import type { Exchange, Ledger, Press } from './core/types'
 import type { ModelResult } from './model'
-import { STATE_KEY, emptySession, emptyState, upgradeState, type CurrentState, type PressLabel, type SessionState, type Turn } from './state'
+import { STATE_KEY, emptySession, emptyState, newerVersion, upgradeState, type CurrentState, type PressLabel, type SessionState, type Turn } from './state'
 import { readTurn, type TurnRead } from './transcript'
 
 /** The part of `orca.storage` the tracker uses. */
@@ -90,6 +90,13 @@ function pressFor(s: SessionState, turnId: string): { press: Press; answer: stri
   return hit ? { press: { id: hit[0], action: hit[1].kind === 'explain' ? 'explain' : 'answer' }, answer: hit[1].answer } : null
 }
 
+/** Cuts the session's closed records, and the told ids of records cut. */
+function pruned(s: SessionState): SessionState {
+  const ledger = pruneClosed(s.ledger, keepIds(s.ledger, s.presses))
+  const kept = new Set(ledger.closed.map(c => c.id))
+  return { ...s, ledger, told: { ...s.told, closed: s.told.closed.filter(id => kept.has(id)) } }
+}
+
 /** Where the next turn starts: after the last queued turn, else at the saved offset. */
 function readFrom(s: SessionState): number {
   return s.queue.at(-1)?.nextOffset ?? s.offset
@@ -107,6 +114,8 @@ export function createTracker(deps: TrackerDeps) {
   const { storage, clock } = deps
   let state: CurrentState = emptyState()
   let writes: Promise<void> = Promise.resolve()
+  /** True when the stored state is a newer version: save writes nothing, so this plugin never overwrites it. */
+  let readOnly = false
   /** Each session's poll deadline, while a poll runs. */
   const deadlines = new Map<string, number>()
   /** Sessions whose model loop runs. */
@@ -116,6 +125,8 @@ export function createTracker(deps: TrackerDeps) {
 
   /** Saves a copy of the whole state. Writes land in the order they were made. */
   function save(): Promise<void> {
+    if (readOnly) return Promise.resolve()
+    state = { ...state, sessions: Object.fromEntries(Object.entries(state.sessions).map(([id, s]) => [id, pruned(s)])) }
     const copy = JSON.parse(JSON.stringify(state)) as CurrentState
     writes = writes.catch(() => undefined).then(() => storage.set(STATE_KEY, copy))
     void writes.then(() => deps.changed?.(), () => undefined)
@@ -280,7 +291,13 @@ export function createTracker(deps: TrackerDeps) {
 
     /** Loads the saved state, runs every queued turn and reads each tracked session again. */
     async start(): Promise<void> {
-      state = upgradeState(await storage.get(STATE_KEY), clock.now())
+      const raw = await storage.get(STATE_KEY)
+      const newer = newerVersion(raw)
+      if (newer !== null) {
+        readOnly = true
+        deps.log?.(`turns: stored state version ${newer} is newer than this plugin`)
+      }
+      state = upgradeState(raw, clock.now())
       for (const [id, s] of Object.entries(state.sessions)) if (s.queue.length > 0) background(drain(id, true))
       for (const { sessionId } of Object.values(state.terminals)) if (!isCodex(sessionId)) background(poll(sessionId))
       for (const [sessionId, s] of Object.entries(state.sessions))
