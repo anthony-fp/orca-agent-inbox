@@ -167,11 +167,12 @@ Run: 2026-11-13, Orca 1.4.257, commit 2eedef9, loaded with `orca plugin dev relo
 | An option press on a live question reads "✓ <option>", then the row closes after the turn | Pass. A new Claude (`term_2acfa4e3`) and a new Codex (`term_3ff2a2ae`) agent each asked "Test: pick a color?". Pressing Red and Blue: each agent replied with its color, and each row closed as ✓ Red / ✓ Blue. |
 | For 10 minutes, the plugin log shows no new `value exceeds`, `press: save failed` or `turns: save failed` line | Pass. The last such line is 09:50:32, before the first terminal list; 0 lines after it through 10:01. |
 
-## Confirm race fix (0.4.3) — pending
+## Confirm race fix (0.4.3)
 
-Not run yet. It runs after the plugin is installed. Plan: `docs/confirm-race-plan.md`, C4.
+Run: 2026-11-13, Orca 1.4.257, Claude Code 2.1.323, commit 7bc2c5f, loaded with `orca plugin dev reload .`. Plan: `docs/confirm-race-plan.md`, C4. Times are local wall-clock.
 
 | Check | Result |
 |---|---|
-| Press an option while the agent works on a long turn. The row reads "✓ <option>", and the question closes after that turn | Pending. |
-| Press an option in a terminal whose agent waits at a permission prompt for more than 10 minutes. The row reads "Sent, not confirmed" | Pending. |
+| Press an option while the agent works on a long turn. The row reads "✓ <option>", and the question closes after that turn | Not reached live. The test agent (`term_54290fe2`) was told to run `sleep 120` in the foreground, but Claude Code moved it to the background, so the turn ended at 10:15, before the press. The press on the idle agent passed: "Apple" arrived, the agent replied "Apple", and the row closed as ✓ Apple. The long-turn case is covered by the C1, C2 and C3 tests in `src/presses.test.ts`. |
+| Press an option in a terminal whose agent waits at a permission prompt for more than 10 minutes. The row reads "Sent, not confirmed" | Not reached live. The test agent (`term_5150bf7a`) ran in auto mode, so `touch /tmp/inbox-live-test-b` ran with no permission prompt. The press passed as a normal answer: the agent replied "One", and the row closed as ✓ One. The 10-minute label is covered by the C3 tests in `src/presses.test.ts`. |
+| A Claude session that the worker has no record of rebinds at its next prompt | Pass. This session (`88e4942a`), stranded since the 0.4.2 reload, logged `bind: unknown session from prompt hook` at 10:13:45, and its next `record` call returned "Recorded". |
