@@ -58,7 +58,39 @@ export const KEEP_MS = 24 * 60 * 60 * 1000
 /** Save drops evictable sessions, oldest first, while the state is over this size. Orca rejects a value over 262144 bytes. */
 export const BUDGET = 200_000
 
+/** Save keeps at most this many launch times and panes of staged Codex turns, newest first, beside the kept panes. */
+export const PANE_CAP = 200
+export const STAGED_PANE_CAP = 10
+export const STAGED_PER_PANE = 5
+/** Save drops a pane key, thread id, turn id or Codex home longer than this as JSON, so these fields cannot fill the value. */
+export const MAX_FIELD = 200
+
 const byteSize = (v: unknown) => Buffer.byteLength(JSON.stringify(v))
+const fits = (...fields: string[]) => fields.every(f => byteSize(f) <= MAX_FIELD)
+
+/**
+ * The launch times and staged Codex turns that can stay. A pane bound to a session, or to a terminal that is live (any
+ * terminal when `live` is null), is kept. Another pane stays for `KEEP_MS` from its launch (always, when the launch is
+ * unknown or `live` is null), up to the caps. Each pane keeps its newest STAGED_PER_PANE turns.
+ */
+function trimPanes(state: CurrentState, live: ReadonlySet<string> | null, now: number): CurrentState {
+  const kept = new Set(Object.keys(state.panes))
+  for (const [handle, t] of Object.entries(state.terminals)) if (t.paneKey && (!live || live.has(handle))) kept.add(t.paneKey)
+  const stays = (key: string) => fits(key) && (kept.has(key) || !live || now - (state.paneLaunches[key] ?? now) < KEEP_MS)
+  const launches = Object.entries(state.paneLaunches).filter(([key]) => stays(key))
+  // Newest launch first; on a tie, the later entry.
+  const newest = new Set(launches.filter(([key]) => !kept.has(key)).reverse().sort(([, a], [, b]) => b - a).slice(0, PANE_CAP).map(([key]) => key))
+  // stageCodex moves its pane last, so the last panes are the newest.
+  const staged = Object.entries(state.pendingCodex ?? {})
+    .map(([key, list]) => [key, list.filter(e => fits(e.threadId, e.codexHome, e.turnId)).slice(-STAGED_PER_PANE)] as const)
+    .filter(([key, list]) => list.length > 0 && stays(key))
+  const pendingCodex = Object.fromEntries([...staged.filter(([key]) => kept.has(key)), ...staged.filter(([key]) => !kept.has(key)).slice(-STAGED_PANE_CAP)])
+  return {
+    ...state,
+    paneLaunches: Object.fromEntries(launches.filter(([key]) => kept.has(key) || newest.has(key))),
+    ...(state.pendingCodex ? { pendingCodex: Object.keys(pendingCodex).length > 0 ? pendingCodex : undefined } : {}),
+  }
+}
 
 /**
  * The sessions that can go, oldest `touchedAt` first; none when `live` is null. A session is kept when it has an open
@@ -171,7 +203,7 @@ export function createTracker(deps: TrackerDeps) {
   /** Saves a copy of the whole state. Writes land in the order they were made. */
   function save(): Promise<void> {
     if (readOnly) return Promise.resolve()
-    state = { ...state, sessions: Object.fromEntries(Object.entries(state.sessions).map(([id, s]) => [id, pruned(s)])) }
+    state = trimPanes({ ...state, sessions: Object.fromEntries(Object.entries(state.sessions).map(([id, s]) => [id, pruned(s)])) }, deps.live?.() ?? null, clock.now())
     // Best effort: when only kept sessions are left, the save still runs.
     let size = byteSize(state)
     const drop = new Set<string>()
@@ -486,8 +518,8 @@ export function createTracker(deps: TrackerDeps) {
       const old = state.pendingCodex?.[paneKey] ?? []
       const found = old.find(entry => entry.threadId === threadId && entry.turnId === turnId)
       if (found) return
-      const entries = [...old, { threadId, codexHome, turnId }]
-      state = { ...state, pendingCodex: { ...state.pendingCodex, [paneKey]: entries } }
+      const { [paneKey]: _, ...others } = state.pendingCodex ?? {}
+      state = { ...state, pendingCodex: { ...others, [paneKey]: [...old, { threadId, codexHome, turnId }] } }
       await save()
     },
 

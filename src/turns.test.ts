@@ -9,7 +9,7 @@ import type { ModelResult } from './model'
 import type { Finding } from './core/types'
 import { STATE_KEY, emptySession, upgradeState, type SessionState, type State } from './state'
 import { fakeClock as clockAt, rejectingStorage } from './test-clock'
-import { BUDGET, LIMIT_MS, createTracker, screenFor, type Clock } from './turns'
+import { BUDGET, KEEP_MS, LIMIT_MS, MAX_FIELD, PANE_CAP, STAGED_PANE_CAP, createTracker, screenFor, type Clock } from './turns'
 
 const S = 'session-1'
 const T = 'terminal-1'
@@ -693,6 +693,69 @@ describe('retention', () => {
     await t.save()
     assert.deepEqual(Object.keys(t.saved().sessions).sort(), Object.keys(sessions).sort())
     assert.deepEqual(t.saved().terminals, { term_gone: { sessionId: 'gone' } })
+  })
+})
+
+describe('pane launch times and staged Codex turns stay bounded', () => {
+  const DAY = 24 * 60 * 60 * 1000
+  const LIVE = 'term_live'
+
+  /** A started tracker whose terminal list gave `live`. `at(t)` sets the time. */
+  async function panes(live: Set<string> | null, stored: Partial<State & { version: 3 }> = {}) {
+    let t = 100 * DAY
+    const storage = rejectingStorage(262144, { [STATE_KEY]: { version: 3, terminals: {}, sessions: {}, panes: {}, paneLaunches: {}, ...stored } })
+    const clock: Clock = { now: () => t, sleep: () => new Promise(() => undefined) }
+    const tracker = createTracker({ storage, clock, read: async () => null, model: fakeModel().model, live: () => live })
+    await tracker.start()
+    return { tracker, at: (n: number) => { t = n }, now: () => t, saved: () => storage.saved(STATE_KEY) as State & { version: 3 } }
+  }
+  const stageMany = async (t: Awaited<ReturnType<typeof panes>>, key: string, n: number) => {
+    for (let i = 0; i < n; i++) await t.tracker.stageCodex(key, `thread-${key}`, '/codex', `turn-${i}`)
+  }
+
+  test('300 dead panes with 8 staged turns each are gone from the save 2 days later', async () => {
+    const t = await panes(new Set())
+    for (let i = 0; i < 300; i++) {
+      await t.tracker.markPaneLaunch(`pane-${i}`, t.now())
+      await stageMany(t, `pane-${i}`, 8)
+    }
+    t.at(t.now() + 2 * DAY)
+    await t.tracker.markPaneLaunch('pane-new', t.now())
+    assert.deepEqual(Object.keys(t.saved().paneLaunches), ['pane-new'])
+    assert.equal(t.saved().pendingCodex, undefined)
+  })
+
+  test('an old pane bound to a live terminal keeps its launch time and its newest 5 staged turns', async () => {
+    const t = await panes(new Set([LIVE]), {
+      terminals: { [LIVE]: { sessionId: 's', paneKey: 'pane-live' } }, sessions: { s: emptySession(0) }, paneLaunches: { 'pane-live': 0 },
+    })
+    await stageMany(t, 'pane-live', 8)
+    await t.tracker.markPaneLaunch('pane-new', t.now())
+    assert.equal(t.saved().paneLaunches['pane-live'], 0)
+    assert.deepEqual(t.saved().pendingCodex?.['pane-live']?.map(e => e.turnId), ['turn-3', 'turn-4', 'turn-5', 'turn-6', 'turn-7'])
+  })
+
+  test('a launch younger than KEEP_MS on a pane with no terminal yet is kept, and goes once old', async () => {
+    const t = await panes(new Set())
+    await t.tracker.markPaneLaunch('pane-fresh', t.now() - KEEP_MS + 1000)
+    await stageMany(t, 'pane-fresh', 1)
+    assert.ok(t.saved().paneLaunches['pane-fresh'])
+    assert.ok(t.saved().pendingCodex?.['pane-fresh'])
+    t.at(t.now() + 1000)
+    await t.tracker.markPaneLaunch('pane-new', t.now())
+    assert.equal(t.saved().paneLaunches['pane-fresh'], undefined)
+    assert.equal(t.saved().pendingCodex, undefined)
+  })
+
+  test('with no terminal list, the caps still hold: 200 newest launches, 10 newest staged panes, no oversized field', async () => {
+    const t = await panes(null)
+    for (let i = 0; i < 250; i++) await t.tracker.markPaneLaunch(`pane-${i}`, t.now() + i)
+    for (let i = 0; i < 15; i++) await stageMany(t, `staged-${i}`, 1)
+    await t.tracker.stageCodex('staged-long', 'thread', 'x'.repeat(MAX_FIELD), 'turn')
+    const launches = Object.keys(t.saved().paneLaunches)
+    assert.equal(launches.length, PANE_CAP)
+    assert.ok(launches.includes('pane-249') && !launches.includes('pane-49'))
+    assert.deepEqual(Object.keys(t.saved().pendingCodex ?? {}), Array.from({ length: STAGED_PANE_CAP }, (_, i) => `staged-${i + 5}`))
   })
 })
 
