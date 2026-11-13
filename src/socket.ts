@@ -70,7 +70,7 @@ export type Answer = { text: string } | { error: string }
 
 export type AnswerDeps = {
   state(): State
-  edit(sessionId: string, change: (s: SessionState) => SessionState): Promise<void>
+  edit(sessionId: string, change: (s: SessionState) => SessionState, opts?: { undoOnFail?: boolean }): Promise<void>
   now(): number
   /** The plan note for a session (planNote), read from its plan file now; null when its folder is not known. */
   planNote(sessionId: string): Promise<string | null>
@@ -106,13 +106,13 @@ const TYPES = ['prompt-start', 'inbox-text', 'record', 'close', 'codex-turn']
 /** Answers one request. */
 export function createAnswerer(deps: AnswerDeps): (request: unknown) => Promise<Answer> {
   /** Runs `change` on the session and saves it; null when the session is gone. */
-  async function apply<T>(sessionId: string, change: (s: SessionState) => { session: SessionState; out: T }): Promise<T | null> {
+  async function apply<T>(sessionId: string, change: (s: SessionState) => { session: SessionState; out: T }, opts?: { undoOnFail?: boolean }): Promise<T | null> {
     let out: T | null = null
     await deps.edit(sessionId, s => {
       const r = change(s)
       out = r.out
       return r.session
-    })
+    }, opts)
     return out
   }
 
@@ -169,11 +169,12 @@ export function createAnswerer(deps: AnswerDeps): (request: unknown) => Promise<
     if (request.type === 'record' || request.type === 'close') {
       const run = request.type === 'record' ? recordItem : recordClose
       const args = isObject(request.args) ? request.args : {}
+      // The agent hears "failed" and may call again: an unsaved item must not stay, or the retry makes a second one.
       const result = await apply(sessionId, s => {
         // The tool stamps with ledger.turn, so it reads the active turn; the ledger keeps the transcript's count.
         const r = run(host, { ...s.ledger, turn: activeTurn(s) }, args, deps.now())
         return { session: { ...s, ledger: { ...r.ledger, turn: s.ledger.turn } }, out: r.result }
-      })
+      }, { undoOnFail: true })
       return result === null ? { error: 'unknown session' } : { text: result }
     }
 

@@ -720,4 +720,47 @@ describe('failed writes', () => {
     assert.equal(changed, 1)
     assert.deepEqual(logs.filter(l => l.startsWith('turns: save failed')), ['turns: save failed: value exceeds 262144 bytes'])
   })
+
+  const FOUND: Finding = { id: 'i1', kind: 'issue', title: 'Retry loop', detail: 'It never stops.', path: null, at: 0 }
+  const OTHER: Finding = { ...FOUND, id: 'i2', title: 'Second' }
+  const addFinding = (f: Finding) => (s: SessionState) => ({ ...s, ledger: { ...s.ledger, findings: [...s.ledger.findings, f] } })
+
+  async function failing() {
+    const time = fakeClock()
+    /** How many of the next writes reject. */
+    const fails = { next: 0 }
+    let saved: State | null = null
+    const storage = {
+      get: async () => null,
+      set: async (_key: string, value: unknown) => {
+        if (fails.next > 0 && fails.next--) throw new Error('value exceeds 262144 bytes')
+        saved = value as State
+      },
+    }
+    const tracker = createTracker({ storage, clock: time.clock, read: async () => null, model: fakeModel().model })
+    await tracker.start()
+    await tracker.track(T, S)
+    await time.run()
+    return { tracker, fails, saved: () => saved! }
+  }
+
+  test('an undoOnFail edit whose write rejects leaves no change in memory, and a later save does not write it', async () => {
+    const t = await failing()
+    t.fails.next = 1
+    await assert.rejects(t.tracker.edit(S, addFinding(FOUND), { undoOnFail: true }))
+    assert.deepEqual(t.tracker.state().sessions[S].ledger.findings, [])
+    await t.tracker.edit(S, s => s)
+    assert.deepEqual(t.saved().sessions[S].ledger.findings, [])
+  })
+
+  test('when a second undoOnFail edit comes before the first write rejects, memory keeps the second edit', async () => {
+    const t = await failing()
+    t.fails.next = 1
+    const first = t.tracker.edit(S, addFinding(FOUND), { undoOnFail: true })
+    const second = t.tracker.edit(S, addFinding(OTHER), { undoOnFail: true })
+    await assert.rejects(first)
+    await second
+    assert.deepEqual(t.tracker.state().sessions[S].ledger.findings.map(f => f.id), ['i1', 'i2'])
+    assert.deepEqual(t.saved().sessions[S].ledger.findings.map(f => f.id), ['i1', 'i2'])
+  })
 })

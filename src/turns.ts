@@ -441,11 +441,22 @@ export function createTracker(deps: TrackerDeps) {
       await save()
     },
 
-    /** Changes a session and saves it. The change lands in this tick, before the write: a press checks and sends in one tick. */
-    edit(sessionId: string, change: (s: SessionState) => SessionState): Promise<void> {
+    /**
+     * Changes a session and saves it. The change lands in this tick, before the write: a press checks and sends in one tick.
+     * With `undoOnFail`, a rejected write undoes the change, for a caller that reports the failure; unless a later change,
+     * whose own save carries this one, came in between.
+     */
+    edit(sessionId: string, change: (s: SessionState) => SessionState, opts: { undoOnFail?: boolean } = {}): Promise<void> {
       if (!state.sessions[sessionId]) return Promise.resolve()
+      const before = state.sessions[sessionId]
       update(sessionId, cur => ({ ...change(cur), touchedAt: clock.now() }))
-      return save()
+      const written = save()
+      if (!opts.undoOnFail) return written
+      const mine = state.sessions[sessionId]
+      return written.catch(e => {
+        if (mine && state.sessions[sessionId] === mine) update(sessionId, () => before)
+        throw e
+      })
     },
 
     prune,

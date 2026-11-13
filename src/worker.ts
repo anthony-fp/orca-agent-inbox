@@ -476,7 +476,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
 
   const answer = createAnswerer({
     state: () => tracker.state(),
-    edit: (id, change) => tracker.edit(id, change),
+    edit: (id, change, opts) => tracker.edit(id, change, opts),
     now: () => deps.clock.now(),
     planNote: async id => {
       const read = await readPlan(id)

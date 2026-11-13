@@ -65,7 +65,7 @@ function setup(storage = memoryStorage(), time = fakeClock(1000), file = { text:
   const tracker = createTracker({ storage, clock: time.clock, read: async () => Buffer.from(file.text), model })
   const answer = createAnswerer({
     state: () => tracker.state(),
-    edit: (id, change) => tracker.edit(id, change),
+    edit: (id, change, opts) => tracker.edit(id, change, opts),
     now: () => time.now(),
     planNote: async () => PLAN,
   })
@@ -100,6 +100,16 @@ describe('tool calls on the session ledger', () => {
     assert.match(await t.call('record', QUESTION), /^Recorded\./)
     assert.equal(t.storage.saved().sessions['session-2'].ledger.items[0].ask, QUESTION.ask)
     assert.equal(t.storage.saved().sessions[S].ledger.items.length, 0)
+  })
+
+  test('a record whose save rejects throws to the socket, which answers failed, and the item is not in memory', async () => {
+    const fails = { on: false }
+    const t = setup({ ...memoryStorage(), set: async () => { if (fails.on) throw new Error('value exceeds 262144 bytes') } })
+    await t.tracker.track(T, S)
+    await t.promptStart()
+    fails.on = true
+    await assert.rejects(t.send({ type: 'record', sessionId: S, args: QUESTION }), /exceeds/)
+    assert.deepEqual(t.session().ledger.items, [])
   })
 
   test('record answers as recordItem does, word for word, and saves the item', async () => {
