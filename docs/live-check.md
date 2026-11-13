@@ -156,13 +156,13 @@ Dev plugin from commit `5f7c9d0`, loaded from the dev folder and enabled with `o
 
 States not seen by the agent: each button's labels, the Snooze menu, a red error, a partial or uncertain hand-off, a snooze ending, the Open match when a folder and its worktree both hold the cwd, and which `hostId` Orca gives this machine (`'local'` or null).
 
-## Sending hotfix (0.4.2) — pending
+## Sending hotfix (0.4.2)
 
-Not run yet. It runs after the plugin is installed. Plan: `docs/sending-hotfix-plan.md`, H4.
+Run: 2026-11-13, Orca 1.4.257, commit 2eedef9, loaded with `orca plugin dev reload . --approve`. Plan: `docs/sending-hotfix-plan.md`, H4. Times are local wall-clock.
 
 | Check | Result |
 |---|---|
-| After a reload, the mtime of `~/Library/Application Support/orca/plugins-data/local.agent-inbox/storage.json` changes, and `Buffer.byteLength(JSON.stringify(state))` is ≤ 200,000 | Pending. |
-| Every terminal in `orca terminal list --json` that has an `agentIdentity` still has its binding in `state.terminals` | Pending. |
-| An option press on a live question reads "✓ <option>", then the row closes after the turn | Pending. |
-| For 10 minutes, the plugin log shows no new `value exceeds`, `press: save failed` or `turns: save failed` line | Pending. |
+| After a reload, the mtime of `~/Library/Application Support/orca/plugins-data/local.agent-inbox/storage.json` changes, and `Buffer.byteLength(JSON.stringify(state))` is ≤ 200,000 | Pass. Before: 261,750 bytes, last write 05:28. After reload: first write 09:50:54 at 182,537 bytes; 174,063 bytes at 09:53:43. |
+| Every terminal in `orca terminal list --json` that has an `agentIdentity` still has its binding in `state.terminals` | Fail, not caused by 0.4.2. 5 of 7 agent terminals have no binding. All 5 started between 08:30 and 09:42, while every save rejected, so their bindings lived only in memory and the reload loaded the 05:28 state. The log has no eviction. They do not rebind on their own: `tracker.bind` refuses an unknown session (`src/turns.ts:421`), so their tool calls get 'unknown session'. Agents started after the reload bind normally. |
+| An option press on a live question reads "✓ <option>", then the row closes after the turn | Pass. A new Claude (`term_2acfa4e3`) and a new Codex (`term_3ff2a2ae`) agent each asked "Test: pick a color?". Pressing Red and Blue: each agent replied with its color, and each row closed as ✓ Red / ✓ Blue. |
+| For 10 minutes, the plugin log shows no new `value exceeds`, `press: save failed` or `turns: save failed` line | Pass. The last such line is 09:50:32, before the first terminal list; 0 lines after it through 10:01. |
