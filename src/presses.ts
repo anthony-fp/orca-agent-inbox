@@ -17,6 +17,10 @@ import type { Clock } from './turns'
 /** How long a send waits for its prompt after the agent is done. */
 export const CONFIRM_MS = 10_000
 export const CONFIRM_POLL_MS = 1000
+/** A send still not seen after this long reads "Sent, not confirmed". The stored label stays `sending`. */
+export const UNCONFIRMED_MS = 10 * 60_000
+/** confirm() stops watching a send this long after the press. The label stays `sending`. */
+export const WATCH_MS = 24 * 60 * 60_000
 
 /** The newest status Orca reported for a terminal's main agent. */
 export type TerminalStatus = 'working' | 'blocked' | 'waiting' | 'done'
@@ -197,10 +201,12 @@ const HANDOFF_TEXT: Record<Handoff['outcome'], (h: Handoff) => RowLabel> = {
   uncertain: h => ({ text: `Hand off may have started: check worktree ${h.worktree}`, tone: 'danger', copy: null }),
 }
 
-export function rowLabel(label: PressLabel): RowLabel {
+/** A press's row label at `now`. The default 0 never reads a send as old. */
+export function rowLabel(label: PressLabel, now = 0): RowLabel {
   if (label.kind === 'handoff' && label.handoff) return HANDOFF_TEXT[label.handoff.outcome](label.handoff)
   switch (label.state) {
     case 'sending':
+      if (now - label.at >= UNCONFIRMED_MS) return { text: 'Sent, not confirmed', tone: 'muted', copy: label.text }
       return { text: label.kind === 'explain' ? 'Explaining…' : 'Sending…', tone: 'muted', copy: null }
     case 'answered':
       return { text: DONE_TEXT[label.kind](label), tone: 'success', copy: null }
@@ -223,7 +229,7 @@ export function labelledRows(
     Object.entries(s.presses).flatMap(([id, l]) => (l.kind === 'fix' && l.state === 'answered' ? [[id, l.at]] : [])),
   )
   const found = findingRows(s.ledger, now, fixesSent)
-  const label = (id: string) => (s.presses[id] && s.presses[id].state !== 'held' ? rowLabel(s.presses[id]) : null)
+  const label = (id: string) => (s.presses[id] && s.presses[id].state !== 'held' ? rowLabel(s.presses[id], now) : null)
   const explained = (id: string) => s.presses[id]?.kind === 'explain'
   const handedOff = (id: string) => s.presses[id]?.handoff !== undefined
   const add = (r: NowRow): LabelledRow => ({ ...r, label: label(r.id), explained: explained(r.id), handedOff: handedOff(r.id) })
@@ -271,11 +277,18 @@ export function setLabel(s: SessionState, id: string, label: PressLabel): Sessio
 export function createPresses(deps: PressDeps) {
   const { clock } = deps
 
-  /** Sets a press's label, only while the row is open and still shows that press. */
-  function settle(sessionId: string, id: string, at: number, change: Partial<PressLabel>): Promise<void> {
+  /**
+   * Sets a press's label, only while the row is open and still shows that press. `promptAt`: where the answer's prompt
+   * starts. Before the session's offset, its turn has drained without this press's turnId, so the answer closes its
+   * row here, as drain does (src/turns.ts settle). At or after the offset, drain closes it.
+   */
+  function settle(sessionId: string, id: string, at: number, change: Partial<PressLabel>, promptAt?: number): Promise<void> {
     return deps.edit(sessionId, s => {
       const cur = s.presses[id]
-      return cur && cur.at === at && isOpenRow(s.ledger, id) ? setLabel(s, id, { ...cur, ...change }) : s
+      if (!cur || cur.at !== at || !isOpenRow(s.ledger, id)) return s
+      const next = setLabel(s, id, { ...cur, ...change })
+      const drained = cur.kind === 'answer' && promptAt !== undefined && promptAt < s.offset && s.ledger.items.some(i => i.id === id)
+      return drained ? { ...next, ledger: closeItem(next.ledger, id, { how: 'answered', outcome: cur.answer }, clock.now()) } : next
     })
   }
 
@@ -293,7 +306,7 @@ export function createPresses(deps: PressDeps) {
         : promptAfter(bytes, label.from ?? 0, label.text) : null
       const done = deps.status(terminalId) === 'done'
       if (prompt)
-        return settle(sessionId, id, label.at, { state: 'answered', turnId: prompt.uuid })
+        return settle(sessionId, id, label.at, { state: 'answered', turnId: prompt.uuid }, prompt.at)
       // A queued answer has no transcript prompt until the current turn ends.
       if (done) {
         deadline ??= clock.now() + CONFIRM_MS
@@ -302,6 +315,7 @@ export function createPresses(deps: PressDeps) {
           : promptAfter(bytes, label.from ?? 0) : null
         if (otherPrompt || clock.now() >= deadline) return settle(sessionId, id, label.at, { state: 'undelivered' })
       } else deadline = null
+      if (clock.now() - label.at >= WATCH_MS) return
       await clock.sleep(CONFIRM_POLL_MS)
     }
   }

@@ -4,8 +4,9 @@ import { describe, test } from 'node:test'
 
 import { EMPTY, applyUpdate, parseReply } from './core/ledger'
 import { readFileSync } from 'node:fs'
+import { codexPromptAfter } from './core/codex-transcript'
 import type { ModelResult } from './model'
-import { CONFIRM_MS, answerText, createPresses, explainText, findingText, runText, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
+import { CONFIRM_MS, UNCONFIRMED_MS, answerText, createPresses, explainText, findingText, runText, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
 import type { Finding, Help } from './core/types'
 import { upgradeState } from './state'
 import { fakeClock } from './test-clock'
@@ -79,7 +80,7 @@ async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?:
   const item = s().ledger.items[0]
   const input = (over: Partial<PressInput> = {}): PressInput => ({ terminalId: T, sessionId: S, drawn: drawnToken(s()), id: item.id, action: 'answer', answer: 'Yes', ...over })
   const labelOf = (id: string) => {
-    const rows = labelledRows(s())
+    const rows = labelledRows(s(), time.now())
     return [...rows.questions, ...rows.tasks, ...rows.findings.issues, ...rows.findings.opportunities].find(r => r.id === id)?.label ?? null
   }
   const label = () => labelOf(item.id)
@@ -110,6 +111,51 @@ describe('presses', () => {
     await t.time.run(t.time.now() + 2000)
     assert.deepEqual(t.label(), { text: '✓ Yes', tone: 'success', copy: null })
     assert.equal(t.s().presses[t.item.id].turnId, 'turn-2')
+  })
+
+  test('C2: a Codex answer confirmed after its turn drained closes the question; the match gives the turn start', async () => {
+    const t = await setup({ codex: true })
+    t.status.set(T, 'working')
+    await t.presses.press(t.input())
+    const start = Buffer.byteLength(t.file.text)
+    t.file.text += codexPrompt('turn-2', `Re "${ASK}": Yes`)
+    assert.equal(codexPromptAfter(Buffer.from(t.file.text), 0, `Re "${ASK}": Yes`)?.at, start)
+    // The turn drains before confirm reads again: the offset moves past it, and the press has no turnId yet.
+    await t.tracker.edit(S, s => ({ ...s, offset: Buffer.byteLength(t.file.text), lastTurnId: 'turn-2' }))
+    await t.time.run(t.time.now() + 2000)
+    assert.equal(t.s().presses[t.item.id]?.turnId, 'turn-2')
+    const closed = t.s().ledger.closed.find(c => c.id === t.item.id)
+    assert.deepEqual([closed?.how, closed?.outcome], ['answered', 'Yes'])
+  })
+
+  test('C3: a reply on a handed-off task reads "Sent, not confirmed" after 10 min and keeps its receipt, also after a restart', async () => {
+    const t = await setup({ kind: 'do' })
+    const handoff = { worktree: 'test-the-build', operationId: 'op-1', outcome: 'started' as const }
+    await t.tracker.edit(S, s => ({ ...s, presses: { [t.item.id]: { state: 'answered', kind: 'handoff', answer: handoff.worktree, text: '', at: 1, handoff } } }))
+    t.status.set(T, 'working')
+    await t.presses.press(t.input({ action: 'reply', answer: 'Any news?' }))
+    await t.time.run(t.time.now() + UNCONFIRMED_MS + 60_000)
+    assert.equal(t.label()?.text, 'Sent, not confirmed')
+    assert.equal(t.s().presses[t.item.id].state, 'sending')
+    assert.deepEqual(t.s().presses[t.item.id].handoff, handoff)
+    assert.deepEqual(upgradeState(t.saved.get('state')).sessions[S].presses[t.item.id].handoff, handoff, 'the receipt survives a restart')
+  })
+
+  test('C3: a prompt queued behind an 11-minute working turn still confirms, and the question closes after its turn', async () => {
+    const t = await setup()
+    t.status.set(T, 'working')
+    await t.presses.press(t.input())
+    await t.time.run(t.time.now() + 11 * 60_000)
+    assert.equal(t.label()?.text, 'Sent, not confirmed')
+    t.file.text += prompt('p-2', `Re "${ASK}": Yes`)
+    await t.time.run(t.time.now() + 2000)
+    assert.equal(t.label()?.text, '✓ Yes')
+    t.file.text += reply('a-2', 'Shipped.')
+    t.status.set(T, 'done')
+    void t.tracker.done(T)
+    await t.time.run()
+    assert.equal(t.s().ledger.items.some(i => i.id === t.item.id), false)
+    assert.equal(t.s().ledger.closed.find(c => c.id === t.item.id)?.how, 'answered')
   })
 
   for (const state of ['working', 'blocked', 'waiting', 'done'] as const) {
@@ -506,4 +552,93 @@ describe('presses', () => {
 test('press text drops control characters an agent could put in a row', async () => {
   const { oneLine } = await import('./presses')
   assert.equal(oneLine('Use \u001b[2Jport\u0003 4000\tnow\nplease\u007f'), 'Use [2Jport 4000 now please')
+})
+
+// The confirm/drain race (docs/confirm-race-plan.md): a model that waits on a gate, and confirm() reads that can be blind.
+const RACE_ASK = 'Drop bell for now?'
+const YES = 'Drop bell for now (recommended)'
+
+async function raceSetup() {
+  const time = fakeClock(1000)
+  const saved = new Map<string, unknown>()
+  const storage = { get: async (k: string) => saved.get(k) ?? null, set: async (k: string, v: unknown) => void saved.set(k, structuredClone(v)) }
+  const file = { text: prompt('p-1', 'Prompt 1') + reply('a-1', 'Ship it?') }
+  // The model: each call waits until the test lets it go.
+  const gate = { open: true, waiting: [] as (() => void)[] }
+  const model = async (): Promise<ModelResult> => {
+    if (!gate.open) await new Promise<void>(r => gate.waiting.push(r))
+    return { ok: true, update: parseReply('NEW: decide | 2 | Rename the folder to tools? | Yes / No | yes')!, text: '', ms: 1 }
+  }
+  const tracker = createTracker({ storage, clock: time.clock, read: async () => Buffer.from(file.text), model })
+  await tracker.track(T, S, {})
+  const ledger = applyUpdate(EMPTY, parseReply(`NEW: decide | 1 | ${RACE_ASK} | ${YES} / Keep bell | -`)!, 0, 1)
+  await tracker.edit(S, s => ({ ...s, offset: file.text.length, lastTurnId: 'p-1', ledger }))
+  const status = new Map<string, TerminalStatus>([[T, 'working']])
+  // confirm()'s reads: `blind` makes them see no transcript, as a slow or failed read does.
+  const watch = { blind: false, reads: 0 }
+  const presses = createPresses({
+    state: () => tracker.state(), edit: (id, c) => tracker.edit(id, c), status: id => status.get(id),
+    send: async () => true,
+    read: async () => (watch.reads++, watch.blind ? null : Buffer.from(file.text)),
+    clock: time.clock,
+  })
+  const s = () => tracker.state().sessions[S]
+  const item = s().ledger.items[0]
+  const press = () => presses.press({ terminalId: T, sessionId: S, drawn: drawnToken(s()), id: item.id, action: 'answer', answer: YES })
+  const isOpen = () => s().ledger.items.some(i => i.id === item.id)
+  const label = () => labelledRows(s(), time.now()).questions.find(r => r.id === item.id)?.label?.text ?? null
+  const closed = () => {
+    const c = s().ledger.closed.find(x => x.id === item.id)
+    return c ? { how: c.how, outcome: c.outcome } : null
+  }
+  return { time, file, gate, watch, status, tracker, press, isOpen, label, closed, s, item }
+}
+
+describe('confirm race', () => {
+  test('C1: confirm matches while drain awaits the model; the commit closes the question as answered', async () => {
+    const t = await raceSetup()
+    await t.press()
+    t.watch.blind = true // confirm misses the prompt from here
+    t.gate.open = false
+    t.file.text += prompt('p-2', `Re "${RACE_ASK}": ${YES}`) + reply('a-2', 'Dropped.')
+    void t.tracker.done(T)
+    await t.time.run(t.time.now() + 5000) // quiet 2 s, queued, drain now waits on the model
+    assert.equal(t.gate.waiting.length, 1, 'drain waits on the model')
+    t.watch.blind = false
+    await t.time.run(t.time.now() + 2000) // confirm matches during the await
+    assert.equal(t.s().presses[t.item.id]?.turnId, 'p-2', 'confirm set turnId during the await')
+    t.gate.open = true
+    t.gate.waiting.splice(0).forEach(w => w())
+    await t.time.run(t.time.now() + 5000)
+    assert.equal(t.isOpen(), false, `question still open; label=${t.label()}`)
+    assert.deepEqual(t.closed(), { how: 'answered', outcome: YES })
+  })
+
+  test('C2: confirm matches after the turn drained; confirm closes the question as answered', async () => {
+    const t = await raceSetup()
+    await t.press()
+    t.watch.blind = true
+    t.file.text += prompt('p-2', `Re "${RACE_ASK}": ${YES}`) + reply('a-2', 'Dropped.')
+    void t.tracker.done(T)
+    await t.time.run(t.time.now() + 5000)
+    assert.equal(t.s().lastTurnId, 'p-2', 'the turn drained')
+    assert.equal(t.isOpen(), true, 'drain did not close it: no turnId yet')
+    t.watch.blind = false
+    await t.time.run(t.time.now() + 2000)
+    assert.equal(t.s().presses[t.item.id]?.turnId, 'p-2', 'confirm set turnId after the drain')
+    assert.equal(t.isOpen(), false, `question still open; label=${t.label()}`)
+    assert.deepEqual(t.closed(), { how: 'answered', outcome: YES })
+  })
+
+  test('C3: the status never reaches done; after 10 min the label reads "Sent, not confirmed", stays sending, and confirm stops at 24 h', async () => {
+    const t = await raceSetup()
+    await t.press()
+    await t.time.run(t.time.now() + 11 * 60_000)
+    assert.equal(t.label(), 'Sent, not confirmed', `label after 11 min: ${t.label()}`)
+    assert.equal(t.s().presses[t.item.id].state, 'sending', 'no new stored state')
+    await t.time.run(t.time.now() + 25 * 3600_000)
+    const reads = t.watch.reads
+    await t.time.run(t.time.now() + 3600_000)
+    assert.equal(t.watch.reads, reads, `confirm still polls after 25 h (${t.watch.reads - reads} reads in the next hour)`)
+  })
 })

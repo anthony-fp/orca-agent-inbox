@@ -76,6 +76,11 @@ export type AnswerDeps = {
   planNote(sessionId: string): Promise<string | null>
   /** Maps the prompt hook's terminal to a session that has none yet. */
   bind?(terminalId: string, sessionId: string, paneKey?: string): Promise<void>
+  /**
+   * Tracks a Claude session the worker has no record of in the prompt hook's terminal, from its transcript's end: a
+   * binding lost with a failed save. Does nothing when the terminal is bound to another known session.
+   */
+  adopt?(terminalId: string, sessionId: string, transcript?: string, cwd?: string): Promise<void>
   /** Follows a Claude conversation switch inside a tracked terminal. */
   bindClaude?(launchSession: string, sessionId: string, transcript?: string, cwd?: string, terminalId?: string): Promise<void>
   /** Saves a main Codex pane before its prompt or tool call receives an answer. */
@@ -143,6 +148,9 @@ export function createAnswerer(deps: AnswerDeps): (request: unknown) => Promise<
     const sessionId = !paneKey && request.type !== 'prompt-start' && latest.version === 3 ? latest.moved?.[requestedId] ?? requestedId : requestedId
     if (paneKey && typeof request.sessionId === 'string')
       await deps.bindCodex?.(paneKey, sessionId, codexHome, request.type === 'prompt-start' ? 'prompt' : 'tool', typeof request.codexTurnId === 'string' ? request.codexTurnId : undefined)
+    if (!paneKey && request.type === 'prompt-start' && !deps.state().sessions[sessionId] && typeof request.terminalId === 'string' && HANDLE.test(request.terminalId))
+      await deps.adopt?.(request.terminalId, sessionId,
+        typeof request.transcript === 'string' ? request.transcript : undefined, typeof request.cwd === 'string' ? request.cwd : undefined)
     const s0 = deps.state().sessions[sessionId]
     if (!s0) return { error: 'unknown session' }
     const host = paneKey ? ORCA_CODEX : ORCA

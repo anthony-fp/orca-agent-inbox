@@ -521,13 +521,16 @@ export function codexToolTurn(bytes: Buffer, offset: number, turnId: string | un
   return read && (!turnId || read.turnId === turnId) ? read.exchange.turn : null
 }
 
-/** The first new person's prompt, optionally containing `contains`. */
-export function codexPromptAfter(bytes: Buffer, offset: number, contains?: string): { uuid: string; text: string } | null {
+/** The first new person's prompt, optionally containing `contains`, and the byte where its turn starts. */
+export function codexPromptAfter(bytes: Buffer, offset: number, contains?: string): { uuid: string; text: string; at: number } | null {
   for (let at = offset;;) {
     const turn = readCodexTurn(bytes, at)
     if (!turn) return null
-    if (turn.exchange.person !== null && (contains === undefined || turn.exchange.person.replace(/\s+/g, ' ').includes(contains)))
-      return { uuid: turn.turnId, text: turn.exchange.person }
+    if (turn.exchange.person !== null && (contains === undefined || turn.exchange.person.replace(/\s+/g, ' ').includes(contains))) {
+      // readCodexTurn's turn starts at its first task_started row at or after `at`.
+      const start = wholeRows(bytes).find(row => row.at >= at && isStart(row.row))?.at ?? at
+      return { uuid: turn.turnId, text: turn.exchange.person, at: start }
+    }
     if (turn.status === 'pending' || turn.nextOffset <= at) return null
     at = turn.nextOffset
   }

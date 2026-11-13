@@ -415,6 +415,42 @@ test('a launch with no terminal is tagged; the prompt hook\'s terminal binds it,
   await t.worker.deactivate()
 })
 
+test('a prompt-start for a session the worker has no record of binds it to its terminal at the transcript end, and a record then works', async () => {
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  const TERM = 'term_0e0e0e0e-1111-4222-8333-444444444444'
+  const old = prompt('p-1', 'Old prompt') + reply('a-1', 'Old reply')
+  const t = await setup({ socket, files: { [FILE]: old } })
+  try {
+    assert.deepEqual(await ask(socket, { type: 'prompt-start', sessionId: S, terminalId: TERM, transcript: FILE, cwd: WS.path }, 2000), { text: '' })
+    assert.equal(t.saved().terminals[TERM]?.sessionId, S)
+    assert.equal(t.saved().sessions[S].offset, Buffer.byteLength(old), 'old turns are never read')
+    assert.equal(t.saved().sessions[S].ledger.turn, 1)
+    assert.match(JSON.stringify(await ask(socket, { type: 'record', sessionId: S, args: { kind: 'question', ask: 'Rebound?', options: ['Yes', 'No'] } }, 2000)), /Recorded/)
+    assert.equal(t.saved().sessions[S].ledger.items[0].ask, 'Rebound?')
+  } finally {
+    await t.close()
+    await t.worker.deactivate()
+  }
+})
+
+test('an unknown session stays unknown with no valid terminal handle, or when its terminal is bound to another known session', async () => {
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  const TERM = 'term_0e0e0e0e-1111-4222-8333-444444444444'
+  const other = 'cccccccc-1111-4222-8333-444444444444'
+  const state: State = { version: 3, terminals: { [TERM]: { sessionId: other } }, panes: {}, paneLaunches: {}, sessions: { [other]: emptySession(100 * DAY) } }
+  const t = await setup({ socket, state, files: { [FILE]: prompt('p-1', 'Hi') } })
+  try {
+    assert.deepEqual(await ask(socket, { type: 'prompt-start', sessionId: S, terminalId: '../etc' }, 2000), { error: 'unknown session' })
+    assert.deepEqual(await ask(socket, { type: 'prompt-start', sessionId: S }, 2000), { error: 'unknown session' })
+    assert.deepEqual(await ask(socket, { type: 'prompt-start', sessionId: S, terminalId: TERM }, 2000), { error: 'unknown session' })
+    assert.equal(t.saved().sessions[S], undefined)
+    assert.deepEqual(t.saved().terminals, { [TERM]: { sessionId: other } })
+  } finally {
+    await t.close()
+    await t.worker.deactivate()
+  }
+})
+
 test('a --resume <uuid> session starts at the transcript end, not at 0', async () => {
   const old = prompt('p-1', 'Old prompt') + reply('a-1', 'Old reply?')
   const t = await setup({ files: { [FILE]: old + '{"type":"user","half' } })
@@ -1226,6 +1262,17 @@ test('a hand-off whose first save rejects runs no worktree create, leaves no "Ha
   assert.equal(second.ok, true)
   assert.equal(t.orcaRuns.length, 1)
   assert.deepEqual(t.orcaRuns[0].slice(0, 2), ['worktree', 'create'])
+  await t.worker.deactivate()
+})
+
+test('C3: a reply still sending on a handed-off task keeps the receipt across a restart, so a second hand-off is refused', async () => {
+  const handoff = { worktree: 'rotate-the-api-key', operationId: 'op-1', outcome: 'started' as const }
+  const ledger = { ...EMPTY, items: [HANDOFF_TASK, HANDOFF_QUESTION], findings: [HANDOFF_ISSUE] }
+  const presses = { [HANDOFF_TASK.id]: { state: 'sending' as const, kind: 'reply' as const, answer: 'Any news?', text: 'Re the task', at: 1, handoff } }
+  const state: State = { version: 3, terminals: { 'term-1': { sessionId: S } }, panes: {}, paneLaunches: {}, sessions: { [S]: { ...emptySession(100 * DAY), ledger, presses, cwd: WS.path } } }
+  const t = await handoffSetup(async () => created('handed-to-terminal'), state)
+  assert.deepEqual(await t.worker.request('inbox.handoff', { sessionId: S, id: HANDOFF_TASK.id }), { ok: false, error: 'Handed off already' })
+  assert.deepEqual(t.orcaRuns, [])
   await t.worker.deactivate()
 })
 

@@ -199,8 +199,15 @@ export function createTracker(deps: TrackerDeps) {
     work.catch(e => deps.log?.(`turns: ${e instanceof Error ? e.message : String(e)}`))
   }
 
-  /** Removes the queue's first turn and moves the offset past it, with the ledger it leaves. */
-  function settle(s: SessionState, turn: Turn, ledger: Ledger, unread: number): SessionState {
+  /**
+   * Removes the queue's first turn and moves the offset past it, with the ledger it leaves. A press that got this turn's
+   * id while the model ran (confirm() saw its prompt late) closes its row as answered here, as drain does at the start.
+   */
+  function settle(s: SessionState, turn: Turn, given: Ledger, unread: number): SessionState {
+    const answered = pressFor(s, turn.turnId)
+    const ledger = answered?.press.action === 'answer' && given.items.some(i => i.id === answered.press.id)
+      ? closeItem(given, answered.press.id, { how: 'answered', outcome: answered.answer }, clock.now())
+      : given
     return {
       ...s,
       ledger: atTurn(ledger, turn.exchange.turn),

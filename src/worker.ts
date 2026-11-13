@@ -487,6 +487,20 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
       log('bind: terminal from prompt hook')
       orca.panels.post('inbox.changed', {})
     },
+    adopt: async (terminalId, sessionId, transcript, cwd) => {
+      const state = tracker.state()
+      // track() would move the terminal off its session, so a terminal bound to another known session stays as it is.
+      const bound = state.terminals[terminalId]?.sessionId
+      if (state.sessions[sessionId] || (bound && state.sessions[bound])) return
+      const bytes = transcript ? await deps.readFile(transcript) : null
+      const found = bytes ? null : await find(sessionId)
+      const contents = bytes ?? found?.bytes ?? null
+      const offset = contents ? wholeLinesEnd(contents) : 0
+      await tracker.track(terminalId, sessionId, { offset, turn: contents ? promptsBefore(contents, offset) : 0 })
+      await learn(sessionId, { transcript: bytes ? transcript : found?.path ?? transcript, cwd: cwd ?? (contents ? cwdOf(contents) : null) })
+      log('bind: unknown session from prompt hook')
+      orca.panels.post('inbox.changed', {})
+    },
     bindCodex,
     bindClaude,
     notifyCodex: async (paneKey, threadId, turnId) => {

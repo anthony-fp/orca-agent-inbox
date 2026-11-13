@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "agent-inbox",
   "name": "Agent Inbox",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Adds an Agent Inbox tab to the right sidebar. It gives a high-level view of the workspace plan, the questions waiting on your decision, and the bugs your agent finds as it reads your code. It also lists the follow-up tasks you must do yourself, so you don't lose track of them. Works with Claude Code and Codex.",
   "engines": {
     "orca": ">=1.4.248"

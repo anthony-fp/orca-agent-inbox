@@ -180,11 +180,11 @@ export function readTurnFile(path: string, offset: number, prompts?: number): Tu
   return readTurn(readFileSync(path), offset, prompts)
 }
 
-/** The first prompt at or after `offset`, optionally containing `contains`. */
-export function promptAfter(bytes: Buffer, offset: number, contains?: string): { uuid: string; text: string } | null {
+/** The first prompt at or after `offset`, optionally containing `contains`, and the byte where its line starts. */
+export function promptAfter(bytes: Buffer, offset: number, contains?: string): { uuid: string; text: string; at: number } | null {
   const found = lines(bytes, offset).find(({ line }) => isTurnStart(line) &&
-    (contains === undefined || text(line?.message?.content).replace(/\s+/g, ' ').includes(contains)))?.line
-  return found ? { uuid: String(found.uuid), text: text(found.message?.content) } : null
+    (contains === undefined || text(line?.message?.content).replace(/\s+/g, ' ').includes(contains)))
+  return found?.line ? { uuid: String(found.line.uuid), text: text(found.line.message?.content), at: found.at } : null
 }
 
 /** The session's folder: the first whole line's `cwd`. Null when no line has one yet. */
