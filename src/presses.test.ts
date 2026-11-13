@@ -34,13 +34,22 @@ const okModel = (calls: string[], text = 'NEW: decide | 2 | Rename the folder to
 async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?: Help[]; findings?: Finding[]; codex?: boolean; hookSeen?: boolean; modelReply?: string } = {}) {
   const time = fakeClock(1000)
   const saved = new Map<string, unknown>()
-  const storage = { get: async (k: string) => saved.get(k) ?? null, set: async (k: string, v: unknown) => void saved.set(k, structuredClone(v)) }
+  /** Counts of the next saves and transcript reads that reject. */
+  const fail = { saves: 0, reads: 0 }
+  const storage = {
+    get: async (k: string) => saved.get(k) ?? null,
+    set: async (k: string, v: unknown) => {
+      if (fail.saves > 0 && fail.saves--) throw new Error('value exceeds 262144 bytes')
+      saved.set(k, structuredClone(v))
+    },
+  }
   const file = { text: opts.codex
     ? readFileSync(new URL('./core/fixtures/codex-one.jsonl', import.meta.url), 'utf8')
     : prompt('p-1', 'Prompt 1') + reply('a-1', 'Ship it?') }
   const modelCalls: string[] = []
   let onRead: (() => void) | null = null
   const read = async () => {
+    if (fail.reads > 0 && fail.reads--) throw new Error('EIO: read failed')
     onRead?.()
     onRead = null
     return Buffer.from(file.text)
@@ -74,7 +83,7 @@ async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?:
     return [...rows.questions, ...rows.tasks, ...rows.findings.issues, ...rows.findings.opportunities].find(r => r.id === id)?.label ?? null
   }
   const label = () => labelOf(item.id)
-  return { time, tracker, presses, status, sent, file, input, label, labelOf, item, s, saved, modelCalls, beforeSend: (f: () => void) => (onRead = f) }
+  return { time, tracker, presses, status, sent, file, input, label, labelOf, item, s, saved, fail, modelCalls, beforeSend: (f: () => void) => (onRead = f) }
 }
 
 describe('presses', () => {
@@ -135,6 +144,19 @@ describe('presses', () => {
       assert.equal(t.label()?.text, 'Sending…', 'the confirmation timer waits while the agent works')
     })
   }
+
+  test('the press save rejects, then one confirm read rejects; the prompt still confirms the answer', async () => {
+    const t = await setup()
+    t.fail.saves = 1
+    t.beforeSend(() => (t.fail.reads = 1))
+    const out = await t.presses.press(t.input())
+    assert.deepEqual(out, { ok: true, label: { text: 'Sending…', tone: 'muted', copy: null } })
+    assert.deepEqual(t.sent, [{ terminalId: T, text: `Re "${ASK}": Yes` }])
+    t.file.text += prompt('p-2', `Re "${ASK}": Yes`)
+    await t.time.run(t.time.now() + 3000)
+    assert.equal(t.fail.reads, 0, 'a confirm read rejected')
+    assert.deepEqual(t.label(), { text: '✓ Yes', tone: 'success', copy: null })
+  })
 
   test('a status change to working between the press and the send still sends the answer', async () => {
     const t = await setup()

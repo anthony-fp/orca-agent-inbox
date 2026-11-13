@@ -397,6 +397,18 @@ test('a refused press shows why on its row', async () => {
   await clean(view)
 })
 
+test('a press that throws reads "Not sent: <message>", even when the view still says Sending…', async () => {
+  const sending = { text: 'Sending…', tone: 'muted' as const, copy: null }
+  const stuck: InboxView = { ...ONE_AGENT, sections: ONE_AGENT.sections.map(s => ({ ...s, questions: s.questions.map(q => ({ ...q, label: sending })) })) }
+  const view = await open(stuck, () => {
+    throw new Error('value exceeds 262144 bytes')
+  })
+  await view.press({ type: 'Button', text: 'Yes' })
+  assert.ok(view.find({ text: 'Not sent: value exceeds 262144 bytes' }))
+  assert.equal(view.find({ text: 'Sending…' }), null)
+  await view.unmount()
+})
+
 /** ONE_AGENT whose rows the mock worker snoozes as the panel asks, at local time `now`, with Date and setTimeout faked. */
 async function snoozable(now: Date) {
   mock.timers.enable({ apis: ['Date', 'setTimeout'], now: now.getTime() })

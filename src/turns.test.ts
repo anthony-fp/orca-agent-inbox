@@ -6,8 +6,10 @@ import { describe, test } from 'node:test'
 import { EMPTY, closeItem, parseReply } from './core/ledger'
 import { readCodexTurn } from './core/codex-transcript'
 import type { ModelResult } from './model'
-import { STATE_KEY, emptySession, upgradeState, type State } from './state'
-import { LIMIT_MS, createTracker, screenFor, type Clock } from './turns'
+import type { Finding } from './core/types'
+import { STATE_KEY, emptySession, upgradeState, type SessionState, type State } from './state'
+import { fakeClock as clockAt, rejectingStorage } from './test-clock'
+import { BUDGET, LIMIT_MS, createTracker, screenFor, type Clock } from './turns'
 
 const S = 'session-1'
 const T = 'terminal-1'
@@ -627,5 +629,95 @@ describe('Codex turns use the durable queue', () => {
     await t.time.run()
     assert.deepEqual(homes, ['/old-account', '/old-account'])
     assert.equal(t.storage.saved().sessions[S].lastTurnId, 'turn-1')
+  })
+})
+
+describe('retention', () => {
+  const DAY = 24 * 60 * 60 * 1000
+  const NOW = 100 * DAY
+  const LIVE = 'term_live'
+  const FINDING: Finding = { id: 'i1', kind: 'issue', title: 'Retry loop', detail: 'It never stops.', path: null, at: 0 }
+  const old = (over: Partial<SessionState> = {}): SessionState => ({ ...emptySession(NOW - 30 * DAY), ...over })
+  /** 60 unbound sessions of about 4.6 KB, touched 2 days ago or before: f00 is the newest. Over 262144 bytes in all. */
+  const filler = () => Object.fromEntries(Array.from({ length: 60 }, (_, i) =>
+    [`f${String(i).padStart(2, '0')}`, { ...emptySession(NOW - 2 * DAY - i), cwd: `/w/${'x'.repeat(4500)}` }]))
+  const bytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v))
+
+  /** A started tracker on `state`, whose terminal list gave `live`. It has pruned at start, and `save()` writes the state again. */
+  async function retained(state: Omit<State & { version: 3 }, 'version' | 'panes' | 'paneLaunches'>, live: Set<string> | null, limit = 262144) {
+    const time = clockAt(NOW)
+    const storage = rejectingStorage(limit, { [STATE_KEY]: { version: 3, panes: {}, paneLaunches: {}, ...state } })
+    const tracker = createTracker({ storage, clock: time.clock, read: async () => null, model: fakeModel().model, live: () => live })
+    await tracker.start()
+    let n = 0
+    const save = () => tracker.markPaneLaunch('pane-x', ++n)
+    return { tracker, save, saved: () => storage.saved(STATE_KEY) as State & { version: 3 } }
+  }
+
+  test('a state over the storage limit saves under the budget: old unbound sessions go, oldest first', async () => {
+    const t = await retained({ terminals: {}, sessions: filler() }, new Set())
+    await t.save()
+    assert.ok(bytes(t.saved()) <= BUDGET, `saved ${bytes(t.saved())} bytes`)
+    assert.ok(t.saved().sessions.f00, 'the newest stays')
+    assert.equal(t.saved().sessions.f59, undefined, 'the oldest goes')
+  })
+
+  test('an old empty session bound to a live terminal stays, and its agent then records an item', async () => {
+    const t = await retained({ terminals: { [LIVE]: { sessionId: 'bound' } }, sessions: { ...filler(), bound: old() } }, new Set([LIVE]))
+    await t.save()
+    assert.ok(t.saved().sessions.bound)
+    assert.deepEqual(t.saved().terminals, { [LIVE]: { sessionId: 'bound' } })
+    await t.tracker.edit('bound', s => ({ ...s, ledger: { ...s.ledger, findings: [FINDING] } }))
+    assert.deepEqual(t.saved().sessions.bound.ledger.findings, [FINDING])
+  })
+
+  test('an old session that holds only an open finding stays', async () => {
+    const t = await retained({ terminals: {}, sessions: { ...filler(), finding: old({ ledger: { ...EMPTY, findings: [FINDING] } }), gone: old() } }, new Set())
+    await t.save()
+    assert.ok(t.saved().sessions.finding)
+    assert.equal(t.saved().sessions.gone, undefined, 'prune ran')
+  })
+
+  test('a moved chain A→B→C, where C is kept, keeps A and B', async () => {
+    const t = await retained({
+      terminals: { [LIVE]: { sessionId: 'c' } }, sessions: { ...filler(), a: old(), b: old(), c: old() }, moved: { a: 'b', b: 'c' },
+    }, new Set([LIVE]))
+    await t.save()
+    assert.deepEqual(['a', 'b', 'c'].map(id => Boolean(t.saved().sessions[id])), [true, true, true])
+    assert.deepEqual(t.saved().moved, { a: 'b', b: 'c' })
+  })
+
+  test('with no terminal list, neither save nor prune drops a session', async () => {
+    const sessions = { ...filler(), gone: old() }
+    const t = await retained({ terminals: { term_gone: { sessionId: 'gone' } }, sessions }, null, Infinity)
+    await t.save()
+    assert.deepEqual(Object.keys(t.saved().sessions).sort(), Object.keys(sessions).sort())
+    assert.deepEqual(t.saved().terminals, { term_gone: { sessionId: 'gone' } })
+  })
+})
+
+describe('failed writes', () => {
+  test('an edit whose write rejects still tells the panel once and logs one "turns: save failed" line', async () => {
+    const time = fakeClock()
+    const fails = { on: false }
+    const storage = {
+      get: async () => null,
+      set: async () => {
+        if (fails.on) throw new Error('value exceeds 262144 bytes')
+      },
+    }
+    const logs: string[] = []
+    let changed = 0
+    const tracker = createTracker({ storage, clock: time.clock, read: async () => null, model: fakeModel().model, log: m => void logs.push(m), changed: () => void changed++ })
+    await tracker.start()
+    await tracker.track(T, S)
+    await time.run()
+    changed = 0
+    logs.length = 0
+    fails.on = true
+    await assert.rejects(tracker.edit(S, s => ({ ...s, cwd: '/w' })))
+    await time.run()
+    assert.equal(changed, 1)
+    assert.deepEqual(logs.filter(l => l.startsWith('turns: save failed')), ['turns: save failed: value exceeds 262144 bytes'])
   })
 })

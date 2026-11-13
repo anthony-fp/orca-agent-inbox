@@ -283,7 +283,11 @@ export function createPresses(deps: PressDeps) {
   async function confirm(terminalId: string, sessionId: string, id: string, label: PressLabel): Promise<void> {
     let deadline: number | null = null
     for (;;) {
-      const bytes = await deps.read(sessionId)
+      // A failed read is no bytes: the loop reads again, as before the transcript exists.
+      const bytes = await deps.read(sessionId).catch(e => {
+        deps.log?.(`press: read failed for ${id}: ${e instanceof Error ? e.message : String(e)}`)
+        return null
+      })
       const prompt = bytes ? deps.state().sessions[sessionId]?.agent === 'codex'
         ? codexPromptAfter(bytes, label.from ?? 0, label.text)
         : promptAfter(bytes, label.from ?? 0, label.text) : null
@@ -342,7 +346,8 @@ export function createPresses(deps: PressDeps) {
         return false
       })
 
-      await saving
+      // The label is in memory before the write: a rejected save still sends, and confirm still runs.
+      await saving.catch(e => deps.log?.(`press: save failed for ${p.id}: ${e instanceof Error ? e.message : String(e)}`))
       const accepted = await sending
       if (!accepted) {
         await settle(p.sessionId, p.id, label.at, { state: 'undelivered' })

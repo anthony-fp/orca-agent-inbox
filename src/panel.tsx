@@ -30,8 +30,8 @@ import type { LabelledFinding, LabelledRow, PressInput, RowLabel } from './press
 
 type Loaded = { is: 'loading' } | { is: 'error'; message: string } | { is: 'ready'; view: InboxView }
 
-/** The label a press set on its row. `pending` while the press is out. */
-type Local = { label: RowLabel; pending: boolean }
+/** The label a press set on its row. `pending` while the press is out. `error`: the press failed, and its label wins. */
+type Local = { label: RowLabel; pending: boolean; error: boolean }
 
 const loaded = atom<Loaded>({ is: 'loading' })
 /** Each map is keyed by `rowKey`. */
@@ -109,9 +109,10 @@ type Pressable = { id: string; label: RowLabel | null }
 async function press(s: InboxSection, row: Pressable, what: PressWhat): Promise<void> {
   const key = rowKey(s, row.id)
   const { action } = what
-  update(local, m => ({ ...m, [key]: { label: PENDING[action], pending: true } }))
+  update(local, m => ({ ...m, [key]: { label: PENDING[action], pending: true, error: false } }))
   const input: PressInput = { terminalId: s.terminalId, sessionId: s.sessionId, drawn: s.drawn, id: row.id, ...what }
   let label: RowLabel
+  let error = false
   try {
     const out = await plugin.request('inbox.press', input)
     label = out.ok ? (out.label ?? PENDING[action]) : REFUSED[out.refused]
@@ -125,8 +126,9 @@ async function press(s: InboxSection, row: Pressable, what: PressWhat): Promise<
     }
   } catch (e) {
     label = { text: `Not sent: ${message(e)}`, tone: 'danger', copy: null }
+    error = true
   }
-  update(local, m => ({ ...m, [key]: { label, pending: false } }))
+  update(local, m => ({ ...m, [key]: { label, pending: false, error } }))
   await load()
 }
 
@@ -247,7 +249,7 @@ const HANDING_OFF: RowLabel = { text: 'Handing off…', tone: 'muted', copy: nul
  */
 async function handOffRow(s: InboxSection, row: Pressable): Promise<void> {
   const key = rowKey(s, row.id)
-  update(local, m => ({ ...m, [key]: { label: HANDING_OFF, pending: true } }))
+  update(local, m => ({ ...m, [key]: { label: HANDING_OFF, pending: true, error: false } }))
   let out: HandoffOutcome
   try {
     out = await plugin.request('inbox.handoff', { sessionId: s.sessionId, id: row.id })
@@ -256,7 +258,7 @@ async function handOffRow(s: InboxSection, row: Pressable): Promise<void> {
   }
   update(local, m => {
     const { [key]: _, ...rest } = m
-    return out.ok ? { ...rest, [key]: { label: out.label, pending: false } } : rest
+    return out.ok ? { ...rest, [key]: { label: out.label, pending: false, error: false } } : rest
   })
   update(stepResults, m => {
     const { [key]: _, ...rest } = m
@@ -425,9 +427,9 @@ function rowState(section: InboxSection, row: Pressable) {
   const key = rowKey(section, row.id)
   const mine = read(local)[key]
   // A press still out shows its own label. After it, the worker's label wins: it moves on from Sending….
-  // A refusal has no worker label, so it stays.
+  // A refusal has no worker label, so it stays. A press that failed keeps its error over the worker's label.
   const busy = mine?.pending === true
-  return { key, label: mine && busy ? mine.label : (row.label ?? mine?.label ?? null), busy }
+  return { key, label: mine && (busy || mine.error) ? mine.label : (row.label ?? mine?.label ?? null), busy }
 }
 
 /** The reply field a Reply press opens, with Send and Cancel (`ROW_COPY` in the inbox repo's `hooks/view.ts`). */

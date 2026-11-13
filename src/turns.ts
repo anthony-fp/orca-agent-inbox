@@ -42,6 +42,8 @@ export type TrackerDeps = {
   log?(message: string): void
   /** Called after each saved change, so the worker can tell the panel. */
   changed?(): void
+  /** The handles of live terminals in every workspace, or null when unknown. Null evicts nothing. */
+  live?(): ReadonlySet<string> | null
 }
 
 /** Read once a second, for up to 15 s after a `done`. A complete turn waits for 2 s with no growth. */
@@ -51,6 +53,48 @@ export const QUIET_MS = 2000
 export const MAX_FAILURES = 3
 /** A session with no open rows and nothing queued is dropped after 7 days untouched. */
 export const PRUNE_MS = 7 * 24 * 60 * 60 * 1000
+/** A session touched in the last 24 h is kept: a terminal opened since the last terminal list is not in it yet. */
+export const KEEP_MS = 24 * 60 * 60 * 1000
+/** Save drops evictable sessions, oldest first, while the state is over this size. Orca rejects a value over 262144 bytes. */
+export const BUDGET = 200_000
+
+const byteSize = (v: unknown) => Buffer.byteLength(JSON.stringify(v))
+
+/**
+ * The sessions that can go, oldest `touchedAt` first; none when `live` is null. A session is kept when it has an open
+ * item or finding or a queued turn, was touched in the last `keepMs`, is bound to a live terminal (directly or through
+ * its pane), is `busy` (a poll or drain runs), or is linked through `moved`, either way and transitively, to a kept one.
+ */
+export function evictable(state: CurrentState, live: ReadonlySet<string> | null, now: number, keepMs = KEEP_MS, busy: ReadonlySet<string> = new Set()): string[] {
+  if (!live) return []
+  const kept = new Set<string>()
+  for (const [id, s] of Object.entries(state.sessions))
+    if (s.ledger.items.length > 0 || s.ledger.findings.length > 0 || s.queue.length > 0 || now - s.touchedAt < keepMs || busy.has(id)) kept.add(id)
+  for (const [handle, t] of Object.entries(state.terminals)) {
+    if (!live.has(handle)) continue
+    kept.add(t.sessionId)
+    const pane = t.paneKey ? state.panes[t.paneKey] : undefined
+    if (pane) kept.add(pane.threadId)
+  }
+  for (let grew = true; grew;) {
+    grew = false
+    for (const [id, target] of Object.entries(state.moved ?? {}))
+      if (kept.has(id) !== kept.has(target)) { kept.add(id); kept.add(target); grew = true }
+  }
+  return Object.entries(state.sessions).filter(([id]) => !kept.has(id)).sort(([, a], [, b]) => a.touchedAt - b.touchedAt).map(([id]) => id)
+}
+
+/** The state without `drop`, and without the terminals, panes and aliases of a session that is not left. */
+function without(state: CurrentState, drop: ReadonlySet<string>): CurrentState {
+  const sessions = Object.fromEntries(Object.entries(state.sessions).filter(([id]) => !drop.has(id)))
+  return {
+    ...state,
+    sessions,
+    terminals: Object.fromEntries(Object.entries(state.terminals).filter(([, t]) => sessions[t.sessionId])),
+    panes: Object.fromEntries(Object.entries(state.panes).filter(([, p]) => sessions[p.threadId])),
+    moved: Object.fromEntries(Object.entries(state.moved ?? {}).filter(([id, target]) => sessions[id] && sessions[target])),
+  }
+}
 
 /** The `<screen>` text for a turn: the panel lists the open rows, or shows none. */
 export function screenFor(ledger: Ledger): string {
@@ -122,14 +166,28 @@ export function createTracker(deps: TrackerDeps) {
   const running = new Set<string>()
 
   const isCodex = (sessionId: string) => state.sessions[sessionId]?.agent === 'codex'
+  const busy = () => new Set([...deadlines.keys(), ...running])
 
   /** Saves a copy of the whole state. Writes land in the order they were made. */
   function save(): Promise<void> {
     if (readOnly) return Promise.resolve()
     state = { ...state, sessions: Object.fromEntries(Object.entries(state.sessions).map(([id, s]) => [id, pruned(s)])) }
+    // Best effort: when only kept sessions are left, the save still runs.
+    let size = byteSize(state)
+    const drop = new Set<string>()
+    for (const id of size > BUDGET ? evictable(state, deps.live?.() ?? null, clock.now(), KEEP_MS, busy()) : []) {
+      if (size <= BUDGET) break
+      drop.add(id)
+      size -= byteSize({ [id]: state.sessions[id] }) - 1
+    }
+    if (drop.size > 0) state = without(state, drop)
     const copy = JSON.parse(JSON.stringify(state)) as CurrentState
     writes = writes.catch(() => undefined).then(() => storage.set(STATE_KEY, copy))
-    void writes.then(() => deps.changed?.(), () => undefined)
+    // The panel reloads after a failed write too: the state in memory moved on, and a stuck label must not stay.
+    void writes.then(() => deps.changed?.(), e => {
+      deps.log?.(`turns: save failed: ${e instanceof Error ? e.message : String(e)}`)
+      deps.changed?.()
+    })
     return writes
   }
 
@@ -263,6 +321,15 @@ export function createTracker(deps: TrackerDeps) {
     background(poll(sessionId))
   }
 
+  /** Drops the evictable sessions untouched for PRUNE_MS, and the terminals, panes and aliases of a session that is gone. */
+  async function prune(): Promise<void> {
+    const next = without(state, new Set(evictable(state, deps.live?.() ?? null, clock.now(), PRUNE_MS, busy())))
+    const count = (s: CurrentState) => [s.sessions, s.terminals, s.panes].map(o => Object.keys(o).length).join()
+    if (count(next) === count(state)) return
+    state = next
+    await save()
+  }
+
   return {
     /** A launch discards the old Codex binding but keeps the pane's launch time. */
     async clearPane(terminalId: string, launchedAt = clock.now(), paneKey?: string): Promise<void> {
@@ -289,8 +356,11 @@ export function createTracker(deps: TrackerDeps) {
       await save()
     },
 
-    /** Loads the saved state, runs every queued turn and reads each tracked session again. */
-    async start(): Promise<void> {
+    /**
+     * Loads the saved state, waits for `listed` (the first terminal list), prunes, then runs every queued turn and reads
+     * each tracked session again. The prune runs before the polls, so a poll does not keep a dead session.
+     */
+    async start(listed?: () => Promise<void>): Promise<void> {
       const raw = await storage.get(STATE_KEY)
       const newer = newerVersion(raw)
       if (newer !== null) {
@@ -298,6 +368,8 @@ export function createTracker(deps: TrackerDeps) {
         deps.log?.(`turns: stored state version ${newer} is newer than this plugin`)
       }
       state = upgradeState(raw, clock.now())
+      await listed?.()
+      await prune()
       for (const [id, s] of Object.entries(state.sessions)) if (s.queue.length > 0) background(drain(id, true))
       for (const { sessionId } of Object.values(state.terminals)) if (!isCodex(sessionId)) background(poll(sessionId))
       for (const [sessionId, s] of Object.entries(state.sessions))
@@ -369,27 +441,7 @@ export function createTracker(deps: TrackerDeps) {
       return save()
     },
 
-    /** Drops a session with no open rows and nothing queued that nobody touched for PRUNE_MS, and its terminals. */
-    async prune(): Promise<void> {
-      const now = clock.now()
-      const sessions = Object.fromEntries(
-        Object.entries(state.sessions).filter(([, s]) => s.ledger.items.length > 0 || s.queue.length > 0 || now - s.touchedAt < PRUNE_MS),
-      )
-      // A launch session whose alias points at a kept session stays too: tool calls and /resume still use its id.
-      // Repeat until nothing changes, so a chain A→B→C keeps A once C keeps B.
-      for (let grew = true; grew;) {
-        grew = false
-        for (const [id, target] of Object.entries(state.moved ?? {}))
-          if (sessions[target] && !sessions[id] && state.sessions[id]) { sessions[id] = state.sessions[id]; grew = true }
-      }
-      const terminals = Object.fromEntries(Object.entries(state.terminals).filter(([, t]) => sessions[t.sessionId]))
-      const panes = Object.fromEntries(Object.entries(state.panes).filter(([, p]) => sessions[p.threadId]))
-      const moved = Object.fromEntries(Object.entries(state.moved ?? {}).filter(([id, target]) => sessions[id] && sessions[target]))
-      const same = Object.keys(sessions).length === Object.keys(state.sessions).length && Object.keys(terminals).length === Object.keys(state.terminals).length && Object.keys(panes).length === Object.keys(state.panes).length
-      if (same) return
-      state = { ...state, terminals, sessions, panes, moved }
-      await save()
-    },
+    prune,
 
     /** A `done` for a terminal: retry a failed turn, then read the transcript for new turns. */
     async done(terminalId: string): Promise<void> {

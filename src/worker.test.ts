@@ -39,7 +39,7 @@ const openLedger = () => {
   return applyUpdate(EMPTY, u, 0, 1)
 }
 
-async function setup(opts: { state?: State; storage?: Record<string, unknown>; files?: Record<string, string>; unreadable?: string[]; agents?: unknown[]; copyFails?: boolean; list?: unknown[]; truncated?: boolean; socket?: string; clockAt?: number; orca?: (args: string[]) => Promise<OrcaReply>; codexRollout?: (home: string, threadId: string) => Promise<{ path: string; cwd: string } | null> } = {}) {
+async function setup(opts: { state?: State; storage?: Record<string, unknown>; files?: Record<string, string>; unreadable?: string[]; agents?: unknown[]; copyFails?: boolean; list?: unknown[]; truncated?: boolean; socket?: string; clockAt?: number; orca?: (args: string[]) => Promise<OrcaReply>; terminals?: string[] | OrcaReply; rejects?: (value: unknown) => boolean; codexRollout?: (home: string, threadId: string) => Promise<{ path: string; cwd: string } | null> } = {}) {
   const time = fakeClock(opts.clockAt ?? 100 * DAY)
   const files = new Map(Object.entries(opts.files ?? {}))
   const reads: string[] = []
@@ -64,6 +64,11 @@ async function setup(opts: { state?: State; storage?: Record<string, unknown>; f
       copied.push(text)
     },
     orca: async (args: string[]): Promise<OrcaReply> => {
+      // The terminal list for liveness: every live handle, in every workspace. Not counted in orcaRuns.
+      if (args[0] === 'terminal' && args[1] === 'list') {
+        const listed = opts.terminals ?? []
+        return Array.isArray(listed) ? { kind: 'ok', result: { terminals: listed.map(handle => ({ handle })), truncated: false } } : listed
+      }
       orcaRuns.push(args)
       return opts.orca ? opts.orca(args) : { kind: 'error', error: 'no orca in this test' }
     },
@@ -84,7 +89,17 @@ async function setup(opts: { state?: State; storage?: Record<string, unknown>; f
     },
   }
   let made: ReturnType<typeof createWorker> | null = null
-  const worker = await mountWorker({ default: (orca: Parameters<typeof createWorker>[0]) => (made = createWorker(orca, deps)) }, { host })
+  // A storage write that `rejects` picks fails, as Orca's does for a value over its limit.
+  const wrap = (orca: Parameters<typeof createWorker>[0]) => {
+    const rejects = opts.rejects
+    if (!rejects) return orca
+    const set = orca.storage.set.bind(orca.storage)
+    return { ...orca, storage: { ...orca.storage, get: orca.storage.get.bind(orca.storage), set: async (key: string, value: unknown) => {
+      if (rejects(value)) throw new Error('value exceeds 262144 bytes')
+      return set(key, value)
+    } } } as typeof orca
+  }
+  const worker = await mountWorker({ default: (orca: Parameters<typeof createWorker>[0]) => (made = createWorker(wrap(orca), deps)) }, { host })
   // listen() does real file work, so the fake clock's ticks may end before the socket file exists.
   await made?.listening
   await time.run()
@@ -541,6 +556,85 @@ test('start prunes a session with no open rows untouched for 7 days, and its ter
   await again.worker.deactivate()
 })
 
+const bytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v))
+/** 60 unbound sessions of about 4.6 KB, touched 2 days ago or before: over 262144 bytes in all. */
+const filler = () => Object.fromEntries(Array.from({ length: 60 }, (_, i) =>
+  [`f${String(i).padStart(2, '0')}`, { ...emptySession(100 * DAY - 2 * DAY - i), cwd: `/w/${'x'.repeat(4500)}` }]))
+const QUIET = 'dddddddd-1111-4222-8333-444444444444'
+const QUIET_TERM = 'term_dddddddd-1111-4222-8333-444444444444'
+
+test('after a reload, a quiet agent in another workspace has no status, and its old empty session survives start and the next save', async () => {
+  const state: State = { version: 3, terminals: { [QUIET_TERM]: { sessionId: QUIET } }, panes: {}, paneLaunches: {}, sessions: { ...filler(), [QUIET]: emptySession(100 * DAY - 30 * DAY) } }
+  const t = await setup({ state, terminals: [QUIET_TERM] })
+  await t.worker.hooks.fire('agent.launch.before', launch(`claude --session-id ${S}`))
+  await t.time.run()
+  assert.ok(t.saved().sessions[QUIET])
+  assert.deepEqual(t.saved().terminals[QUIET_TERM], { sessionId: QUIET })
+  assert.ok(bytes(t.saved()) <= 200_000, `saved ${bytes(t.saved())} bytes`)
+  await t.worker.deactivate()
+})
+
+test('an old live-bound session and an old session that holds only an open finding both survive start', async () => {
+  const finding: Finding = { id: 'i1', kind: 'issue', title: 'Retry loop', detail: 'It never stops.', path: null, at: 0 }
+  const old = emptySession(100 * DAY - 30 * DAY)
+  const state: State = {
+    version: 3, terminals: { [QUIET_TERM]: { sessionId: QUIET }, term_gone: { sessionId: 'gone' } }, panes: {}, paneLaunches: {},
+    sessions: { [QUIET]: old, finding: { ...old, ledger: { ...EMPTY, findings: [finding] } }, gone: old },
+  }
+  const t = await setup({ state, terminals: [QUIET_TERM] })
+  assert.deepEqual(Object.keys(t.saved().sessions).sort(), [QUIET, 'finding'].sort(), 'prune ran and dropped only the unbound session')
+  assert.deepEqual(Object.keys(t.saved().terminals), [QUIET_TERM])
+  await t.worker.deactivate()
+})
+
+test('a failed or truncated terminal list prunes nothing at start', async () => {
+  const state: State = { version: 3, terminals: { term_gone: { sessionId: 'gone' } }, panes: {}, paneLaunches: {}, sessions: { gone: emptySession(100 * DAY - 30 * DAY) } }
+  for (const terminals of [{ kind: 'error', error: 'no orca' }, { kind: 'ok', result: { terminals: [], truncated: true } }] as OrcaReply[]) {
+    const t = await setup({ state, terminals })
+    await t.worker.hooks.fire('agent.launch.before', launch(`claude --session-id ${S}`))
+    await t.time.run()
+    assert.ok(t.saved().sessions.gone)
+    assert.deepEqual(t.saved().terminals.term_gone, { sessionId: 'gone' })
+    await t.worker.deactivate()
+  }
+})
+
+test('restart: a session bound to a listed terminal survives a save over the budget, then its status and prompt-start find it', async () => {
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  const file = `${PROJECTS}/-work-my-app-v2/${QUIET}.jsonl`
+  const state: State = { version: 3, terminals: { [QUIET_TERM]: { sessionId: QUIET } }, panes: {}, paneLaunches: {}, sessions: { ...filler(), [QUIET]: emptySession(100 * DAY - 30 * DAY) } }
+  const t = await setup({ socket, state, terminals: [QUIET_TERM], files: { [file]: prompt('p-1', 'Hi') + reply('a-1', 'Ship it?') } })
+  try {
+    await t.worker.hooks.fire('agent.launch.before', launch(`claude --session-id ${S}`))
+    await t.time.run()
+    assert.ok(bytes(t.saved()) <= 200_000, `saved ${bytes(t.saved())} bytes`)
+    assert.ok(t.saved().sessions[QUIET])
+    await t.worker.emit('agent.status.changed', status('done', { terminalId: QUIET_TERM }))
+    await t.time.run()
+    assert.ok(t.reads.includes(file), 'the done read the bound session\'s transcript')
+    // The prompt-start raises the active turn past the ledger's turn, which the done's model run set (src/socket.ts:91-92).
+    const turn = Math.max(t.saved().sessions[QUIET].activeTurn, t.saved().sessions[QUIET].ledger.turn)
+    assert.equal(turn, 1, 'the done ran the model on the transcript turn')
+    assert.deepEqual(await ask(socket, { type: 'prompt-start', sessionId: QUIET, terminalId: QUIET_TERM }, 2000), { text: '' })
+    assert.equal(t.saved().sessions[QUIET].activeTurn, turn + 1, 'the prompt-start found the session')
+  } finally {
+    await t.close()
+    await t.worker.deactivate()
+  }
+})
+
+test('a terminal opened after the last list gets track for an old session, and a save over the budget keeps that session', async () => {
+  const file = `${PROJECTS}/-work-my-app-v2/${QUIET}.jsonl`
+  const state: State = { version: 3, terminals: {}, panes: {}, paneLaunches: {}, sessions: { ...filler(), [QUIET]: emptySession(100 * DAY - 3 * DAY) } }
+  const t = await setup({ state, terminals: [], files: { [file]: prompt('p-1', 'Hi') + reply('a-1', 'Ship it?') } })
+  await t.worker.hooks.fire('agent.launch.before', launch(`claude --resume ${QUIET}`, { terminalId: 'term_new' }))
+  await t.time.run()
+  assert.ok(bytes(t.saved()) <= 200_000, `saved ${bytes(t.saved())} bytes`)
+  assert.ok(t.saved().sessions[QUIET])
+  assert.deepEqual(t.saved().terminals.term_new, { sessionId: QUIET })
+  await t.worker.deactivate()
+})
+
 test('prune keeps an alias while its target lives, so launch-id tools still reach the switched session', async () => {
   const now = 100 * DAY
   const current = 'cccccccc-1111-4222-8333-444444444444'
@@ -674,6 +768,25 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
   assert.deepEqual(out, { ok: true, label: { text: 'Sending…', tone: 'muted', copy: null } })
   assert.deepEqual(t.host.callsOf('terminal.sendText'), [{ terminalId: 'term-1', text: 'Re "Ship the parser today?": Yes', enter: true }])
   assert.ok(t.worker.posts.some(p => p.event === 'inbox.changed'))
+  await t.worker.deactivate()
+})
+
+test('with storage near its limit every save rejects, yet inbox.press and then inbox.view read "✓ Yes" once the prompt shows', async () => {
+  const text = prompt('p-1', 'Hi') + reply('a-1', 'Ship it?')
+  const big: Finding = { id: 'i9', kind: 'issue', title: 'Big', detail: 'x'.repeat(120_000), path: null, at: 0 }
+  const state: State = {
+    version: 3, terminals: { 'term-1': { sessionId: S } }, panes: {}, paneLaunches: {},
+    sessions: { [S]: { ...emptySession(100 * DAY), ledger: { ...openLedger(), findings: [big] }, lastTurnId: 'p-1', offset: Buffer.byteLength(text) } },
+  }
+  const agents = [{ terminalId: 'term-1', title: 'Fixer', agent: 'claude', state: 'done', stateStartedAt: 1 }]
+  const t = await setup({ state, agents, files: { [FILE]: text }, rejects: v => bytes(v) > 100_000 })
+  const question = async () => (await t.worker.request('inbox.view', undefined)).sections[0].questions[0]
+  const id = (await question()).id
+  const out = await t.worker.request('inbox.press', { terminalId: 'term-1', sessionId: S, drawn: JSON.stringify(['p-1', []]), id, action: 'answer', answer: 'Yes' })
+  assert.deepEqual(out, { ok: true, label: { text: 'Sending…', tone: 'muted', copy: null } })
+  t.files.set(FILE, text + prompt('p-2', 'Re "Ship the parser today?": Yes'))
+  await t.time.run(t.time.now() + 3000)
+  assert.deepEqual((await question()).label, { text: '✓ Yes', tone: 'success', copy: null })
   await t.worker.deactivate()
 })
 
@@ -1029,11 +1142,11 @@ const HANDOFF_TASK: Item = { id: 't3', kind: 'task', label: null, ask: 'Rotate t
 const HANDOFF_QUESTION: Item = { ...HANDOFF_TASK, id: 'q4', kind: 'question', ask: 'Ship it?', options: ['Yes', 'No'] }
 
 /** A session in WS.path with an open issue, task and question, and a worker whose `orca` answers with `reply`. */
-async function handoffSetup(reply: (args: string[]) => Promise<OrcaReply>, state?: State) {
+async function handoffSetup(reply: (args: string[]) => Promise<OrcaReply>, state?: State, rejects?: (value: unknown) => boolean) {
   const ledger = { ...EMPTY, items: [HANDOFF_TASK, HANDOFF_QUESTION], findings: [HANDOFF_ISSUE] }
   const fresh: State = { version: 3, terminals: { 'term-1': { sessionId: S } }, panes: {}, paneLaunches: {}, sessions: { [S]: { ...emptySession(100 * DAY), ledger, cwd: WS.path } } }
   const agents = [{ terminalId: 'term-1', title: 'Agent', agent: 'claude', state: 'done', stateStartedAt: 1 }]
-  const t = await setup({ state: state ?? fresh, agents, orca: reply })
+  const t = await setup({ state: state ?? fresh, agents, orca: reply, rejects })
   const view = async () => (await t.worker.request('inbox.view', undefined)).sections[0]
   return { ...t, view }
 }
@@ -1098,6 +1211,22 @@ test('each Hand off outcome gives its label; after any outcome but a clean error
     assert.equal(t.host.callsOf('terminal.sendText').length, 0)
     await t.worker.deactivate()
   }
+})
+
+test('a hand-off whose first save rejects runs no worktree create, leaves no "Handing off…", and a later hand-off runs', async () => {
+  const storage = { fails: true }
+  const t = await handoffSetup(async () => created('handed-to-terminal'), undefined, () => storage.fails)
+  const first = await t.worker.request('inbox.handoff', { sessionId: S, id: HANDOFF_ISSUE.id })
+  assert.equal(first.ok, false)
+  assert.deepEqual(t.orcaRuns, [])
+  const issue = (await t.view()).findings.issues.find((f: { id: string }) => f.id === HANDOFF_ISSUE.id)
+  assert.equal(issue.label, null)
+  storage.fails = false
+  const second = await t.worker.request('inbox.handoff', { sessionId: S, id: HANDOFF_ISSUE.id })
+  assert.equal(second.ok, true)
+  assert.equal(t.orcaRuns.length, 1)
+  assert.deepEqual(t.orcaRuns[0].slice(0, 2), ['worktree', 'create'])
+  await t.worker.deactivate()
 })
 
 test('two Hand off presses at once start one hand-off', async () => {

@@ -22,6 +22,8 @@ import { cwdOf, promptsBefore, wholeLinesEnd } from './transcript'
 import { createTracker, type Clock, type TrackerDeps } from './turns'
 
 const STATES = ['working', 'blocked', 'waiting', 'done']
+/** How often the worker lists live terminals for the retention rule (src/turns.ts evictable). */
+const LIST_MS = 60_000
 
 export type WorkerDeps = {
   clock: Clock
@@ -252,7 +254,9 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
     if (s.agent === 'codex') return s.transcript ? deps.readFile(s.transcript) : null
     const hit = s.transcript ? { path: s.transcript, bytes: await deps.readFile(s.transcript) } : await find(sessionId)
     if (!hit?.bytes) return null
+    // A failed save of what was learned still returns the bytes: the next read learns it again.
     await learn(sessionId, { transcript: hit.path, cwd: s.cwd ? undefined : cwdOf(hit.bytes) })
+      .catch(e => log(`read: could not save ${sessionId}: ${message(e)}`))
     return hit.bytes
   }
 
@@ -295,8 +299,23 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
   const statuses = new Map<string, TerminalStatus>()
   const paneTerminals = new Map<string, string>()
 
+  /**
+   * The handles of live terminals in every workspace, from `orca terminal list` with no `--worktree`. Null until the
+   * first list, and after a failed or truncated one: then nothing is evicted.
+   */
+  let live: Set<string> | null = null
+  async function listTerminals(): Promise<void> {
+    const reply = await deps.orca(['terminal', 'list'])
+    const terminals = reply.kind === 'ok' && reply.result?.truncated === false ? reply.result.terminals : null
+    live = Array.isArray(terminals) ? new Set(terminals.map((t: { handle?: unknown }) => String(t.handle))) : null
+    if (!live) log(`terminals: no list: ${reply.kind === 'ok' ? 'truncated' : reply.error}`)
+  }
+  const listing = setInterval(() => void listTerminals(), LIST_MS)
+  listing.unref?.()
+
   const tracker = createTracker({
     storage: orca.storage,
+    live: () => live,
     clock: deps.clock,
     read,
     codexTurn: async (sessionId, offset) => {
@@ -321,8 +340,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
   })
 
   const ready = tracker
-    .start()
-    .then(() => tracker.prune())
+    .start(listTerminals)
     .catch(e => log(`start: ${message(e)}`))
 
   /**
@@ -633,7 +651,20 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
     const at = deps.clock.now()
     const label = (handoff: Handoff): PressLabel =>
       ({ state: handoff.outcome === 'running' ? 'sending' : handoff.outcome === 'started' ? 'answered' : 'undelivered', kind: 'handoff', answer: handoff.worktree, text: '', at, handoff })
-    await tracker.edit(sessionId, cur => setLabel(cur, id, label({ worktree: name, operationId: null, outcome: 'running' })))
+    /** Puts back the row's label from before the press, and so its Hand off. */
+    const restore = () => tracker.edit(sessionId, cur => {
+      if (cur.presses[id]?.at !== at) return cur
+      const { [id]: _, ...rest } = cur.presses
+      return { ...cur, presses: before ? { ...rest, [id]: before } : rest }
+    })
+    try {
+      await tracker.edit(sessionId, cur => setLabel(cur, id, label({ worktree: name, operationId: null, outcome: 'running' })))
+    } catch (e) {
+      // No receipt saved, so no run: a restart could not tell that it may have started.
+      log(`handoff: save failed: ${message(e)}`)
+      await restore().catch(() => undefined)
+      return { ok: false, error: message(e) }
+    }
     const reply = await deps.orca([
       'worktree', 'create', '--name', name, '--repo', `path:${cwd}`, '--parent-worktree', `path:${cwd}`,
       '--agent', s.agent, '--prompt', handoffText(row),
@@ -641,11 +672,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
     if (reply.kind === 'error') {
       log(`handoff: ${reply.error}`)
       // Orca made nothing: the row goes back to its label before the press, and keeps Hand off.
-      await tracker.edit(sessionId, cur => {
-        if (cur.presses[id]?.at !== at) return cur
-        const { [id]: _, ...rest } = cur.presses
-        return { ...cur, presses: before ? { ...rest, [id]: before } : rest }
-      })
+      await restore()
       return { ok: false, error: reply.error }
     }
     let receipt: Handoff
@@ -689,6 +716,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
     listening: server.then(() => undefined),
     /** Closes the socket and removes its file. */
     async close(): Promise<void> {
+      clearInterval(listing)
       const s = await server
       if (!s) return
       await new Promise<void>(resolve => s.close(() => resolve()))

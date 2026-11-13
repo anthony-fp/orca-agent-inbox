@@ -25,3 +25,19 @@ export function fakeClock(start = 0) {
   }
   return { clock, run, now: () => t }
 }
+
+/** Storage that rejects a value over `limit` bytes, as Orca's storage does. */
+export function rejectingStorage(limit: number, initial: Record<string, unknown> = {}) {
+  const data = new Map(Object.entries(structuredClone(initial)))
+  return {
+    async get(key: string): Promise<unknown> {
+      return structuredClone(data.get(key) ?? null)
+    },
+    async set(key: string, value: unknown): Promise<void> {
+      const bytes = Buffer.byteLength(JSON.stringify(value))
+      if (bytes > limit) throw new Error(`value exceeds ${limit} bytes`)
+      data.set(key, structuredClone(value))
+    },
+    saved: (key: string) => data.get(key),
+  }
+}

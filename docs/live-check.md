@@ -155,3 +155,14 @@ Dev plugin from commit `5f7c9d0`, loaded from the dev folder and enabled with `o
 | Explain | Pass (reported). |
 
 States not seen by the agent: each button's labels, the Snooze menu, a red error, a partial or uncertain hand-off, a snooze ending, the Open match when a folder and its worktree both hold the cwd, and which `hostId` Orca gives this machine (`'local'` or null).
+
+## Sending hotfix (0.4.2) — pending
+
+Not run yet. It runs after the plugin is installed. Plan: `docs/sending-hotfix-plan.md`, H4.
+
+| Check | Result |
+|---|---|
+| After a reload, the mtime of `~/Library/Application Support/orca/plugins-data/local.agent-inbox/storage.json` changes, and `Buffer.byteLength(JSON.stringify(state))` is ≤ 200,000 | Pending. |
+| Every terminal in `orca terminal list --json` that has an `agentIdentity` still has its binding in `state.terminals` | Pending. |
+| An option press on a live question reads "✓ <option>", then the row closes after the turn | Pending. |
+| For 10 minutes, the plugin log shows no new `value exceeds`, `press: save failed` or `turns: save failed` line | Pending. |
