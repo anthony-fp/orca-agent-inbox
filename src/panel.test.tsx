@@ -324,6 +324,18 @@ test('footer: counts agents not tracked and turns not read', async () => {
   await clean(three)
 })
 
+const CHAT_UI_NOTE = "Agents started from Orca's chat UI can't be tracked. Start Claude Code or Codex in a terminal tab instead."
+
+test('footer: the chat UI note shows only when an agent is not tracked', async () => {
+  const shown = await open({ ...ONE_AGENT, untracked: 1, unread: 0 })
+  assert.ok(shown.find({ text: CHAT_UI_NOTE }))
+  await clean(shown)
+  const hidden = await open({ ...ONE_AGENT, untracked: 0, unread: 1 })
+  assert.ok(hidden.find({ text: '1 turn not read' }))
+  assert.equal(hidden.find({ text: CHAT_UI_NOTE }), null)
+  await clean(hidden)
+})
+
 test('an option press shows Sending… at once, sends the drawn row, then shows the worker label', async () => {
   let release: (out: PressOutcome) => void = () => {}
   const inputs: PressInput[] = []

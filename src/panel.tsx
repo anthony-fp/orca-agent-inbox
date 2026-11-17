@@ -847,6 +847,9 @@ function Footer({ view }: { view: InboxView }) {
           <Text size="xs" muted>
             Started outside Orca's launch, or restored after a restart.
           </Text>
+          <Text size="xs" muted>
+            Agents started from Orca's chat UI can't be tracked. Start Claude Code or Codex in a terminal tab instead.
+          </Text>
         </Stack>
       )}
       {view.unread > 0 && (

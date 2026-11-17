@@ -185,3 +185,21 @@ Not run yet. It runs after the plugin is installed. Commits: `a3b31b3`, `af6b738
 |---|---|
 | For 1 hour, the plugin log shows no new `value exceeds` or `turns: save failed` line | Pending. |
 | The stored `paneLaunches` holds no pane older than 7 days without a live terminal, and at most 200 entries | Pending. |
+
+## Chat UI note under "not tracked" (0.4.5) — pending
+
+Not run yet. It runs after the plugin is installed.
+
+| Check | Result |
+|---|---|
+| With one or more agents not tracked, the panel footer shows the chat UI note under the count | Pending. |
+
+## Chat sessions T1: a user `--plugin-dir` beside Orca's own (2026-11-17, Orca 1.4.261)
+
+- Orca → Settings → Agents → Claude → Arguments = `--plugin-dir /Users/anthony/.orca-agent-inbox/claude-plugin` (the probe plugin, named `orca-agent-inbox`).
+- A new native chat started. Its `claude` process carried both `--plugin-dir=/Applications/Orca.app/Contents/Resources/native-chat-visuals` and `--plugin-dir /Users/anthony/.orca-agent-inbox/claude-plugin`.
+- The SessionStart hook fired; the chat answered PELICAN. Hook input: `session_id`, `transcript_path`, `cwd`, `hook_event_name: "SessionStart"`, `source: "startup"`.
+- Hook env: `ORCA_STRUCTURED_SESSION=1`, `ORCA_AGENT_SESSION_ID=claude_<uuid with underscores>` (seat form), `CLAUDE_CODE_SESSION_ID` = hook `session_id`.
+- Plugin MCP tool names: `mcp__plugin_orca-agent-inbox_orca-inbox__record` and `mcp__plugin_orca-agent-inbox_orca-inbox__close`. Claude listed them as deferred tools (loaded through ToolSearch), so the guidance must name them exactly.
+- `orca worktree ps --json` lists chats as `structured-agent-session-claude_<…>[:<uuid>]`; the `:` suffix can be missing.
+- Not checked: the terminal-tab half (step 5). T10 covers it in tests and T12 live.
