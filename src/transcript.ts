@@ -3,8 +3,6 @@
 //
 // readTurn judges only the bytes it is given. The quiet rule (2 s with no growth), the 15 s
 // limit and the retries belong to the turn tracker (T4), so no clock is read here.
-import { readFileSync } from 'node:fs'
-
 import { addActivity, dialogActivity, dialogQuestions, toolActivity } from './core/model-text'
 import type { DialogOutcome } from './core/model-text'
 import type { Exchange } from './core/types'
@@ -173,11 +171,6 @@ export function readTurn(source: Buffer | string, offset: number, prompts?: numb
   const end = next !== -1 ? all[next].at : all[all.length - 1].at
 
   return { status, turnId: String(first.uuid), exchange, nextOffset: status === 'pending' ? offset : end }
-}
-
-/** readTurn over a transcript file. */
-export function readTurnFile(path: string, offset: number, prompts?: number): TurnRead | null {
-  return readTurn(readFileSync(path), offset, prompts)
 }
 
 /** The first prompt at or after `offset`, optionally containing `contains`, and the byte where its line starts. */

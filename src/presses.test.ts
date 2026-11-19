@@ -6,7 +6,7 @@ import { EMPTY, applyUpdate, parseReply } from './core/ledger'
 import { readFileSync } from 'node:fs'
 import { codexPromptAfter } from './core/codex-transcript'
 import type { ModelResult } from './model'
-import { CONFIRM_MS, UNCONFIRMED_MS, answerText, createPresses, explainText, findingText, runText, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
+import { CONFIRM_MS, CONFIRM_SLOW_MS, UNCONFIRMED_MS, answerText, createPresses, explainText, findingText, runText, drawnToken, labelledRows, type PressInput, type TerminalStatus } from './presses'
 import type { Finding, Help } from './core/types'
 import { upgradeState } from './state'
 import { fakeClock } from './test-clock'
@@ -65,6 +65,8 @@ async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?:
 
   const status = new Map<string, TerminalStatus>([[T, 'done']])
   const sent: { terminalId: string; text: string }[] = []
+  // What the presses read: whole reads, the offsets of tail reads, and the newest terminal list.
+  const watch = { reads: 0, tails: [] as number[], live: null as { handles: ReadonlySet<string>; at: number } | null }
   const presses = createPresses({
     state: () => tracker.state(),
     edit: (id, change) => tracker.edit(id, change),
@@ -73,7 +75,15 @@ async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?:
       sent.push({ terminalId, text })
       return opts.accepted ?? true
     },
-    read,
+    read: async () => (watch.reads++, read()),
+    // As the worker's: null for Codex and for a file shorter than `from`.
+    readTail: async (_id: string, from: number) => {
+      watch.tails.push(from)
+      if (fail.reads > 0 && fail.reads--) throw new Error('EIO: read failed')
+      const bytes = Buffer.from(file.text)
+      return opts.codex || bytes.length < from ? null : bytes.subarray(from)
+    },
+    live: () => watch.live,
     clock: time.clock,
   })
   const s = () => tracker.state().sessions[S]
@@ -84,7 +94,7 @@ async function setup(opts: { accepted?: boolean; kind?: 'decide' | 'do'; helps?:
     return [...rows.questions, ...rows.tasks, ...rows.findings.issues, ...rows.findings.opportunities].find(r => r.id === id)?.label ?? null
   }
   const label = () => labelOf(item.id)
-  return { time, tracker, presses, status, sent, file, input, label, labelOf, item, s, saved, fail, modelCalls, beforeSend: (f: () => void) => (onRead = f) }
+  return { time, tracker, presses, status, sent, file, input, label, labelOf, item, s, saved, fail, modelCalls, watch, beforeSend: (f: () => void) => (onRead = f) }
 }
 
 describe('presses', () => {
@@ -148,7 +158,7 @@ describe('presses', () => {
     await t.time.run(t.time.now() + 11 * 60_000)
     assert.equal(t.label()?.text, 'Sent, not confirmed')
     t.file.text += prompt('p-2', `Re "${ASK}": Yes`)
-    await t.time.run(t.time.now() + 2000)
+    await t.time.run(t.time.now() + CONFIRM_SLOW_MS)
     assert.equal(t.label()?.text, '✓ Yes')
     t.file.text += reply('a-2', 'Shipped.')
     t.status.set(T, 'done')
@@ -580,6 +590,8 @@ async function raceSetup() {
     state: () => tracker.state(), edit: (id, c) => tracker.edit(id, c), status: id => status.get(id),
     send: async () => true,
     read: async () => (watch.reads++, watch.blind ? null : Buffer.from(file.text)),
+    readTail: async (_id: string, from: number) => (watch.reads++, watch.blind ? null : Buffer.from(file.text).subarray(from)),
+    live: () => null,
     clock: time.clock,
   })
   const s = () => tracker.state().sessions[S]
@@ -640,5 +652,119 @@ describe('confirm race', () => {
     const reads = t.watch.reads
     await t.time.run(t.time.now() + 3600_000)
     assert.equal(t.watch.reads, reads, `confirm still polls after 25 h (${t.watch.reads - reads} reads in the next hour)`)
+  })
+})
+
+// R7: confirm() reads new bytes, slows after 10 minutes, and stops when a list taken after the press omits the terminal.
+describe('confirm watch', () => {
+  // Regression tests: these pass on the 1 s whole-read confirm, and must still pass.
+  test('a prompt seen in the slow phase after its turn drained still closes the answer', async () => {
+    const t = await raceSetup()
+    await t.press()
+    t.watch.blind = true
+    await t.time.run(t.time.now() + 11 * 60_000)
+    t.file.text += prompt('p-2', `Re "${RACE_ASK}": ${YES}`) + reply('a-2', 'Dropped.')
+    void t.tracker.done(T)
+    await t.time.run(t.time.now() + 5000)
+    assert.equal(t.s().lastTurnId, 'p-2', 'the turn drained')
+    assert.equal(t.isOpen(), true, 'drain did not close it: no turnId yet')
+    t.watch.blind = false
+    await t.time.run(t.time.now() + 11_000)
+    assert.equal(t.s().presses[t.item.id]?.turnId, 'p-2')
+    assert.deepEqual(t.closed(), { how: 'answered', outcome: YES })
+  })
+
+  test('a press whose terminal stays live through a slow turn is not stopped early', async () => {
+    const t = await setup()
+    t.status.set(T, 'working')
+    await t.presses.press(t.input())
+    for (let minute = 1; minute <= 15; minute++) {
+      t.watch.live = { handles: new Set([T]), at: t.time.now() + 1 }
+      await t.time.run(t.time.now() + 60_000)
+    }
+    t.file.text += prompt('p-2', `Re "${ASK}": Yes`)
+    await t.time.run(t.time.now() + 11_000)
+    assert.equal(t.label()?.text, '✓ Yes')
+  })
+
+  test('a list taken before the press that does not hold the terminal stops nothing', async () => {
+    const t = await setup()
+    t.status.set(T, 'working')
+    const before = t.time.now() - 1
+    await t.presses.press(t.input())
+    t.watch.live = { handles: new Set(), at: before }
+    await t.time.run(t.time.now() + 60_000)
+    t.file.text += prompt('p-2', `Re "${ASK}": Yes`)
+    await t.time.run(t.time.now() + 11_000)
+    assert.equal(t.label()?.text, '✓ Yes')
+  })
+
+  test('a prompt written before the terminal closed still confirms', async () => {
+    const t = await setup()
+    t.status.set(T, 'working')
+    await t.presses.press(t.input())
+    t.file.text += prompt('p-2', `Re "${ASK}": Yes`)
+    t.watch.live = { handles: new Set(), at: t.time.now() + 1 }
+    await t.time.run(t.time.now() + 11_000)
+    assert.equal(t.label()?.text, '✓ Yes')
+  })
+
+  test('a replaced, shorter transcript falls back to a whole-file read', async () => {
+    const t = await setup()
+    await t.presses.press(t.input())
+    t.watch.reads = 0
+    t.file.text = prompt('p-9', 'Fresh')
+    await t.time.run(t.time.now() + CONFIRM_MS + 2000)
+    assert.ok(t.watch.reads > 0, 'confirm read the whole file')
+    assert.equal(t.label()?.text, 'Not delivered')
+  })
+})
+
+// R7 new behaviour: these fail on the 1 s whole-read confirm.
+describe('confirm watch, new', () => {
+  test('confirm reads from the press offset on a Claude transcript', async () => {
+    const t = await setup()
+    t.status.set(T, 'working')
+    const from = Buffer.byteLength(t.file.text)
+    await t.presses.press(t.input())
+    t.watch.reads = 0
+    t.file.text += prompt('p-2', `Re "${ASK}": Yes`)
+    await t.time.run(t.time.now() + 2000)
+    assert.equal(t.label()?.text, '✓ Yes')
+    assert.equal(t.s().presses[t.item.id].from, from)
+    assert.ok(t.watch.tails.length > 0 && t.watch.tails.every(f => f === from), `tail offsets: ${t.watch.tails}`)
+    assert.equal(t.watch.reads, 0, 'no whole read')
+    assert.equal(t.s().ledger.items.some(i => i.id === t.item.id), true, 'the prompt has not drained: drain closes it, not confirm')
+  })
+
+  test('after 10 minutes confirm reads every 10 seconds', async () => {
+    const t = await raceSetup()
+    await t.press()
+    await t.time.run(t.time.now() + 11 * 60_000)
+    const reads = t.watch.reads
+    await t.time.run(t.time.now() + 60_000)
+    assert.ok(t.watch.reads - reads <= 6, `${t.watch.reads - reads} reads from minute 11 to 12`)
+  })
+
+  test('confirm stops when a list taken after the press does not hold the terminal', async () => {
+    const t = await setup()
+    t.status.set(T, 'working')
+    await t.presses.press(t.input())
+    t.watch.live = { handles: new Set(), at: t.time.now() + 1 }
+    await t.time.run(t.time.now() + 2000)
+    const reads = t.watch.reads + t.watch.tails.length
+    t.file.text += prompt('p-2', `Re "${ASK}": Yes`)
+    await t.time.run(t.time.now() + 3600_000)
+    assert.equal(t.watch.reads + t.watch.tails.length, reads, 'no reads after the stop')
+    assert.equal(t.s().presses[t.item.id].state, 'sending')
+  })
+
+  test('a done press whose terminal is gone from a list taken after the press still reads "Not delivered" after 10 s', async () => {
+    const t = await setup()
+    await t.presses.press(t.input())
+    t.watch.live = { handles: new Set(), at: t.time.now() + 1 }
+    await t.time.run(t.time.now() + CONFIRM_MS + 2000)
+    assert.equal(t.s().presses[t.item.id].state, 'undelivered')
+    assert.equal(t.label()?.text, 'Not delivered')
   })
 })

@@ -522,6 +522,23 @@ test('inbox.changed asks for the view again', async () => {
   await clean(view)
 })
 
+test('a slow view reply that lands after a newer one is dropped', async () => {
+  const replies: ((v: InboxView) => void)[] = []
+  const host = mockHost({
+    requests: { 'inbox.view': () => (replies.length === 0 ? (replies.push(() => {}), EMPTY_VIEW) : new Promise<InboxView>(r => replies.push(r))) },
+  })
+  const view = await mount(panel, { host })
+  const posts = [view.post('inbox.changed', {}), view.post('inbox.changed', {})]
+  for (let i = 0; i < 10 && replies.length < 3; i++) await new Promise(r => setImmediate(r))
+  replies[2](ONE_AGENT)
+  replies[1](THREE_AGENTS)
+  await Promise.all(posts)
+  await view.settled()
+  assert.deepEqual(texts(view, 'Heading'), ['Agent 1'])
+  assert.ok(view.find({ text: '1) Rename the folder to tools?' }))
+  await clean(view)
+})
+
 test('a workspace change, as on a focus change, asks for the view again', async () => {
   let current: InboxView = EMPTY_VIEW
   const host = mockHost({ requests: { 'inbox.view': () => current } })

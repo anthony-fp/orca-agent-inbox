@@ -429,8 +429,8 @@ describe('bin/tools.json', () => {
   })
 })
 
-/** A fake worker socket: answers each request with `reply`, or never when it returns undefined. */
-async function fakeSocket(reply: (request: Record<string, unknown>) => Answer | undefined) {
+/** A fake worker socket: answers each request with `reply`, never when it returns undefined, or closes with no answer on 'close'. */
+async function fakeSocket(reply: (request: Record<string, unknown>) => Answer | 'close' | undefined) {
   const dir = mkdtempSync(join(tmpdir(), 'oai-'))
   const path = join(dir, 'w.sock')
   const requests: Record<string, unknown>[] = []
@@ -446,7 +446,8 @@ async function fakeSocket(reply: (request: Record<string, unknown>) => Answer | 
       const request = JSON.parse(buf.slice(0, buf.indexOf('\n')))
       requests.push(request)
       const answer = reply(request)
-      if (answer) conn.end(`${JSON.stringify(answer)}\n`)
+      if (answer === 'close') conn.end()
+      else if (answer) conn.end(`${JSON.stringify(answer)}\n`)
     })
   })
   await new Promise<void>(r => server.listen(path, r))
@@ -484,6 +485,8 @@ async function mcp(socket: string, messages: unknown[], count: number, timeout =
 }
 
 describe('bin/mcp-server.mjs', () => {
+  const MAYBE_SAVED_TEXT = 'The inbox did not answer, so this may have been saved. Call again to check: a repeat is not saved twice.'
+
   test('Codex binds only the main thread; sub-agent calls never reach the main ledger', async () => {
     const sock = await fakeSocket(req => ({ text: `answer to ${req.type}` }))
     try {
@@ -532,15 +535,54 @@ describe('bin/mcp-server.mjs', () => {
     }
   })
 
-  test('a worker that never answers gives "not available" after the timeout', async () => {
+  test('a worker that never answers says the call may have been saved', async () => {
     const sock = await fakeSocket(() => undefined)
     try {
       const started = Date.now()
       const [answer] = await mcp(sock.path, [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'close', arguments: { id: 'i1', reason: 'done' } } }], 1, 300)
       assert.ok(Date.now() - started >= 300)
-      assert.deepEqual(answer.result, { content: [{ type: 'text', text: 'The inbox is not available, so this was not saved.' }], isError: true })
+      assert.deepEqual(answer.result, { content: [{ type: 'text', text: MAYBE_SAVED_TEXT }], isError: true })
     } finally {
       await sock.close()
+    }
+  })
+
+  test('a worker that reads the request and closes with no reply says the call may have been saved', async () => {
+    const sock = await fakeSocket(() => 'close')
+    try {
+      const [answer] = await mcp(sock.path, [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'record', arguments: QUESTION } }], 1)
+      assert.deepEqual(answer.result, { content: [{ type: 'text', text: MAYBE_SAVED_TEXT }], isError: true })
+      assert.deepEqual(sock.requests, [{ type: 'record', sessionId: S, args: QUESTION }])
+    } finally {
+      await sock.close()
+    }
+  })
+
+  test('a parsed reply with no text and no error says the call may have been saved', async () => {
+    for (const body of [{}, null]) {
+      const sock = await fakeSocket(() => body as unknown as Answer)
+      try {
+        const [answer] = await mcp(sock.path, [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'record', arguments: QUESTION } }], 1)
+        assert.deepEqual(answer.result, { content: [{ type: 'text', text: MAYBE_SAVED_TEXT }], isError: true }, JSON.stringify(body))
+      } finally {
+        await sock.close()
+      }
+    }
+  })
+
+  test('a record whose save and undo both fail says the call may have been saved', async () => {
+    const fails = { on: false }
+    const t = setup({ ...memoryStorage(), set: async () => { if (fails.on) throw new Error('value exceeds 262144 bytes') } })
+    await t.tracker.track(T, S)
+    const dir = mkdtempSync(join(tmpdir(), 'oai-'))
+    const server = await listen(join(dir, 'w.sock'), request => t.send(request))
+    try {
+      fails.on = true
+      const [answer] = await mcp(join(dir, 'w.sock'), [{ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'record', arguments: QUESTION } }], 1)
+      assert.deepEqual(answer.result, { content: [{ type: 'text', text: MAYBE_SAVED_TEXT }], isError: true })
+    } finally {
+      await new Promise<void>(r => server.close(() => r()))
+      rmSync(dir, { recursive: true, force: true })
     }
   })
 

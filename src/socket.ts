@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url'
 
 import { ORCA, ORCA_CODEX, promptNotes } from './core/model-text'
 import { recordClose, recordItem } from './core/tools'
-import type { SessionState, State } from './state'
+import { isObject, type SessionState, type State } from './state'
 
 /** macOS limits a unix socket path to 104 bytes, the last for the end mark. */
 const MAX_PATH = 103
@@ -65,8 +65,11 @@ export type Request =
   | { type: 'record' | 'close'; sessionId: string; args: Record<string, unknown> }
   | { type: 'codex-turn'; payload: { paneKey: string; codexHome: string; threadId: string; turnId: string; type: string } }
 
-/** `text` is the answer the client prints or returns; `error` means it gives up as on a timeout. */
-export type Answer = { text: string } | { error: string }
+/**
+ * `text` is the answer the client prints or returns; `error` means it was not saved; `maybeSaved` means it may have been
+ * saved, as on a timeout.
+ */
+export type Answer = { text: string } | { error: string } | { maybeSaved: true }
 
 export type AnswerDeps = {
   state(): State
@@ -90,15 +93,11 @@ export type AnswerDeps = {
 }
 
 /** Orca's terminal handle, `term_` and an id, as Orca sets ORCA_TERMINAL_HANDLE. Any other value is ignored. */
-const HANDLE = /^term_[A-Za-z0-9-]{1,128}$/
+export const HANDLE = /^term_[A-Za-z0-9-]{1,128}$/
 
 /** The turn a tool call made now belongs to. The transcript's count can catch up with the prompt-starts. */
 export function activeTurn(s: SessionState): number {
   return Math.max(s.activeTurn, s.ledger.turn)
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 const TYPES = ['prompt-start', 'inbox-text', 'record', 'close', 'codex-turn']
@@ -236,7 +235,7 @@ export async function listen(path: string, answer: (request: unknown) => Promise
       answer(request)
         .catch((e: unknown): Answer => {
           log?.(`socket: ${e instanceof Error ? e.message : String(e)}`)
-          return { error: 'failed' }
+          return isObject(e) && e.maybeSaved === true ? { maybeSaved: true } : { error: 'failed' }
         })
         .then(a => conn.end(`${JSON.stringify(a)}\n`))
     })

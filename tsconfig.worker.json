@@ -1,0 +1,10 @@
+{
+  "extends": "./.orca/types/tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "typeRoots": [".orca/types", "node_modules/@types"],
+    "types": ["orca", "orca-host", "orca-frame", "orca-worker", "orca-services", "orca-testing", "node"],
+    "skipLibCheck": true
+  },
+  "include": ["src/worker.ts", "src/protocol.ts", "src/panel-views.ts"]
+}

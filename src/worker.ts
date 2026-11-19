@@ -1,7 +1,7 @@
 // The plugin's worker. Orca transpiles this file when it loads: no build step.
 // It tags each Claude Code launch, feeds the turn tracker from status changes, answers the panel's requests
 // (src/protocol.ts), runs presses (src/presses.ts) and answers the agent's tools and prompt hook (src/socket.ts).
-import { readFile, readdir } from 'node:fs/promises'
+import { open, readFile, readdir } from 'node:fs/promises'
 import type { Server } from 'node:net'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
@@ -16,7 +16,7 @@ import { tagLaunch, tokenize } from './launch'
 import { runInboxModel } from './model'
 import { createPresses, drawnToken, handoffText, labelledRows, rowLabel, setLabel, type PressInput, type TerminalStatus } from './presses'
 import type { CopyOutcome, HandoffOutcome, InboxSection, InboxView, OpenOutcome, OtherAgent, SnoozeOutcome } from './protocol'
-import { binPaths, createAnswerer, listen, socketPath, stableBinPaths } from './socket'
+import { HANDLE, binPaths, createAnswerer, listen, socketPath, stableBinPaths } from './socket'
 import { emptySession, type Handoff, type PressLabel } from './state'
 import { cwdOf, promptsBefore, wholeLinesEnd } from './transcript'
 import { createTracker, type Clock, type TrackerDeps } from './turns'
@@ -31,6 +31,8 @@ export type WorkerDeps = {
   model: TrackerDeps['model']
   /** A file's bytes, or null when it does not exist. */
   readFile(path: string): Promise<Buffer | null>
+  /** A file's bytes from `from` to its end, with one file handle. Null when it does not exist or is shorter than `from`. */
+  readFrom(path: string, from: number): Promise<Buffer | null>
   /** The names of the folders in a folder; none when it does not exist. */
   listDirs(path: string): Promise<string[]>
   /** Codex's rollout lookup, replaceable for tests that use hand-written files. */
@@ -56,6 +58,25 @@ async function readOrNull(path: string): Promise<Buffer | null> {
   }
 }
 
+export async function readFromOrNull(path: string, from: number): Promise<Buffer | null> {
+  let file
+  try {
+    file = await open(path, 'r')
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw e
+  }
+  try {
+    const { size } = await file.stat()
+    if (size < from) return null
+    const bytes = Buffer.alloc(size - from)
+    const { bytesRead } = await file.read(bytes, 0, bytes.length, from)
+    return bytes.subarray(0, bytesRead)
+  } finally {
+    await file.close()
+  }
+}
+
 async function listDirs(path: string): Promise<string[]> {
   try {
     return (await readdir(path, { withFileTypes: true })).filter(d => d.isDirectory()).map(d => d.name)
@@ -77,16 +98,12 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 const TRACK_WAIT_MS = 1000
 
 /** How long the panel's reload after a status change waits, so a burst of changes reloads it once. */
-const RELOAD_MS = 250
+export const RELOAD_MS = 250
 
 /** The storage key of the snoozes, apart from the state: `"<sessionId>:<rowId>"` to the time (ms) each one ends. */
 const SNOOZES = 'snoozes'
 type Snoozes = Record<string, number>
 
-/**
- * Why `tagLaunch` left a launch untagged, for the launch log. It reads the command as `tagLaunch` does and never
- * changes it. The log never holds the command, which can hold a prompt.
- */
 /** Whether `path` is `folder` or inside it, by whole path parts: `/a/b` holds `/a/b/c`, not `/a/bc`. */
 function holds(folder: string, path: string): boolean {
   const rel = relative(folder, path)
@@ -101,6 +118,10 @@ export function slug(text: string): string {
 /** `workspace.list` gives no local marker: Orca's own code names this machine `local`, and a folder may give null. */
 const isLocal = (hostId: string | null) => hostId === null || hostId === 'local'
 
+/**
+ * Why `tagLaunch` left a launch untagged, for the launch log. It reads the command as `tagLaunch` does and never
+ * changes it. The log never holds the command, which can hold a prompt.
+ */
 function untaggedReason(agent: string, command: string): string {
   if (agent !== 'claude') return 'not-claude'
   const words = tokenize(command)?.map(t => t.text)
@@ -260,6 +281,12 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
     return hit.bytes
   }
 
+  /** A Claude transcript from byte `from`, once its path is saved. Null otherwise: confirm() and the turn poll then read it whole. */
+  async function readTail(sessionId: string, from: number): Promise<Buffer | null> {
+    const s = tracker.state().sessions[sessionId]
+    return s?.agent !== 'codex' && s?.transcript ? deps.readFrom(s.transcript, from) : null
+  }
+
   /** The session's folder: its saved `cwd`, else the first `cwd` its transcript gives. */
   async function dirOf(sessionId: string): Promise<string | null> {
     const known = tracker.state().sessions[sessionId]?.cwd
@@ -301,14 +328,21 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
 
   /**
    * The handles of live terminals in every workspace, from `orca terminal list` with no `--worktree`. Null until the
-   * first list, and after a failed or truncated one: then nothing is evicted.
+   * first list, and after a failed or truncated one: then nothing is evicted. The CLI stays: host `terminal.list` needs
+   * a `workspaceId` and lists at most 50 terminals, so one global list would take a call per workspace.
    */
   let live: Set<string> | null = null
+  /** The clock time the call that gave `live` started. A press's confirm() trusts only a list started after the press. */
+  let liveAt = 0
   async function listTerminals(): Promise<void> {
+    const at = deps.clock.now()
     const reply = await deps.orca(['terminal', 'list'])
     const terminals = reply.kind === 'ok' && reply.result?.truncated === false ? reply.result.terminals : null
     live = Array.isArray(terminals) ? new Set(terminals.map((t: { handle?: unknown }) => String(t.handle))) : null
+    liveAt = at
     if (!live) log(`terminals: no list: ${reply.kind === 'ok' ? 'truncated' : reply.error}`)
+    // A session that save() evicted keeps no plan.
+    for (const id of plans.keys()) if (!tracker.state().sessions[id]) plans.delete(id)
   }
   const listing = setInterval(() => void listTerminals(), LIST_MS)
   listing.unref?.()
@@ -318,13 +352,11 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
     live: () => live,
     clock: deps.clock,
     read,
-    codexTurn: async (sessionId, offset) => {
-      const bytes = await read(sessionId)
-      return bytes ? readCodexTurn(bytes, offset) : null
-    },
+    readTail,
+    codexTurn: async (_sessionId, offset, bytes) => readCodexTurn(bytes, offset),
     model: deps.model,
     log,
-    changed: () => orca.panels.post('inbox.changed', {}),
+    changed: reloadSoon,
   })
   const presses = createPresses({
     state: () => tracker.state(),
@@ -335,6 +367,8 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
       return accepted
     },
     read,
+    readTail,
+    live: () => (live ? { handles: live, at: liveAt } : null),
     clock: deps.clock,
     log,
   })
@@ -353,7 +387,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
       const raw = await orca.storage.get(SNOOZES)
       const saved = Object.entries(raw !== null && typeof raw === 'object' ? raw : {})
       const now = deps.clock.now()
-      const live: Snoozes = Object.fromEntries(saved.filter(([, end]) => typeof end === 'number' && end > now))
+      const live: Snoozes = Object.fromEntries(saved.filter((e): e is [string, number] => typeof e[1] === 'number' && e[1] > now))
       const next = change ? change(live) : live
       if (change || saved.length !== Object.keys(live).length) await orca.storage.set(SNOOZES, next)
       return next
@@ -457,7 +491,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
       if (!launch || launch.agent !== 'claude') return
       const bound = state.moved?.[launchSession] ?? launchSession
       const terminal = Object.entries(state.terminals).find(([, t]) => t.sessionId === bound)?.[0] ??
-        (terminalId && /^term_[A-Za-z0-9-]{1,128}$/.test(terminalId) ? terminalId : null)
+        (terminalId && HANDLE.test(terminalId) ? terminalId : null)
       if (!terminal) return
       const known = state.sessions[sessionId]
       const bytes = !known && transcript ? await deps.readFile(transcript) : null
@@ -679,6 +713,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
       await restore().catch(() => undefined)
       return { ok: false, error: message(e) }
     }
+    // The CLI stays: host `workspace.create` has no parent-worktree option.
     const reply = await deps.orca([
       'worktree', 'create', '--name', name, '--repo', `path:${cwd}`, '--parent-worktree', `path:${cwd}`,
       '--agent', s.agent, '--prompt', handoffText(row),
@@ -755,6 +790,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     home: homedir(),
     model: (prompt, source, codexHome) => runInboxModel(prompt, { source, ...(codexHome === undefined ? {} : { codexHome }) }),
     readFile: readOrNull,
+    readFrom: readFromOrNull,
     listDirs,
     copy: text => copyToClipboard(text),
     orca: args => runOrca(args),

@@ -93,12 +93,18 @@ function hideSnoozed(view: InboxView): InboxView {
   return { ...view, sections }
 }
 
+/** Counts loads, so a reply that lands after a newer load's reply is dropped. */
+let loads = 0
+
 async function load(): Promise<void> {
+  const n = ++loads
   try {
-    const view = hideSnoozed(await plugin.request('inbox.view'))
+    const reply = await plugin.request('inbox.view')
+    if (n !== loads) return
+    const view = hideSnoozed(reply)
     update(loaded, () => ({ is: 'ready', view }))
   } catch (e) {
-    update(loaded, () => ({ is: 'error', message: message(e) }))
+    if (n === loads) update(loaded, () => ({ is: 'error', message: message(e) }))
   }
 }
 

@@ -49,6 +49,29 @@ jobs:
           pnpm install --frozen-lockfile --ignore-scripts
           pnpm run build:packages
 
+      # No Orca script writes .orca/types. `orca plugin types` copies these committed files
+      # (src/cli/plugin-authoring/plugin-type-files.ts at ORCA_REF); this step does the same copy.
+      - name: Write Orca plugin typings
+        working-directory: orca/resources/plugins
+        run: |
+          t="$GITHUB_WORKSPACE/plugin/.orca/types"
+          for m in host frame worker services testing; do
+            mkdir -p "$t/orca-$m" && cp "types/orca-$m.d.ts" "$t/orca-$m/index.d.ts"
+          done
+          mkdir -p "$t/orca"
+          cat declarative/orca{,-components,-components-layout,-components-data}.d.ts > "$t/orca/index.d.ts"
+          cat > "$t/tsconfig.json" <<'EOF'
+          {
+            "compilerOptions": {
+              "strict": true, "noEmit": true, "target": "ES2022", "module": "ESNext",
+              "moduleResolution": "Bundler", "allowImportingTsExtensions": true, "isolatedModules": true,
+              "jsx": "react-jsx", "jsxImportSource": "orca", "lib": ["ES2022", "DOM"], "preserveSymlinks": true,
+              "typeRoots": ["."],
+              "types": ["orca", "orca-host", "orca-frame", "orca-worker", "orca-services", "orca-testing"]
+            }
+          }
+          EOF
+
       - name: Validate manifest and files
         working-directory: orca
         run: pnpm validate:plugin "$GITHUB_WORKSPACE/plugin"
@@ -58,3 +81,4 @@ jobs:
         run: |
           npm ci --ignore-scripts
           npm run typecheck
+          npm run typecheck:worker

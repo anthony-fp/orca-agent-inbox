@@ -19,6 +19,8 @@ export const CONFIRM_MS = 10_000
 export const CONFIRM_POLL_MS = 1000
 /** A send still not seen after this long reads "Sent, not confirmed". The stored label stays `sending`. */
 export const UNCONFIRMED_MS = 10 * 60_000
+/** After UNCONFIRMED_MS, confirm() reads this often. */
+export const CONFIRM_SLOW_MS = 10_000
 /** confirm() stops watching a send this long after the press. The label stays `sending`. */
 export const WATCH_MS = 24 * 60 * 60_000
 
@@ -71,6 +73,10 @@ export type PressDeps = {
   /** Types the text and presses Enter. True when Orca accepted it. */
   send(terminalId: string, text: string): Promise<boolean>
   read(sessionId: string): Promise<Buffer | null>
+  /** A Claude transcript from byte `from` to its end. Null for Codex, before the file is known, and for a file shorter than `from`. */
+  readTail(sessionId: string, from: number): Promise<Buffer | null>
+  /** The newest successful list of live terminals in every workspace, and the clock time its call started. Null when none. */
+  live(): { handles: ReadonlySet<string>; at: number } | null
   clock: Clock
   log?(message: string): void
 }
@@ -292,31 +298,45 @@ export function createPresses(deps: PressDeps) {
     })
   }
 
-  /** Reads the transcript until the prompt appears, or for CONFIRM_MS after the agent is done. */
+  /**
+   * Reads the transcript until the prompt appears, or for CONFIRM_MS after the agent is done. It reads only the bytes
+   * after the press when it can, and every CONFIRM_SLOW_MS after UNCONFIRMED_MS. It stops, with the label at `sending`,
+   * when a list taken after the press does not hold the terminal, unless the agent is done.
+   */
   async function confirm(terminalId: string, sessionId: string, id: string, label: PressLabel): Promise<void> {
+    const from = label.from ?? 0
     let deadline: number | null = null
     for (;;) {
+      // Taken before the read: a terminal gone from this list wrote its last bytes before the read starts.
+      const live = deps.live()
+      const gone = live !== null && live.at > label.at && !live.handles.has(terminalId)
       // A failed read is no bytes: the loop reads again, as before the transcript exists.
-      const bytes = await deps.read(sessionId).catch(e => {
+      const failed = (e: unknown) => {
         deps.log?.(`press: read failed for ${id}: ${e instanceof Error ? e.message : String(e)}`)
         return null
-      })
+      }
+      const tail = await deps.readTail(sessionId, from).catch(failed)
+      // `bytes` starts at byte `base` of the file: `from` for a tail, 0 for a whole read.
+      const base = tail ? from : 0
+      const bytes = tail ?? await deps.read(sessionId).catch(failed)
       const prompt = bytes ? deps.state().sessions[sessionId]?.agent === 'codex'
-        ? codexPromptAfter(bytes, label.from ?? 0, label.text)
-        : promptAfter(bytes, label.from ?? 0, label.text) : null
+        ? codexPromptAfter(bytes, from - base, label.text)
+        : promptAfter(bytes, from - base, label.text) : null
       const done = deps.status(terminalId) === 'done'
       if (prompt)
-        return settle(sessionId, id, label.at, { state: 'answered', turnId: prompt.uuid }, prompt.at)
+        return settle(sessionId, id, label.at, { state: 'answered', turnId: prompt.uuid }, base + prompt.at)
+      if (gone && !done) return
       // A queued answer has no transcript prompt until the current turn ends.
       if (done) {
         deadline ??= clock.now() + CONFIRM_MS
         const otherPrompt = bytes ? deps.state().sessions[sessionId]?.agent === 'codex'
-          ? codexPromptAfter(bytes, label.from ?? 0)
-          : promptAfter(bytes, label.from ?? 0) : null
+          ? codexPromptAfter(bytes, from - base)
+          : promptAfter(bytes, from - base) : null
         if (otherPrompt || clock.now() >= deadline) return settle(sessionId, id, label.at, { state: 'undelivered' })
       } else deadline = null
-      if (clock.now() - label.at >= WATCH_MS) return
-      await clock.sleep(CONFIRM_POLL_MS)
+      const age = clock.now() - label.at
+      if (age >= WATCH_MS) return
+      await clock.sleep(age >= UNCONFIRMED_MS ? CONFIRM_SLOW_MS : CONFIRM_POLL_MS)
     }
   }
 

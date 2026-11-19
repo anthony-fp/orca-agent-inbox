@@ -114,7 +114,7 @@ export function emptyState(): CurrentState {
   return { version: 3, terminals: {}, sessions: {}, panes: {}, paneLaunches: {} }
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
+export function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 

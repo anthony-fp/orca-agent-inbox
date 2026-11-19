@@ -203,3 +203,13 @@ Not run yet. It runs after the plugin is installed.
 - Plugin MCP tool names: `mcp__plugin_orca-agent-inbox_orca-inbox__record` and `mcp__plugin_orca-agent-inbox_orca-inbox__close`. Claude listed them as deferred tools (loaded through ToolSearch), so the guidance must name them exactly.
 - `orca worktree ps --json` lists chats as `structured-agent-session-claude_<…>[:<uuid>]`; the `:` suffix can be missing.
 - Not checked: the terminal-tab half (step 5). T10 covers it in tests and T12 live.
+
+## Review fixes (0.4.6) — pending
+
+Not run yet. It runs after the plugin is installed.
+
+| Check | Result |
+|---|---|
+| A record call during a slow save says "may have been saved", and a repeat call gives "Already open." | Pending. |
+| Press an option in a terminal, then close the terminal. The plugin log shows no more confirm reads for it after the next list (60 s) | Pending. |
+| Activity Monitor: the worker's CPU at rest with 5 or more agents stays near 0 % | Pending. |

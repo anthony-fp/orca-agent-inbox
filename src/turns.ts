@@ -37,8 +37,10 @@ export type TrackerDeps = {
   read(sessionId: string): Promise<Buffer | null>
   /** Runs the inbox model. `source` is what parseReply checks HELP values against. */
   model(prompt: string, source: string, codexHome?: string): Promise<ModelResult>
-  /** Reads one Codex rollout turn; Claude keeps using readTurn on the transcript bytes. */
-  codexTurn?(sessionId: string, offset: number): Promise<CodexTurnRead | null>
+  /** A Claude transcript from byte `from`, or null when unknown or shorter than `from`: poll then reads it whole. */
+  readTail?(sessionId: string, from: number): Promise<Buffer | null>
+  /** Reads one Codex rollout turn from the bytes poll read; Claude keeps using readTurn on the transcript bytes. */
+  codexTurn?(sessionId: string, offset: number, bytes: Buffer): Promise<CodexTurnRead | null>
   log?(message: string): void
   /** Called after each saved change, so the worker can tell the panel. */
   changed?(): void
@@ -178,6 +180,11 @@ function readFrom(s: SessionState): number {
   return s.queue.at(-1)?.nextOffset ?? s.offset
 }
 
+/** A turn read from bytes that start at `from`, with its nextOffset in whole-file bytes. */
+function shift(read: TurnRead | null, from: number): TurnRead | null {
+  return read && { ...read, nextOffset: from + read.nextOffset }
+}
+
 /** The person's prompts before readFrom, when known without reading the file from the start. */
 function promptsBefore(s: SessionState): number | undefined {
   const last = s.queue.at(-1)
@@ -196,6 +203,9 @@ export function createTracker(deps: TrackerDeps) {
   const deadlines = new Map<string, number>()
   /** Sessions whose model loop runs. */
   const running = new Set<string>()
+  /** Each session's change count: `update` and `track` add 1, `save` does not. */
+  const edits = new Map<string, number>()
+  const bump = (sessionId: string) => edits.set(sessionId, (edits.get(sessionId) ?? 0) + 1)
 
   const isCodex = (sessionId: string) => state.sessions[sessionId]?.agent === 'codex'
   const busy = () => new Set([...deadlines.keys(), ...running])
@@ -205,15 +215,19 @@ export function createTracker(deps: TrackerDeps) {
     if (readOnly) return Promise.resolve()
     state = trimPanes({ ...state, sessions: Object.fromEntries(Object.entries(state.sessions).map(([id, s]) => [id, pruned(s)])) }, deps.live?.() ?? null, clock.now())
     // Best effort: when only kept sessions are left, the save still runs.
-    let size = byteSize(state)
+    let json = JSON.stringify(state)
+    let size = Buffer.byteLength(json)
     const drop = new Set<string>()
     for (const id of size > BUDGET ? evictable(state, deps.live?.() ?? null, clock.now(), KEEP_MS, busy()) : []) {
       if (size <= BUDGET) break
       drop.add(id)
       size -= byteSize({ [id]: state.sessions[id] }) - 1
     }
-    if (drop.size > 0) state = without(state, drop)
-    const copy = JSON.parse(JSON.stringify(state)) as CurrentState
+    if (drop.size > 0) {
+      state = without(state, drop)
+      json = JSON.stringify(state)
+    }
+    const copy = JSON.parse(json) as CurrentState
     writes = writes.catch(() => undefined).then(() => storage.set(STATE_KEY, copy))
     // The panel reloads after a failed write too: the state in memory moved on, and a stuck label must not stay.
     void writes.then(() => deps.changed?.(), e => {
@@ -224,6 +238,7 @@ export function createTracker(deps: TrackerDeps) {
   }
 
   function update(sessionId: string, change: (s: SessionState) => SessionState): void {
+    bump(sessionId)
     state = { ...state, sessions: { ...state.sessions, [sessionId]: change(state.sessions[sessionId]) } }
   }
 
@@ -330,14 +345,21 @@ export function createTracker(deps: TrackerDeps) {
       for (;;) {
         const s = state.sessions[sessionId]
         if (!s) return
-        const bytes = await deps.read(sessionId)
-        if (bytes && bytes.length !== size) {
-          size = bytes.length
+        // A Claude session whose prompts before readFrom are known reads only the bytes after it.
+        const from = readFrom(s)
+        const prompts = promptsBefore(s)
+        const tail = s.agent !== 'codex' && prompts !== undefined ? await deps.readTail?.(sessionId, from) ?? null : null
+        const bytes = tail ? null : await deps.read(sessionId)
+        const length = tail ? from + tail.length : bytes?.length
+        if (length !== undefined && length !== size) {
+          size = length
           grewAt = clock.now()
         }
-        const read = bytes
-          ? s.agent === 'codex' ? await deps.codexTurn?.(sessionId, readFrom(s)) ?? null : readTurn(bytes, readFrom(s), promptsBefore(s))
-          : null
+        const read = tail
+          ? shift(readTurn(tail, 0, prompts), from)
+          : bytes
+            ? s.agent === 'codex' ? await deps.codexTurn?.(sessionId, from, bytes) ?? null : readTurn(bytes, from, prompts)
+            : null
         // An incomplete turn is final: a later prompt follows it. A complete one may still grow.
         const isDone = read?.status === 'incomplete' || (read?.status === 'complete' && (s.agent === 'codex' || clock.now() - grewAt >= QUIET_MS))
         if (read && isDone && (await enqueue(sessionId, read))) continue
@@ -430,6 +452,7 @@ export function createTracker(deps: TrackerDeps) {
     ): Promise<void> {
       const terminals = terminalId === null ? state.terminals : Object.fromEntries(Object.entries(state.terminals).filter(([, t]) => t.sessionId !== sessionId))
       const known = state.sessions[sessionId]
+      bump(sessionId)
       state = {
         ...state,
         terminals: terminalId === null ? terminals : { ...terminals, [terminalId]: { sessionId, ...(opts.pane ? { paneKey: opts.pane.key } : {}) } },
@@ -475,8 +498,11 @@ export function createTracker(deps: TrackerDeps) {
 
     /**
      * Changes a session and saves it. The change lands in this tick, before the write: a press checks and sends in one tick.
-     * With `undoOnFail`, a rejected write undoes the change, for a caller that reports the failure; unless a later change,
-     * whose own save carries this one, came in between.
+     * With `undoOnFail`, a rejected write undoes the change, for a caller that reports the failure; unless a later change
+     * of this session, whose own save carries this one, came in between. The undo is saved again: a save of another
+     * session made before the failure holds the change, and this write lands after it. The edit rejects once the undo
+     * write settles. When the undo write fails too, or no undo runs (a later change or a gone session), storage may
+     * hold the change, and the error carries `maybeSaved`.
      */
     edit(sessionId: string, change: (s: SessionState) => SessionState, opts: { undoOnFail?: boolean } = {}): Promise<void> {
       if (!state.sessions[sessionId]) return Promise.resolve()
@@ -484,9 +510,13 @@ export function createTracker(deps: TrackerDeps) {
       update(sessionId, cur => ({ ...change(cur), touchedAt: clock.now() }))
       const written = save()
       if (!opts.undoOnFail) return written
-      const mine = state.sessions[sessionId]
-      return written.catch(e => {
-        if (mine && state.sessions[sessionId] === mine) update(sessionId, () => before)
+      const mine = edits.get(sessionId)
+      const maybeSaved = (e: unknown) => Object.assign(e instanceof Error ? e : new Error(String(e)), { maybeSaved: true })
+      return written.catch(async e => {
+        if (!state.sessions[sessionId] || edits.get(sessionId) !== mine) throw maybeSaved(e)
+        update(sessionId, () => before)
+        // save() logs its own failure.
+        await save().catch(() => { throw maybeSaved(e) })
         throw e
       })
     },

@@ -9,7 +9,7 @@
 import { readFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 
-import { ask, readArgs } from './ask.mjs'
+import { MAYBE_SAVED, ask, readArgs } from './ask.mjs'
 
 const { socket, session, timeout } = readArgs(process.argv.slice(2))
 const tools = JSON.parse(readFileSync(new URL('./tools.json', import.meta.url), 'utf8'))
@@ -18,6 +18,7 @@ const names = new Set(tools.map(t => t.name))
 /** Used when the client names no version. A client's own version is echoed back: the methods used here are the same in each. */
 const PROTOCOL_VERSION = '2025-06-18'
 const NOT_AVAILABLE = 'The inbox is not available, so this was not saved.'
+const NO_ANSWER = 'The inbox did not answer, so this may have been saved. Call again to check: a repeat is not saved twice.'
 
 const send = message => process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`)
 
@@ -49,9 +50,8 @@ async function result(method, params) {
         ...(threadId ? { sessionId: threadId } : {}),
       } : { sessionId: session }
       const answer = await ask(socket, { type: name, ...identity, args }, timeout)
-      return typeof answer?.text === 'string'
-        ? { content: [{ type: 'text', text: answer.text }] }
-        : { content: [{ type: 'text', text: NOT_AVAILABLE }], isError: true }
+      if (typeof answer?.text === 'string') return { content: [{ type: 'text', text: answer.text }] }
+      return { content: [{ type: 'text', text: answer === MAYBE_SAVED ? NO_ANSWER : NOT_AVAILABLE }], isError: true }
     }
     default:
       return undefined

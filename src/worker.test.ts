@@ -9,10 +9,10 @@ import { drawnToken } from './presses'
 import { emptySession, type CurrentState, type State } from './state'
 import { fakeClock } from './test-clock'
 import { PRUNE_MS } from './turns'
-import { createWorker, liveTools } from './worker'
+import { RELOAD_MS, createWorker, liveTools, readFromOrNull } from './worker'
 // @ts-expect-error: a plain Node script with no types
 import { ask } from '../bin/ask.mjs'
-import { mkdtempSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { binPaths } from './socket'
@@ -86,6 +86,11 @@ async function setup(opts: { state?: State; storage?: Record<string, unknown>; f
       if (opts.unreadable?.includes(path)) throw new Error('EACCES: permission denied')
       const text = files.get(path)
       return text === undefined ? null : Buffer.from(text)
+    },
+    readFrom: async (path: string, from: number) => {
+      reads.push(path)
+      const text = files.get(path)
+      return text === undefined || Buffer.byteLength(text) < from ? null : Buffer.from(text).subarray(from)
     },
   }
   let made: ReturnType<typeof createWorker> | null = null
@@ -547,6 +552,27 @@ test('status changes tell the panel to reload, at most once per 250 ms', async (
   await t.worker.deactivate()
 })
 
+test('three saves in one tick post inbox.changed once, 250 ms later', async () => {
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  const state: State = { version: 1, terminals: { 'term-1': { sessionId: S } }, sessions: { [S]: emptySession(100 * DAY) } }
+  const t = await setup({ socket, state })
+  try {
+    const posts = () => t.worker.posts.filter(p => p.event === 'inbox.changed').length
+    const before = posts()
+    const record = (ask_: string) => ask(socket, { type: 'record', sessionId: S, args: { kind: 'question', ask: ask_, options: ['Yes', 'No'] } }, 2000)
+    for (const answer of await Promise.all(['One?', 'Two?', 'Three?'].map(record))) assert.match(JSON.stringify(answer), /Recorded/)
+    assert.equal(t.saved().sessions[S].ledger.items.length, 3)
+    assert.equal(posts(), before)
+    await t.time.run(t.time.now() + RELOAD_MS - 1)
+    assert.equal(posts(), before)
+    await t.time.run(t.time.now() + 1)
+    assert.equal(posts(), before + 1)
+  } finally {
+    await t.close()
+    await t.worker.deactivate()
+  }
+})
+
 test('a status without terminalId is ignored', async () => {
   const t = await setup({ state: { version: 1, terminals: { 'term-1': { sessionId: S } }, sessions: { [S]: emptySession(100 * DAY) } } })
   const before = t.reads.length
@@ -803,6 +829,7 @@ test('inbox.view: one section per tracked agent, newest first, with the untracke
   const out = await t.worker.request('inbox.press', { terminalId: 'term-1', sessionId: S, drawn: JSON.stringify(['p-1', []]), id, action: 'answer', answer: 'Yes' })
   assert.deepEqual(out, { ok: true, label: { text: 'Sending…', tone: 'muted', copy: null } })
   assert.deepEqual(t.host.callsOf('terminal.sendText'), [{ terminalId: 'term-1', text: 'Re "Ship the parser today?": Yes', enter: true }])
+  await t.time.run(t.time.now() + RELOAD_MS)
   assert.ok(t.worker.posts.some(p => p.event === 'inbox.changed'))
   await t.worker.deactivate()
 })
@@ -881,6 +908,41 @@ test("inbox.view gives each section its plan's goal line, read again when the pl
   await t.worker.emit('agent.status.changed', status('done'))
   await t.time.run()
   assert.equal((await t.worker.request('inbox.view', undefined)).sections[0].goal, null)
+  await t.worker.deactivate()
+})
+
+test("an evicted session's plan is dropped at the next list", async () => {
+  const now = 100 * DAY
+  // The worker's 60 s terminal list runs on a real interval: keep its callback, so the test runs the next list.
+  const lists: (() => void)[] = []
+  const realSetInterval = globalThis.setInterval
+  globalThis.setInterval = ((fn: () => void, ms?: number) => {
+    if (ms === 60_000) lists.push(fn)
+    return realSetInterval(fn, ms)
+  }) as typeof setInterval
+  // 50 sessions of about 4.6 KB, newer than S: over the budget, so a save 3 days later evicts the oldest, S, first.
+  const big = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`f${i}`, { ...emptySession(now + DAY), cwd: `/w/${'x'.repeat(4500)}` }]))
+  const state: State = { version: 3, terminals: { 'term-1': { sessionId: S } }, panes: {}, paneLaunches: {}, sessions: { ...big, [S]: { ...emptySession(now - 1000), cwd: WS.path } } }
+  const agents = [{ terminalId: 'term-1', title: 'Fixer', agent: 'claude', state: 'done', stateStartedAt: 1 }]
+  let t: Awaited<ReturnType<typeof setup>>
+  try {
+    t = await setup({ state, agents, terminals: [], files: { [PLAN_FILE]: '## Old goal\n- [~] Write the tests\n', [FILE]: prompt('p-1', 'Hi') } })
+  } finally {
+    globalThis.setInterval = realSetInterval
+  }
+  assert.equal(lists.length, 1)
+  assert.equal((await t.worker.request('inbox.view', undefined)).sections[0].goal, 'Old goal')
+  await t.time.run(now + 3 * DAY)
+  await t.worker.hooks.fire('agent.launch.before', launch('claude --session-id cccccccc-1111-4222-8333-444444444444', { terminalId: 'term-2' }))
+  await t.time.run()
+  assert.equal(t.saved().sessions[S], undefined, 'the save evicted S')
+  t.files.set(PLAN_FILE, '## New goal\n- [~] Write the tests\n')
+  lists[0]()
+  await t.time.run()
+  // S comes back: its section reads the plan file again, not the plan held from before it was evicted.
+  await t.worker.hooks.fire('agent.launch.before', launch(`claude --resume ${S}`))
+  await t.time.run()
+  assert.equal((await t.worker.request('inbox.view', undefined)).sections[0].goal, 'New goal')
   await t.worker.deactivate()
 })
 
@@ -1102,7 +1164,7 @@ async function logged(opts: { hang?: boolean; tools?: { socketPath: string; mcpS
   const time = fakeClock(100 * DAY)
   const logs: string[] = []
   const host = mockHost({ storage: {}, results: { 'agents.list': { agents: [] } } })
-  const deps = { clock: time.clock, home: HOME, tools: opts.tools ?? null, copy: async () => {}, model: async (): Promise<ModelResult> => ({ ok: false, reason: 'failed', detail: '', ms: 1 }), listDirs: async () => [], readFile: async () => null }
+  const deps = { clock: time.clock, home: HOME, tools: opts.tools ?? null, copy: async () => {}, model: async (): Promise<ModelResult> => ({ ok: false, reason: 'failed', detail: '', ms: 1 }), listDirs: async () => [], readFile: async () => null, readFrom: async () => null }
   const hung = { get: () => new Promise<never>(() => {}), set: async () => {}, delete: async () => {} }
   const wrap = (orca: Parameters<typeof createWorker>[0]) =>
     ({ ...orca, log: (m: string) => void logs.push(m), ...(opts.hang ? { storage: hung } : {}) }) as typeof orca
@@ -1307,4 +1369,14 @@ test('a hand-off saved while its run was out reads "may have started" after a re
   await restarted.worker.request('inbox.press', { terminalId: 'term-1', sessionId: S, drawn: '', id: 't3', action: 'explain' })
   assert.equal((await restarted.view()).tasks[0].handedOff, true, 'Explain replaces the label but keeps the receipt')
   await restarted.worker.deactivate()
+})
+
+test('readFromOrNull reads from an offset; a missing file or one shorter than the offset gives null', async () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'inbox-tail-')), 'session.jsonl')
+  assert.equal(await readFromOrNull(path, 0), null)
+  writeFileSync(path, 'abcdef')
+  assert.equal((await readFromOrNull(path, 2))?.toString(), 'cdef')
+  assert.equal((await readFromOrNull(path, 6))?.toString(), '')
+  writeFileSync(path, 'abc')
+  assert.equal(await readFromOrNull(path, 4), null, 'a replaced, shorter file: confirm() reads it whole')
 })

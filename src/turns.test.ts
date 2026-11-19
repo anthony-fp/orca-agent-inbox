@@ -7,6 +7,9 @@ import { EMPTY, closeItem, parseReply } from './core/ledger'
 import { readCodexTurn } from './core/codex-transcript'
 import type { ModelResult } from './model'
 import type { Finding } from './core/types'
+import { recordItem } from './core/tools'
+import { ORCA } from './core/model-text'
+import { readTurn } from './transcript'
 import { STATE_KEY, emptySession, upgradeState, type SessionState, type State } from './state'
 import { fakeClock as clockAt, rejectingStorage } from './test-clock'
 import { BUDGET, KEEP_MS, LIMIT_MS, MAX_FIELD, PANE_CAP, STAGED_PANE_CAP, createTracker, screenFor, type Clock } from './turns'
@@ -121,8 +124,16 @@ function setup(opts: { file?: () => string | null; storage?: ReturnType<typeof f
     const text = opts.file ? opts.file() : files.text
     return text === null ? null : Buffer.from(text)
   }
-  const tracker = createTracker({ storage, clock: time.clock, read, model: model.model })
-  return { tracker, storage, model, time, files }
+  const reads = { whole: 0, tails: [] as number[] }
+  const counted = async () => { reads.whole += 1; return read() }
+  // The worker's tail read: null for a file shorter than `from`.
+  const readTail = async (_id: string, from: number) => {
+    const bytes = await read()
+    reads.tails.push(from)
+    return bytes && bytes.length >= from ? bytes.subarray(from) : null
+  }
+  const tracker = createTracker({ storage, clock: time.clock, read: counted, readTail, model: model.model })
+  return { tracker, storage, model, time, files, reads }
 }
 
 /** A tracker started fresh on what the crashed one saved, reading the same file. */
@@ -239,6 +250,56 @@ describe('turn tracker', () => {
     const saved = t.storage.saved()
     assert.equal(saved.sessions[S].offset, t.files.text.length)
     assert.equal(saved.sessions[S].ledger.turn, 2)
+  })
+
+  test('three completed turns in an unchanged transcript are all queued', async () => {
+    const t = setup({ model: fakeModel(['hold']) })
+    await t.tracker.track(T, S)
+    t.files.text = turn(1) + turn(2) + turn(3)
+    void t.tracker.done(T)
+    await t.time.run(LIMIT_MS)
+    assert.deepEqual(t.storage.saved().sessions[S].queue.map(q => q.turnId), ['p-1', 'p-2', 'p-3'])
+    t.model.release()
+    await t.time.run()
+    const saved = t.storage.saved()
+    assert.equal(t.model.calls.length, 3)
+    assert.equal(saved.sessions[S].lastTurnId, 'p-3')
+    assert.equal(saved.sessions[S].offset, t.files.text.length)
+    assert.equal(saved.sessions[S].ledger.turn, 3)
+  })
+
+  test('the poll reads a Claude transcript from the session offset', async () => {
+    const t = setup({ model: fakeModel(['ok', 'hold']) })
+    await t.tracker.track(T, S)
+    t.files.text = turn(1)
+    void t.tracker.done(T)
+    await t.time.run()
+    t.files.text += turn(2)
+    void t.tracker.done(T)
+    await t.time.run(LIMIT_MS * 2)
+    assert.ok(t.reads.tails.includes(turn(1).length))
+    const whole = readTurn(Buffer.from(t.files.text), turn(1).length, 1)
+    const [queued] = t.storage.saved().sessions[S].queue
+    assert.equal(queued.nextOffset, whole?.nextOffset)
+    assert.equal(queued.exchange.turn, whole?.exchange.turn)
+    t.model.release()
+    await t.time.run()
+  })
+
+  test('a transcript replaced by a shorter file falls back to a whole read', async () => {
+    const t = setup()
+    await t.tracker.track(T, S)
+    t.files.text = turn(1) + turn(2)
+    void t.tracker.done(T)
+    await t.time.run()
+    assert.equal(t.model.calls.length, 2)
+    t.files.text = turn(3)
+    const before = t.reads.whole
+    void t.tracker.done(T)
+    await t.time.run()
+    assert.ok(t.reads.whole > before)
+    assert.equal(t.model.calls.length, 2)
+    assert.equal(t.storage.saved().sessions[S].lastTurnId, 'p-2')
   })
 
   test('a turn still pending at 15 s stays unread until the next done', async () => {
@@ -520,6 +581,38 @@ describe('Codex turns use the durable queue', () => {
       assert.deepEqual(t.storage.saved().sessions[S].queue, [])
     })
   }
+
+  test('three completed turns in an unchanged rollout are all queued', async () => {
+    const t = codexSetup(codexThree(), ['hold'])
+    await codexTrack(t)
+    await t.tracker.codexStatus(S, true)
+    await t.time.run(LIMIT_MS)
+    assert.deepEqual(t.storage.saved().sessions[S].queue.map(q => q.turnId), ['turn-1', 'turn-2', 'turn-3'])
+    t.model.release()
+    await t.time.run()
+    assert.equal(t.model.calls.length, 3)
+    assert.equal(t.storage.saved().sessions[S].lastTurnId, 'turn-3')
+    assert.equal(t.storage.saved().sessions[S].ledger.turn, 3)
+  })
+
+  test('a Codex poll reads the rollout once per tick', async () => {
+    const t = codexSetup(codexThree())
+    let reads = 0
+    let turns = 0
+    const read = async () => { reads += 1; return t.file.bytes }
+    const tracker = createTracker({
+      storage: t.storage, clock: t.time.clock, read, model: t.model.model,
+      // As the worker: it reads the rollout itself when poll passes no bytes.
+      codexTurn: async (id, offset, bytes?: Buffer) => { turns += 1; const b = bytes ?? await read(); return b ? readCodexTurn(b, offset) : null },
+    })
+    await tracker.start()
+    await tracker.track(T, S, { pane: { key: 'pane-1', codexHome: '/codex', promptHookSeen: false } })
+    await tracker.codexStatus(S, true)
+    await t.time.run()
+    assert.equal(t.model.calls.length, 3)
+    assert.ok(turns > 0)
+    assert.equal(reads, turns)
+  })
 
   test('a delayed duplicate notify after two turns cannot block turn three across a restart', async () => {
     const storage = fakeStorage()
@@ -825,5 +918,105 @@ describe('failed writes', () => {
     await second
     assert.deepEqual(t.tracker.state().sessions[S].ledger.findings.map(f => f.id), ['i1', 'i2'])
     assert.deepEqual(t.saved().sessions[S].ledger.findings.map(f => f.id), ['i1', 'i2'])
+  })
+
+  test('an undoOnFail edit whose undo a later edit skips rejects as maybe saved', async () => {
+    const t = await failing()
+    t.fails.next = 1
+    const first = t.tracker.edit(S, addFinding(FOUND), { undoOnFail: true })
+    const second = t.tracker.edit(S, addFinding(OTHER))
+    await assert.rejects(first, (e: { maybeSaved?: boolean }) => e.maybeSaved === true)
+    await second
+  })
+
+  const S2 = 'session-2'
+  const QUESTION = { kind: 'question', ask: 'Use the staging database for tests?', options: ['Yes', 'No'] }
+  /** A record tool call as an edit: its result is the text the agent reads. */
+  const record = (out: { result?: string }) => (s: SessionState) => {
+    const r = recordItem(ORCA, s.ledger, QUESTION, 0)
+    out.result = r.result
+    return { ...s, ledger: r.ledger }
+  }
+
+  /** Storage whose writes wait, while `held`, until `release` settles them in order; a write in `rejects` rejects. */
+  async function held(initial: unknown = null) {
+    const time = fakeClock()
+    let saved: unknown = initial
+    const waiting: (() => void)[] = []
+    const ctl = { held: false, rejects: new Set<number>(), writes: 0 }
+    const storage = {
+      get: async () => structuredClone(saved),
+      set: (_key: string, value: unknown) => {
+        const n = ctl.writes++
+        const settle = (ok: () => void, fail: (e: Error) => void) => ctl.rejects.has(n) ? fail(new Error('value exceeds 262144 bytes')) : (saved = structuredClone(value), ok())
+        return new Promise<void>((ok, fail) => ctl.held ? waiting.push(() => settle(ok, fail)) : settle(ok, fail))
+      },
+    }
+    const tracker = createTracker({ storage, clock: time.clock, read: async () => null, model: fakeModel().model })
+    await tracker.start()
+    await time.run()
+    const release = () => { ctl.held = false; for (const go of waiting.splice(0)) go() }
+    return { tracker, time, ctl, release, saved: () => saved as State }
+  }
+
+  test('an undoOnFail edit is undone when another session saves before its write rejects', async () => {
+    const t = await held()
+    await t.tracker.track(T, S)
+    await t.tracker.track('terminal-2', S2)
+    t.ctl.held = true
+    t.ctl.rejects = new Set([t.ctl.writes, t.ctl.writes + 1])
+    const a = t.tracker.edit(S, record({}), { undoOnFail: true })
+    const b = t.tracker.edit(S2, s => ({ ...s, cwd: '/w' }))
+    t.release()
+    await assert.rejects(a)
+    await assert.rejects(b)
+    assert.deepEqual(t.tracker.state().sessions[S].ledger.items, [])
+  })
+
+  test('a failed undoOnFail edit rejects only once its undo is written', async () => {
+    const t = await held()
+    await t.tracker.track(T, S)
+    t.ctl.held = true
+    t.ctl.rejects = new Set([t.ctl.writes])
+    let settled = false
+    const a = t.tracker.edit(S, record({}), { undoOnFail: true }).finally(() => { settled = true })
+    a.catch(() => undefined)
+    const ticks = async () => { for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)) }
+    await ticks()
+    t.release()
+    t.ctl.held = true
+    await ticks()
+    assert.equal(settled, false, 'edit rejected before its undo was written')
+    t.release()
+    await assert.rejects(a)
+    assert.deepEqual(t.saved().sessions[S].ledger.items, [])
+  })
+
+  test('a failed undoOnFail edit whose undo write also fails rejects as maybe saved', async () => {
+    const t = await held()
+    await t.tracker.track(T, S)
+    t.ctl.rejects = new Set([t.ctl.writes, t.ctl.writes + 1])
+    await assert.rejects(t.tracker.edit(S, record({}), { undoOnFail: true }), (e: { maybeSaved?: boolean }) => e.maybeSaved === true)
+  })
+
+  test('a failed undoOnFail edit stays out of storage after a later save succeeds', async () => {
+    const t = await held()
+    await t.tracker.track(T, S)
+    await t.tracker.track('terminal-2', S2)
+    t.ctl.held = true
+    t.ctl.rejects = new Set([t.ctl.writes])
+    const a = t.tracker.edit(S, record({}), { undoOnFail: true })
+    const b = t.tracker.edit(S2, s => ({ ...s, cwd: '/w' }))
+    t.release()
+    await assert.rejects(a)
+    await b
+    await t.time.run()
+    assert.deepEqual(t.saved().sessions[S].ledger.items, [])
+    const next = await held(t.saved())
+    assert.deepEqual(next.tracker.state().sessions[S].ledger.items, [])
+    const out: { result?: string } = {}
+    await next.tracker.edit(S, record(out), { undoOnFail: true })
+    assert.match(out.result ?? '', /^Recorded\./)
+    assert.equal(next.tracker.state().sessions[S].ledger.items.length, 1)
   })
 })
