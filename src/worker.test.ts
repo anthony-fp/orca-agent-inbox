@@ -9,10 +9,11 @@ import { drawnToken } from './presses'
 import { emptySession, type CurrentState, type State } from './state'
 import { fakeClock } from './test-clock'
 import { PRUNE_MS } from './turns'
-import { RELOAD_MS, createWorker, liveTools, readFromOrNull } from './worker'
+import { RELOAD_MS, createWorker, liveStore, liveTools, readFromOrNull, type WorkerDeps } from './worker'
+import { fileStore } from './file-store'
 // @ts-expect-error: a plain Node script with no types
 import { ask } from '../bin/ask.mjs'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { binPaths } from './socket'
@@ -39,7 +40,7 @@ const openLedger = () => {
   return applyUpdate(EMPTY, u, 0, 1)
 }
 
-async function setup(opts: { state?: State; storage?: Record<string, unknown>; files?: Record<string, string>; unreadable?: string[]; agents?: unknown[]; copyFails?: boolean; list?: unknown[]; truncated?: boolean; socket?: string; clockAt?: number; orca?: (args: string[]) => Promise<OrcaReply>; terminals?: string[] | OrcaReply; rejects?: (value: unknown) => boolean; codexRollout?: (home: string, threadId: string) => Promise<{ path: string; cwd: string } | null> } = {}) {
+async function setup(opts: { state?: State; storage?: Record<string, unknown>; files?: Record<string, string>; unreadable?: string[]; agents?: unknown[]; copyFails?: boolean; list?: unknown[]; truncated?: boolean; socket?: string; clockAt?: number; orca?: (args: string[]) => Promise<OrcaReply>; terminals?: string[] | OrcaReply; rejects?: (value: unknown) => boolean; codexRollout?: (home: string, threadId: string) => Promise<{ path: string; cwd: string } | null>; store?: WorkerDeps['store'] } = {}) {
   const time = fakeClock(opts.clockAt ?? 100 * DAY)
   const files = new Map(Object.entries(opts.files ?? {}))
   const reads: string[] = []
@@ -81,6 +82,7 @@ async function setup(opts: { state?: State; storage?: Record<string, unknown>; f
     listDirs: async (path: string) =>
       [...new Set([...files.keys()].filter(f => f.startsWith(`${path}/`)).map(f => f.slice(path.length + 1).split('/')[0]))],
     codexRollout: opts.codexRollout,
+    store: opts.store,
     readFile: async (path: string) => {
       reads.push(path)
       if (opts.unreadable?.includes(path)) throw new Error('EACCES: permission denied')
@@ -1233,6 +1235,63 @@ test('the hook is registered before the state loads: a launch while storage neve
 test("a worker that orca plugin check or test starts gets no socket, so it never replaces the live worker's", () => {
   assert.equal(liveTools({ ORCA_PLUGIN_TEST_ROOT: '/some/plugin' }), null)
   assert.match(liveTools({})?.socketPath ?? '', /worker\.sock$/)
+})
+
+test('the tracker saves through the injected store, and snoozes stay in Orca storage', async () => {
+  const ledger = openLedger()
+  const id = ledger.items[0].id
+  const state: State = { version: 3, terminals: { 'term-1': { sessionId: S } }, panes: {}, paneLaunches: {}, sessions: { [S]: { ...emptySession(100 * DAY), ledger } } }
+  const kept = new Map<string, unknown>([['state', state]])
+  const store: WorkerDeps['store'] = () => ({ get: async key => kept.get(key) ?? null, set: async (key, value) => void kept.set(key, value) })
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  const agents = [{ terminalId: 'term-1', title: 'Agent', agent: 'claude', state: 'done', stateStartedAt: 1 }]
+  const t = await setup({ socket, store, agents })
+  try {
+    assert.match(JSON.stringify(await ask(socket, { type: 'record', sessionId: S, args: { kind: 'question', ask: 'Stored?', options: ['Yes', 'No'] } }, 2000)), /Recorded/)
+    assert.ok((kept.get('state') as CurrentState).sessions[S].ledger.items.some(i => i.ask === 'Stored?'))
+    const storage = () => (t.host.data() as { storage: Record<string, unknown> }).storage
+    assert.equal(storage().state, undefined, 'the host storage has no state write')
+    const until = 100 * DAY + 60 * 60 * 1000
+    assert.deepEqual(await t.worker.request('inbox.snooze', { sessionId: S, id, until }), { ok: true })
+    assert.deepEqual(storage().snoozes, { [`${S}:${id}`]: until })
+    assert.equal(kept.has('snoozes'), false)
+  } finally {
+    await t.close()
+    await t.worker.deactivate()
+  }
+})
+
+test('a worker that orca plugin check or test starts gets no file store and creates no file', () => {
+  const home = mkdtempSync(join(tmpdir(), 'oai-'))
+  assert.equal(liveStore({ ORCA_PLUGIN_TEST_ROOT: '/x' }, home), undefined)
+  assert.deepEqual(readdirSync(home), [])
+  assert.equal(typeof liveStore({}, home), 'function')
+  assert.deepEqual(readdirSync(home), [], 'making the hook touches no file')
+})
+
+test('a state file that upgradeState rejects stays byte-identical through tracking and record calls', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'oai-'))
+  const bad = JSON.stringify({ version: 3, terminals: {}, panes: {}, paneLaunches: {}, sessions: { [S]: { ...emptySession(100 * DAY), ledger: { ...EMPTY, items: [null] } } } })
+  writeFileSync(join(dir, 'state.json'), bad)
+  const socket = join(mkdtempSync(join(tmpdir(), 'oai-')), 'w.sock')
+  const t = await setup({ socket, files: { [FILE]: prompt('p-1', 'Hi') }, store: (backup, log) => fileStore({ dir, backup, log }) })
+  try {
+    // The start does real file work, which setup's fake-clock run does not wait for.
+    const failed = () => t.worker.logs.some(l => l.startsWith('start:') && l !== 'start: hooks registered')
+    for (let i = 0; i < 200 && !failed(); i++) await new Promise(r => setTimeout(r, 10))
+    assert.ok(failed(), `logs: ${t.worker.logs.join(' | ')}`)
+    await t.worker.hooks.fire('agent.launch.before', launch(`claude --session-id ${S}`))
+    await t.worker.emit('agent.status.changed', status('working'))
+    await t.time.run()
+    const answer = await ask(socket, { type: 'record', sessionId: S, args: { kind: 'question', ask: 'Saved?', options: ['Yes', 'No'] } }, 2000)
+    // The latched save rejects, and so does the save of the undo (src/turns.ts:518-519): the agent hears "may have been saved".
+    assert.deepEqual(answer, { maybeSaved: true })
+    assert.equal(readFileSync(join(dir, 'state.json'), 'utf8'), bad)
+    assert.deepEqual(readdirSync(dir).filter(n => n.startsWith('state.json.tmp-')), [])
+  } finally {
+    await t.close()
+    await t.worker.deactivate()
+  }
 })
 
 const HANDOFF_ISSUE: Finding = { id: 'i7', kind: 'issue', title: 'The retry loop never backs off!', detail: 'Each retry fires at once.', path: 'src/fetch.ts', at: 0 }

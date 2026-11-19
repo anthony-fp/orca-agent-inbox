@@ -183,8 +183,8 @@ Not run yet. It runs after the plugin is installed. Commits: `a3b31b3`, `af6b738
 
 | Check | Result |
 |---|---|
-| For 1 hour, the plugin log shows no new `value exceeds` or `turns: save failed` line | Pending. |
-| The stored `paneLaunches` holds no pane older than 7 days without a live terminal, and at most 200 entries | Pending. |
+| For 1 hour, the plugin log shows no new `value exceeds` or `turns: save failed` line | Fail (2026-11-19, 0.4.6). Every save fails: lines at 13:57–14:00Z, after the 0.4.6 load. The state is 259,994 bytes; 206 KB of it is sessions with an open row, which `evictable` always keeps (`src/turns.ts:106`). Only 10 KB can go. |
+| The stored `paneLaunches` holds no pane older than 7 days without a live terminal, and at most 200 entries | Partly pass (2026-11-19). 7 entries. 5 are 8.9–13.1 days old with no live terminal, but each is bound in `state.panes`, which `trimPanes` keeps by design (`src/turns.ts:79`). |
 
 ## Chat UI note under "not tracked" (0.4.5) — pending
 
@@ -192,7 +192,7 @@ Not run yet. It runs after the plugin is installed.
 
 | Check | Result |
 |---|---|
-| With one or more agents not tracked, the panel footer shows the chat UI note under the count | Pending. |
+| With one or more agents not tracked, the panel footer shows the chat UI note under the count | Pass (2026-11-19, 0.4.6, seen with `orca plugin shot`). Under "1 agent not tracked": "Agents started from Orca's chat UI can't be tracked. Start Claude Code or Codex in a terminal tab instead." |
 
 ## Chat sessions T1: a user `--plugin-dir` beside Orca's own (2026-11-17, Orca 1.4.261)
 
@@ -210,6 +210,19 @@ Not run yet. It runs after the plugin is installed.
 
 | Check | Result |
 |---|---|
-| A record call during a slow save says "may have been saved", and a repeat call gives "Already open." | Pending. |
-| Press an option in a terminal, then close the terminal. The plugin log shows no more confirm reads for it after the next list (60 s) | Pending. |
-| Activity Monitor: the worker's CPU at rest with 5 or more agents stays near 0 % | Pending. |
+| A record call during a slow save says "may have been saved", and a repeat call gives "Already open." | Partly pass (2026-11-19). A test agent (`term_3b11e10e`) called `record` twice; both calls returned "may have been saved". The repeat did not give "Already open.": every save fails here (storage over the limit), so the undo runs in memory and the repeat records again (`src/turns.ts:517`). `bin/mcp-server.mjs --timeout 1` on the live socket also returned "may have been saved". A slow save that succeeds was not reached. |
+| Press an option in a terminal, then close the terminal. The plugin log shows no more confirm reads for it after the next list (60 s) | Not run. No row could be saved to press (storage over the limit), and the log shows only failed confirm reads (`src/presses.ts:315`), so a clean read leaves no line. |
+| Activity Monitor: the worker's CPU at rest with 5 or more agents stays near 0 % | Pass by `top`, not Activity Monitor (2026-11-19). 13 agent terminals. Worker pid 59385: 0.0 % in 12 samples over 60 s; 3.4 s CPU in its first 6 minutes. |
+
+## File store (0.4.7) — pending
+
+Not run yet. It runs after the plugin is installed. The dev plugin already runs from this worktree, so `~/.orca-agent-inbox/owner`, `state.json` and `state.json.from` exist from the F4 save at 10:34 on 2026-11-19.
+
+| Check | Result |
+|---|---|
+| After install, `~/.orca-agent-inbox/state.json` exists with mode 0600 and the folder with mode 0700. The mtime of `state.json` changes on a `record` | Pending. |
+| After a `record`, the `state` value inside Orca's `storage.json` is unchanged. Compare the value of the key, not the file size: snoozes still write that file | Pending. |
+| Run `orca plugin dev load .` twice in a row. The log shows `turns: another worker owns the state` from the old worker, and the saves of the newer worker land | Pending. |
+| The 2026-11-19 failure is gone: a `record` with the state over 262144 bytes says "Recorded." | Pending. |
+| `~/.orca-agent-inbox/state.json.from` exists after the first start | Pending. |
+| Load 0.4.6, `record` a row, then load 0.4.7. A `state.json.pre-rollback-*` file exists, and the panel shows the 0.4.6 row | Pending. |

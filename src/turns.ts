@@ -57,7 +57,7 @@ export const MAX_FAILURES = 3
 export const PRUNE_MS = 7 * 24 * 60 * 60 * 1000
 /** A session touched in the last 24 h is kept: a terminal opened since the last terminal list is not in it yet. */
 export const KEEP_MS = 24 * 60 * 60 * 1000
-/** Save drops evictable sessions, oldest first, while the state is over this size. Orca rejects a value over 262144 bytes. */
+/** Save drops evictable sessions, oldest first, while the state is over this size. The budget bounds growth. */
 export const BUDGET = 200_000
 
 /** Save keeps at most this many launch times and panes of staged Codex turns, newest first, beside the kept panes. */

@@ -9,6 +9,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { OrcaWorkerApi } from 'orca/worker'
 
 import { copyToClipboard } from './clipboard'
+import { fileStore } from './file-store'
 import { launchOf, runOrca, type OrcaReply } from './orca-cli'
 import { parsePlan, planGoal, planNote, planPath, type PlanView } from './core/plan'
 import { codexResumeStart, codexToolTurn, readCodexTurn, rolloutFor } from './core/codex-transcript'
@@ -19,7 +20,7 @@ import type { CopyOutcome, HandoffOutcome, InboxSection, InboxView, OpenOutcome,
 import { HANDLE, binPaths, createAnswerer, listen, socketPath, stableBinPaths } from './socket'
 import { emptySession, type Handoff, type PressLabel } from './state'
 import { cwdOf, promptsBefore, wholeLinesEnd } from './transcript'
-import { createTracker, type Clock, type TrackerDeps } from './turns'
+import { createTracker, type Clock, type Storage, type TrackerDeps } from './turns'
 
 const STATES = ['working', 'blocked', 'waiting', 'done']
 /** How often the worker lists live terminals for the retention rule (src/turns.ts evictable). */
@@ -43,6 +44,8 @@ export type WorkerDeps = {
   copy(text: string): Promise<void>
   /** Runs `orca <args> --json` (src/orca-cli.ts). It never throws. */
   orca(args: string[]): Promise<OrcaReply>
+  /** Where the tracker keeps the state, over Orca storage as its backup (src/file-store.ts). None: Orca storage. */
+  store?(backup: OrcaWorkerApi['storage'], log: (m: string) => void): Storage
 }
 
 type PlanRead = { plan: PlanView | null; error: string | null; goal: string | null }
@@ -348,7 +351,7 @@ export function createWorker(orca: OrcaWorkerApi, deps: WorkerDeps): { listening
   listing.unref?.()
 
   const tracker = createTracker({
-    storage: orca.storage,
+    storage: deps.store?.(orca.storage, log) ?? orca.storage,
     live: () => live,
     clock: deps.clock,
     read,
@@ -784,6 +787,11 @@ export function liveTools(env: NodeJS.ProcessEnv): WorkerDeps['tools'] {
   return env.ORCA_PLUGIN_TEST_ROOT ? null : { socketPath: socketPath(), ...binPaths() }
 }
 
+/** The state file in `~/.orca-agent-inbox`. None under `orca plugin check` and `orca plugin test`: Orca's own storage, so a test run never touches the folder. */
+export function liveStore(env: NodeJS.ProcessEnv, home = homedir()): WorkerDeps['store'] {
+  return env.ORCA_PLUGIN_TEST_ROOT ? undefined : (backup, log) => fileStore({ dir: join(home, '.orca-agent-inbox'), backup, log })
+}
+
 export default function activate(orca: OrcaWorkerApi): void {
   worker = createWorker(orca, {
     clock: realClock,
@@ -795,6 +803,7 @@ export default function activate(orca: OrcaWorkerApi): void {
     copy: text => copyToClipboard(text),
     orca: args => runOrca(args),
     tools: liveTools(process.env),
+    store: liveStore(process.env),
   })
 }
 
